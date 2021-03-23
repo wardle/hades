@@ -3,50 +3,15 @@
             [clojure.walk :as walk]
             [clojure.string :as str]
             [com.eldrix.hermes.snomed :as snomed])
-  (:import (org.hl7.fhir.r4.model Parameters Base Parameters$ParametersParameterComponent StringType BooleanType CodeableConcept Coding CodeType)
+  (:import (org.hl7.fhir.r4.model Parameters Base Parameters$ParametersParameterComponent StringType BooleanType CodeableConcept Coding CodeType ValueSet$ValueSetExpansionContainsComponent ValueSet$ConceptReferenceDesignationComponent)
            (java.util List Locale)
-           (clojure.lang Keyword)
            (com.eldrix.hermes.service SnomedService)
-           (com.eldrix.hermes.snomed Description)
-           (java.time LocalDate)
-           (java.time.format DateTimeFormatter)))
+           (com.eldrix.hermes.snomed Description Result)
+           (java.time.format DateTimeFormatter)
+           (ca.uhn.fhir.rest.server.exceptions NotImplementedOperationException)))
 
 (def snomed-system-uri "http://snomed.info/sct")
 
-(comment
-
-
-  (require '[clojure.walk :as walk])
-  (walk/postwalk-demo fake-parameters)
-
-  (reduce-kv (fn [r k v] (.addParameter r (make-parameter-component k v))) (Parameters.) fake-parameters)
-  )
-
-
-(defn ^Parameters make-extended-concept-parameters
-  [{:keys [concept descriptions preferred-description parent-relationships direct-parent-relationships refsets]}]
-  (doto (Parameters.)
-    (.setParameter "name" "SNOMED CT")                      ;;  TODO: get metadata from our index
-    (.setParameter "version" "LATEST")                      ;; TODO: include version string http://snomed.info/sct/xxxxxxxx/version/yyyymmdd
-    (.setParameter "display" ^String (:term preferred-description))
-    (.addParameter (doto (Parameters$ParametersParameterComponent. (StringType. "property"))
-                     (-> (.addPart)
-                         (.setName "code")
-                         (.setValue (CodeType. "parent")))
-                     (-> (.addPart)
-                         (.setName "value")
-                         (.setValue (CodeType. "278844005")))))
-    (.addParameter (doto (Parameters$ParametersParameterComponent. (StringType. "designation"))
-                     (-> (.addPart)
-                         (.setName "language")
-                         (.setValue (CodeType. "en")))
-                     (-> (.addPart)
-                         (.setName "use")
-                         (.setValue (Coding. "http://snomed.info/sct" "900000000000013009" "Synonym")))
-                     (-> (.addPart)
-                         (.setName "value")
-                         (.setValue (StringType. "Gender")))
-                     ))))
 
 (def test-map {"name"        "SNOMED CT"
                "version"     "LATEST"
@@ -162,6 +127,44 @@
                     (svc/subsumedBy? svc codeB' codeA') "subsumes" ;; A subsumes B
                     :else "not-subsumed")}))))
 
+
+(defn parse-implicit-value-set
+  "Parse a FHIR value set from a single URL into an expression constraint.
+
+  FHIR provides implicit value setsSee https://www.hl7.org/fhir/snomedct.html#implicit
+  to reference a value set based on reference set or by subsumption.
+  The URI may contain specific *edition* information.
+  - http://snomed.info/sct   - latest edition
+  - http://snomed.info/sct/900000000000207008 - International edition
+  - http://snomed.info/sct/900000000000207008/version/20130731 - International edition, 2013-07-31
+
+  but these examples use the latest:
+  - http://snomed.info/sct?fhir_vs  - all concepts
+  - http://snomed.info/sct?fhir_vs=isa/[sctid] - all concepts subsumed by specified concept
+  - http://snomed.info/sct?fhir_vs=refset - all concepts in a refset
+  - http://snomed.info/sct?fhir_vs=refset/[sctid] - all conceots in the reference set
+  - http://snomed.info/sct?fhir_vs=ec/[ecl] - all concepts matching the ECL."
+  [uri]
+  (let [[_ _ edition _ version query] (re-matches #"http://snomed.info/sct(/(\d*))?(/version/(\d{8}))?\?fhir_vs(.*)" uri)]
+    (println "query " query)
+    (cond
+      (nil? query) nil
+      (= query "") "*"
+      (str/starts-with? query "=isa/") (str "<" (subs query 5))
+      (= "=refset" query) (throw (NotImplementedOperationException. "Valueset for all concepts in any refset not implemented"))
+      (str/starts-with? query "=refset/") (str "^" (subs query 8))
+      (str/starts-with? query "=ec/") (subs query 4)
+      :else (throw (NotImplementedOperationException. (str "Valueset for '" uri "' not implemented"))))))
+
+(defn ^ValueSet$ValueSetExpansionContainsComponent result->vs-component
+  "Turn a SNOMED search result into a FHIR ValueSetExpansion Component"
+  [^Result result]
+  (doto (ValueSet$ValueSetExpansionContainsComponent.)
+    (.setCode (str (:conceptId result)))
+    (.setSystem snomed-system-uri)
+    (.setDisplay (:preferredTerm result))
+    (.setDesignation [(ValueSet$ConceptReferenceDesignationComponent. (StringType. (:term result)))])))
+
 (comment
   (def svc (com.eldrix.hermes.terminology/open "/Users/mark/Dev/hermes/snomed.db"))
   (require '[com.eldrix.hermes.service :as svc])
@@ -170,5 +173,8 @@
   (svc/getConcept svc 163271000000103)
   (svc/getPreferredSynonym svc 900000000000013009 "en-GB")
 
-  (filter #(= (:moduleId (svc/getConcept svc 163271000000103)) (:moduleId %)) (svc/getReleaseInformation svc))
+  (= "^123" (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=refset/123"))
+  (= "<24700007" (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=isa/24700007"))
+  (= "*" (parse-implicit-value-set "http://snomed.info/sct?fhir_vs"))
+  (= nil (parse-implicit-value-set "http://snomed.info/sct?fhirvs=refset/123"))
   )

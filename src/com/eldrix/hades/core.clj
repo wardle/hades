@@ -14,7 +14,8 @@
            (ca.uhn.fhir.rest.server.interceptor ResponseHighlighterInterceptor)
            (org.eclipse.jetty.server Server ServerConnector)
            (ca.uhn.fhir.rest.annotation OperationParam)
-           (org.hl7.fhir.r4.model CodeSystem)))
+           (org.hl7.fhir.r4.model CodeSystem ValueSet ValueSet$ValueSetExpansionComponent)
+           (java.util Locale)))
 
 (definterface LookupCodeSystemOperation
   (^org.hl7.fhir.r4.model.Parameters lookup [^ca.uhn.fhir.rest.param.StringParam code
@@ -31,6 +32,24 @@
                                                ^ca.uhn.fhir.rest.param.StringParam version
                                                ^ca.uhn.fhir.rest.param.TokenParam codingA
                                                ^ca.uhn.fhir.rest.param.TokenParam codingB]))
+
+(definterface ExpandValueSetOperation
+  (^org.hl7.fhir.r4.model.ValueSet expand [^ca.uhn.fhir.rest.param.UriParam url
+                                           ^ca.uhn.fhir.rest.param.UriParam context
+                                           ^ca.uhn.fhir.rest.param.TokenParam contextDirection
+                                           ^ca.uhn.fhir.rest.param.StringParam filter
+                                           ^ca.uhn.fhir.rest.param.DateParam date
+                                           ^ca.uhn.fhir.rest.param.NumberParam offset
+                                           ^ca.uhn.fhir.rest.param.NumberParam count
+                                           ^ca.uhn.fhir.rest.param.StringParam includeDesignations
+                                           ^ca.uhn.fhir.rest.param.StringParam designation
+                                           ^ca.uhn.fhir.rest.param.StringParam includeDefinition
+                                           ^ca.uhn.fhir.rest.param.StringParam activeOnly
+                                           ^ca.uhn.fhir.rest.param.StringParam excludeNested
+                                           ^ca.uhn.fhir.rest.param.StringParam excludeNotForUI
+                                           ^ca.uhn.fhir.rest.param.StringParam excludePostCoordinated
+                                           ^ca.uhn.fhir.rest.param.TokenParam displayLanguage
+                                           ]))
 
 (deftype CodeSystemResourceProvider [^SnomedService svc]
   IResourceProvider
@@ -62,19 +81,56 @@
               ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "version"}} version
               ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "codingA"}} codingA
               ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "codingB"}} codingB]
-    (println "codesystem/$subsumes: " {:codeA codeA :codeB codeB :system system :version version :codingA codingA :codingB codingB})
+    (log/debug "codesystem/$subsumes: " {:codeA codeA :codeB codeB :system system :version version :codingA codingA :codingB codingB})
     (cond
       (and codeA codeB system)
       (convert/subsumes? :svc svc :systemA (.getValue system) :codeA (.getValue codeA) :systemB (.getValue system) :codeB (.getValue codeB))
       (and codingA codingB)
       (convert/subsumes? :svc svc :systemA (.getSystem codingA) :codeA (.getValue codingA) :systemB (.getSystem codingB) :codeB (.getValue codingB)))))
 
+(deftype ValueSetResourceProvider [^SnomedService svc]
+  IResourceProvider
+  (getResourceType [_this] ValueSet)
+  ;;;;;;;;;;;;;;;;;;;;;;;
+  ExpandValueSetOperation
+  (^{:tag                                  org.hl7.fhir.r4.model.ValueSet
+     ca.uhn.fhir.rest.annotation.Operation {:name "expand" :idempotent true}}
+    expand [_this
+            ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "url"}} url
+            ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "context"}} context
+            ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "contextDirection"}} contextDirection
+            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "filter"}} param-filter
+            ^{:tag ca.uhn.fhir.rest.param.DateParam OperationParam {:name "date"}} date
+            ^{:tag ca.uhn.fhir.rest.param.NumberParam OperationParam {:name "offset"}} offset
+            ^{:tag ca.uhn.fhir.rest.param.NumberParam OperationParam {:name "count"}} param-count
+            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "includeDesignations"}} includeDesignations
+            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "designation"}} designation
+            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "includeDefinition"}} includeDefinition
+            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "activeOnly"}} activeOnly
+            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludeNested"}} excludeNested
+            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludeNotForUI"}} excludeNotForUI
+            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludePostCoordinated"}} excludePostCoordinated
+            ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "displayLanguage"}} displayLanguage]
+    (log/debug "valueset/$expand:" {:url url :filter filter :activeOnly activeOnly :displayLanguage displayLanguage})
+    (let [constraint (convert/parse-implicit-value-set (.getValue url))
+          constraint' (if-not filter
+                        constraint
+                        (str constraint " {{ term = \"" (.getValue param-filter) "\", type = syn, dialect = (" (or displayLanguage (.toLanguageTag (Locale/getDefault))) ")  }}"))
+          _ (println "constraint = " constraint')
+          results (svc/search svc {:constraint constraint'})
+          components (map convert/result->vs-component results)]
+      (println "results: " results)
+      (println "components: " components)
+      (doto (ValueSet.)
+        (.setExpansion (doto (ValueSet$ValueSetExpansionComponent.)
+                         (.setTotal (count results) )
+                         (.setContains components)))))))    ;; components = ValueSetExpansionContainsComponent
 
 (defn ^Servlet make-r4-servlet [^SnomedService svc]
   (proxy [RestfulServer] [(FhirContext/forR4)]
     (initialize []
-      (log/info "Initialising HL7 FHIR R4 server; providers: CodeSystem")
-      (.setResourceProviders this [(CodeSystemResourceProvider. svc)])
+      (log/info "Initialising HL7 FHIR R4 server; providers: CodeSystem ValueSet")
+      (.setResourceProviders this [(CodeSystemResourceProvider. svc) (ValueSetResourceProvider. svc)])
       (log/debug "Resource providers:" (seq (.getResourceProviders this)))
       (.registerInterceptor this (ResponseHighlighterInterceptor.)))))
 
@@ -116,7 +172,7 @@
   (svc/search svc {:s "mnd"})
   (svc/getConcept svc 24700007)
 
-  (svc/getConcept svc 24700007)
+  (svc/getPreferredSynonym svc 233753001 "en")
   (svc/getReleaseInformation svc)
   (keys (svc/getExtendedConcept svc 138875005))
   (get-in (svc/getExtendedConcept svc 24700007) [:parent-relationships com.eldrix.hermes.snomed/IsA])

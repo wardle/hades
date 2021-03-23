@@ -66,20 +66,21 @@ Result:
 
 see https://confluence.ihtsdotools.org/display/FHIR/Implementing+Terminology+Services+with+SNOMED+CT
 
-The operations that are currently implemented are:
+The operations that are currently implemented (although are still under
+continued refinement and development) are:
 
 - $lookup (on CodeSystem resource)    
 - $subsumes (on CodeSystem resource)
+- $expand (on ValueSet resource) - e.g. ECL, filters
 
 The operations that still need to be implemented are:
 
-- $expand (on ValueSet resource) - e.g. ECL, filters
 - $closure (on ConceptMap resource)
 - $translate (on ConceptMap resource)
 - $validate-code (on ValueSet resource)
 - $validate-code (on CodeSystem resource)
 
-Resource implementations needed for 
+Resource implementations are needed for 
 
 - CodeSystem  - e.g. list all code systems available    (higher-order services might compose the results for example)
 
