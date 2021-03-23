@@ -127,7 +127,7 @@
                               snomed/FullySpecifiedName (svc/getPreferredSynonym svc snomed/FullySpecifiedName lang)}
           core-release-information (first (svc/getReleaseInformation svc))]
       (make-parameters
-        {"system"      (:term core-release-information)
+        {"name"        (:term core-release-information)
          "version"     (str "http://snomed.info/sct/" (:moduleId core-release-information) "/" (.format (DateTimeFormatter/BASIC_ISO_DATE) (:effectiveTime core-release-information))) ;; FIXME: version from module from the concept at hand?
          "display"     preferred-description
          "property"    (concat
