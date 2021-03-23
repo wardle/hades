@@ -1,0 +1,71 @@
+{:paths   ["src" "resources"]
+
+ :deps    {org.clojure/clojure            {:mvn/version "1.11.0-alpha1"}
+           org.clojure/tools.logging      {:mvn/version "1.1.0"}
+           ch.qos.logback/logback-classic {:mvn/version "1.2.3"}
+
+
+           ca.uhn.hapi.fhir/hapi-fhir-base          {:mvn/version "5.3.0"}
+           ca.uhn.hapi.fhir/hapi-fhir-server        {:mvn/version "5.3.0"}
+           ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "5.3.0"}
+
+           com.eldrix/hermes              {:git/url "https://github.com/wardle/hermes.git"
+                                           :sha     "52eede0be544425913a698bf61621eb3fc180490"}
+
+           }
+
+ :aliases {:run
+           {:main-opts ["-m" "com.eldrix.hades.core"]}
+
+           :socket
+           {:jvm-opts ["-Dclojure.server.repl={:port,50505,:accept,clojure.core.server/repl}"]}
+
+           :test
+           {:extra-paths ["test" "test/resources"]
+            :extra-deps  {com.cognitect/test-runner
+                          {:git/url "https://github.com/cognitect-labs/test-runner.git"
+                           :sha     "b6b3193fcc42659d7e46ecd1884a228993441182"}}
+            :main-opts   ["-e" "(compile,'com.eldrix.hades.core)"
+                          "-m" "cognitect.test-runner"
+                          "-d" "test"]}
+
+           :outdated
+           {:extra-deps {antq/antq {:mvn/version "RELEASE"}}
+            :main-opts  ["-m" "antq.core"]}
+
+           :check
+           {:extra-deps {athos/clj-check
+                         {:git/url "https://github.com/athos/clj-check.git"
+                          :sha     "cd1f25456de5eebda0a69602dd3445905382b3a4"}}
+            :main-opts  ["-m" "clj-check.check"]}
+
+           :test/cloverage
+           {:extra-paths ["test"]
+            :extra-deps  {cloverage/cloverage {:mvn/version "RELEASE"}}
+            :main-opts   ["-m" "cloverage.coverage"
+                          "--src-ns-path" "src"
+                          "--test-ns-path" "test"]
+            :exec-fn     cloverage.coverage/run-project
+            :exec-args   {:src-ns-path  ["src"]
+                          :test-ns-path ["test"]}}
+
+           :lint/kondo
+           {:extra-deps {clj-kondo/clj-kondo {:mvn/version "RELEASE"}}
+            :main-opts  ["-m" "clj-kondo.main" "--lint" "src"]}
+
+           :lint/eastwood
+           {:main-opts  ["-m" "eastwood.lint" {:source-paths ["src"]}]
+            :extra-deps {jonase/eastwood {:mvn/version "RELEASE"}}}
+
+           :jar
+           {:replace-deps {seancorfield/depstar {:mvn/version "2.0.171"}}
+            :exec-fn      hf.depstar/jar
+            :exec-args    {:jar "target/hades-v0.1.0.jar"}}
+
+           :uberjar
+           {:replace-deps {seancorfield/depstar {:mvn/version "2.0.171"}}
+            :exec-fn      hf.depstar/uberjar
+            :exec-args    {:jar        "target/hades-full-v0.1.0.jar"
+                           :aot        true
+                           :main-class "com.eldrix.hermes.core"}}}}
+
