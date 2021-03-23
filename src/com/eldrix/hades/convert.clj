@@ -11,8 +11,7 @@
            (java.time LocalDate)
            (java.time.format DateTimeFormatter)))
 
-(def snomed-system-uris
-  #{"http://snomed.info/sct" "https://snomed.info/sct"})
+(def snomed-system-uri "http://snomed.info/sct")
 
 (comment
 
@@ -119,7 +118,7 @@
   "Lookup a SNOMED code.
   Returns properties as per https://www.hl7.org/fhir/terminology-service.html#standard-props."
   [& {:keys [^SnomedService svc ^String system ^long code ^String displayLanguage]}]
-  (when (contains? snomed-system-uris system)
+  (when (= snomed-system-uri system)
     (let [lang (or (when displayLanguage displayLanguage) (.toLanguageTag (Locale/getDefault)))
           result (svc/getExtendedConcept svc code)
           preferred-description ^String (:term (svc/getPreferredSynonym svc code lang))
@@ -152,7 +151,7 @@
   - subsumed-by
   - not-subsumed."
   [& {:keys [^SnomedService svc ^String systemA ^String codeA ^String systemB ^String codeB]}]
-  (when (and (contains? snomed-system-uris systemA) (contains? snomed-system-uris systemB)) ;;; TODO: support non SNOMED codes with automapping?
+  (when (and (= snomed-system-uri systemA) (= snomed-system-uri systemB)) ;;; TODO: support non SNOMED codes with automapping?
     (let [codeA' (Long/parseLong codeA)
           codeB' (Long/parseLong codeB)]
       (make-parameters
