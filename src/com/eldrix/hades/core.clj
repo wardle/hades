@@ -14,7 +14,7 @@
            (ca.uhn.fhir.rest.server.interceptor ResponseHighlighterInterceptor)
            (org.eclipse.jetty.server Server ServerConnector)
            (ca.uhn.fhir.rest.annotation OperationParam)
-           (org.hl7.fhir.r4.model CodeSystem Parameters)))
+           (org.hl7.fhir.r4.model CodeSystem)))
 
 (definterface LookupCodeSystemOperation
   (^org.hl7.fhir.r4.model.Parameters lookup [^ca.uhn.fhir.rest.param.StringParam code
@@ -24,9 +24,18 @@
                                              ^ca.uhn.fhir.rest.param.StringParam displayLanguage
                                              ^ca.uhn.fhir.rest.param.StringAndListParam property]))
 
+(definterface SubsumesCodeSystemOperation
+  (^org.hl7.fhir.r4.model.Parameters subsumes [^ca.uhn.fhir.rest.param.StringParam codeA
+                                               ^ca.uhn.fhir.rest.param.StringParam codeB
+                                               ^ca.uhn.fhir.rest.param.UriParam system
+                                               ^ca.uhn.fhir.rest.param.StringParam version
+                                               ^ca.uhn.fhir.rest.param.TokenParam codingA
+                                               ^ca.uhn.fhir.rest.param.TokenParam codingB]))
+
 (deftype CodeSystemResourceProvider [^SnomedService svc]
   IResourceProvider
   (getResourceType [_this] CodeSystem)
+  ;;;;;;;;;;;;;;;;;;;;;;;;;
   LookupCodeSystemOperation
   (^{:tag                                  org.hl7.fhir.r4.model.Parameters
      ca.uhn.fhir.rest.annotation.Operation {:name "lookup" :idempotent true}}
@@ -37,15 +46,38 @@
             ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "coding"}} coding
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "displayLanguage"}} displayLanguage
             ^{:tag ca.uhn.fhir.rest.param.StringAndListParam OperationParam {:name "property"}} property]
-    (println "code system $lookup operation: " {:code code :system system :version version :coding coding :lang displayLanguage :properties property})
-    (convert/lookup :svc svc :code (Long/parseLong (.getValue code)) :system (.getValue system))))
+    (log/debug "codesystem/$lookup: " {:code code :system system :version version :coding coding :lang displayLanguage :properties property})
+    (let [code' (or (when code (.getValue code)) (when coding (.getValue coding)))
+          system' (or (when system (.getValue system)) (when coding (.getSystem coding)))]
+      (convert/lookup :svc svc :code (Long/parseLong code') :system system' :displayLanguage displayLanguage)))
+
+  ;;;;;;;;;;;;;;;;;;;;;;;;;;;
+  SubsumesCodeSystemOperation
+  (^{:tag                                  org.hl7.fhir.r4.model.Parameters
+     ca.uhn.fhir.rest.annotation.Operation {:name "subsumes" :idempotent true}}
+    subsumes [_this
+              ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "codeA"}} codeA
+              ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "codeB"}} codeB
+              ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "system"}} system
+              ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "version"}} version
+              ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "codingA"}} codingA
+              ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "codingB"}} codingB]
+    (println "codesystem/$subsumes: " {:codeA codeA :codeB codeB :system system :version version :codingA codingA :codingB codingB})
+    (cond
+      (and codeA codeB system)
+      (convert/subsumes? :svc svc :system (.getValue system) :codeA (Long/parseLong (.getValue codeA)) :codeB (Long/parseLong (.getValue codeB)))
+      (and codingA codingB (= (.getSystem codingA) (.getSystem codingB)))
+      (convert/subsumes? :svc svc :system (.getSystem codingA) :codeA (Long/parseLong (.getValue codingA)) :codeB (Long/parseLong (.getValue codingB))))))
+
+
+
 
 (defn ^Servlet make-r4-servlet [^SnomedService svc]
   (proxy [RestfulServer] [(FhirContext/forR4)]
     (initialize []
       (log/info "Initialising HL7 FHIR R4 server; providers: CodeSystem")
       (.setResourceProviders this [(CodeSystemResourceProvider. svc)])
-      (println (seq (.getResourceProviders this)))
+      (log/debug "Resource providers:" (seq (.getResourceProviders this)))
       (.registerInterceptor this (ResponseHighlighterInterceptor.)))))
 
 (defn ^Server make-server [^SnomedService svc {:keys [port]}]
@@ -77,6 +109,11 @@
   (def server (make-server svc {:port 8080}))
   (.start server)
   (.stop server)
+
+  (do
+    (.stop server)
+    (def server (make-server svc {:port 8080}))
+    (.start server))
 
   (svc/search svc {:s "mnd"})
   (svc/getConcept svc 24700007)

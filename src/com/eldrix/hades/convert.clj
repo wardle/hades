@@ -143,7 +143,22 @@
                            (map #(hash-map :code :parent :value %) children)))
          "designation" (map #(description->params % usage-descriptions) (:descriptions result))}))))
 
-
+;; TODO: we could quite easily provide subsumes for other coding systems for which we have maps - eg. Read code / ICD etc...
+(defn subsumes?
+  "Test of subsumption.
+  Returns FHIR parameters with 'outcome' as one of:
+  - equivalent
+  - subsumes
+  - subsumed-by
+  - not-subsumed."
+  [& {:keys [^SnomedService svc ^String system ^long codeA ^long codeB]}]
+  (when (contains? snomed-system-uris system)
+    (make-parameters
+      {:outcome (cond
+                  (= codeA codeB) "equivalent"              ;; TODO: other equivalence checks?  (e.g. use SAME_AS reference set for example?
+                  (svc/subsumedBy? svc codeA codeB) "subsumed-by" ;; A is subsumed by B
+                  (svc/subsumedBy? svc codeB codeA) "subsumes" ;; A subsumes B
+                  :else "not-subsumed")})))
 
 (comment
   (def svc (com.eldrix.hermes.terminology/open "/Users/mark/Dev/hermes/snomed.db"))
