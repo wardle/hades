@@ -1,9 +1,17 @@
-# hades
+# Hades : A HL7 FHIR terminology server.
 
-HL7 FHIR terminology server.
+[![Scc Count Badge](https://sloc.xyz/github/wardle/hades)](https://github.com/wardle/hades/)
+[![Scc Cocomo Badge](https://sloc.xyz/github/wardle/hades?category=cocomo&avg-wage=100000)](https://github.com/wardle/hades/)
 
-A HL7 FHIR facade over [hermes](https://github.com/wardle/hermes), a generic SNOMED CT terminology server. 
+
+A lightweight HL7 FHIR facade over [hermes](https://github.com/wardle/hermes), a SNOMED CT terminology server. 
+
 The HL7 FHIR specification includes support for a terminology API, including looking up codes and translation. 
+
+This software provides a simple FHIR server implementation, making use of the [HAPI FHIR](https://hapifhir.io) library
+in order to expose the functionality available in `hermes` via a FHIR terminology API.
+
+*This is currently incomplete*
 
 # Quickstart
 
@@ -20,6 +28,11 @@ Result:
 2021-03-23 14:50:57,346 [main] INFO  com.eldrix.hades.core - Initialising HL7 FHIR R4 server; providers: CodeSystem
 2021-03-23 14:50:58,308 [main] INFO  org.eclipse.jetty.server.Server - Started @14980ms
 ```
+
+Currently, use `hermes` to create your index file. That tool can automatically download and create an index. 
+After download, it should take less than 5 minutes to start running your FHIR terminology server.
+
+# Example usage
 
 Here are some examples of using the FHIR terminology API:
 
@@ -49,14 +62,18 @@ Result:
 }
 ```
 
-#### Design notes
+#### Design / development notes
+
 see https://confluence.ihtsdotools.org/display/FHIR/Implementing+Terminology+Services+with+SNOMED+CT
+
+The operations that are currently implemented are:
+
+- $lookup (on CodeSystem resource)    
+- $subsumes (on CodeSystem resource)
 
 The operations that will need to be supported are
 
-- $lookup (on CodeSystem resource)  
 - $expand (on ValueSet resource) - e.g. ECL, filters
-- $subsumes (on CodeSystem resource)
 - $closure (on ConceptMap resource)
 - $translate (on ConceptMap resource)
 - $validate-code (on ValueSet resource)
