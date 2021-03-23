@@ -4,7 +4,7 @@
             [clojure.string :as str]
             [com.eldrix.hermes.snomed :as snomed])
   (:import (org.hl7.fhir.r4.model Parameters Base Parameters$ParametersParameterComponent StringType BooleanType CodeableConcept Coding CodeType)
-           (java.util List)
+           (java.util List Locale)
            (clojure.lang Keyword)
            (com.eldrix.hermes.service SnomedService)
            (com.eldrix.hermes.snomed Description)
@@ -95,28 +95,40 @@
     params))
 
 
-(defn description->params                                   ;;TODO: lookup display from the locale in the request rather than hard-coding.
-  "Turn a SNOMED description into a parameter map."
-  [^Description d]
-  {"language" (:languageCode d)
-   "use"      {:system  "http://snomed.info/sct"
-               :code    (str (:typeId d))
-               :display (cond
-                          (= (:typeId d) snomed/Synonym) "Synonym"
-                          (= (:typeId d) snomed/FullySpecifiedName) "Fully specified name")}
-   "display"  (:term d)})
+(def default-use-terms
+  {snomed/Synonym            {:term "Synonym"}
+   snomed/FullySpecifiedName {:term "Fully specified name"}})
+
+(defn description->params
+  "Turn a SNOMED description into a parameter map.
+  Parameters:
+   - d             : SNOMED CT description
+   - use-terms-map : A map of descriptions by typeId
+
+   It would be usual to specify the preferred text for a particular locale,
+   but this will fallback to english if not provided."
+  ([^Description d] (description->params d default-use-terms))
+  ([^Description d use-terms-map]
+   {"language" (:languageCode d)
+    "use"      {:system  "http://snomed.info/sct"
+                :code    (str (:typeId d))
+                :display (:term (get use-terms-map (:typeId d)))}
+    "display"  (:term d)}))
 
 (defn lookup
   "Lookup a SNOMED code.
   Returns properties as per https://www.hl7.org/fhir/terminology-service.html#standard-props."
   [& {:keys [^SnomedService svc ^String system ^long code ^String displayLanguage]}]
   (when (contains? snomed-system-uris system)
-    (let [result (svc/getExtendedConcept svc code)
-          preferred-description ^String (:term (svc/getPreferredSynonym svc code (or (when displayLanguage displayLanguage) "en-GB")))
+    (let [lang (or (when displayLanguage displayLanguage) (.toLanguageTag (Locale/getDefault)))
+          result (svc/getExtendedConcept svc code)
+          preferred-description ^String (:term (svc/getPreferredSynonym svc code lang))
+          usage-descriptions {snomed/Synonym            (svc/getPreferredSynonym svc snomed/Synonym lang)
+                              snomed/FullySpecifiedName (svc/getPreferredSynonym svc snomed/FullySpecifiedName lang)}
           core-release-information (first (svc/getReleaseInformation svc))]
       (make-parameters
         {"system"      (:term core-release-information)
-         "version"     (str "http://snomed.info/sct/" (:moduleId core-release-information) "/" (.format (DateTimeFormatter/BASIC_ISO_DATE) (:effectiveTime core-release-information)))     ;; FIXME: version from module from the concept at hand?
+         "version"     (str "http://snomed.info/sct/" (:moduleId core-release-information) "/" (.format (DateTimeFormatter/BASIC_ISO_DATE) (:effectiveTime core-release-information))) ;; FIXME: version from module from the concept at hand?
          "display"     preferred-description
          "property"    (concat
                          [{:code  :inactive
@@ -129,7 +141,7 @@
                            (map #(hash-map :code :parent :value %) parents))
                          (let [children (get-in result [:direct-child-relationships com.eldrix.hermes.snomed/IsA])]
                            (map #(hash-map :code :parent :value %) children)))
-         "designation" (map description->params (:descriptions result))}))))
+         "designation" (map #(description->params % usage-descriptions) (:descriptions result))}))))
 
 
 
@@ -139,5 +151,7 @@
   (svc/getExtendedConcept svc 24700007)
   (svc/getReleaseInformation svc)
   (svc/getConcept svc 163271000000103)
+  (svc/getPreferredSynonym svc 900000000000013009 "en-GB")
+
   (filter #(= (:moduleId (svc/getConcept svc 163271000000103)) (:moduleId %)) (svc/getReleaseInformation svc))
   )
