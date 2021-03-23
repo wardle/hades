@@ -151,14 +151,17 @@
   - subsumes
   - subsumed-by
   - not-subsumed."
-  [& {:keys [^SnomedService svc ^String system ^long codeA ^long codeB]}]
-  (when (contains? snomed-system-uris system)
-    (make-parameters
-      {:outcome (cond
-                  (= codeA codeB) "equivalent"              ;; TODO: other equivalence checks?  (e.g. use SAME_AS reference set for example?
-                  (svc/subsumedBy? svc codeA codeB) "subsumed-by" ;; A is subsumed by B
-                  (svc/subsumedBy? svc codeB codeA) "subsumes" ;; A subsumes B
-                  :else "not-subsumed")})))
+  [& {:keys [^SnomedService svc ^String systemA ^String codeA ^String systemB ^String codeB]}]
+  (when (and (contains? snomed-system-uris systemA) (contains? snomed-system-uris systemB)) ;;; TODO: support non SNOMED codes with automapping?
+    (let [codeA' (Long/parseLong codeA)
+          codeB' (Long/parseLong codeB)]
+      (make-parameters
+        {:outcome (cond
+                    (and (= systemA systemB) (= codeA' codeB'))
+                    "equivalent"                            ;; TODO: other equivalence checks?  (e.g. use SAME_AS reference set for example?
+                    (svc/subsumedBy? svc codeA' codeB') "subsumed-by" ;; A is subsumed by B
+                    (svc/subsumedBy? svc codeB' codeA') "subsumes" ;; A subsumes B
+                    :else "not-subsumed")}))))
 
 (comment
   (def svc (com.eldrix.hermes.terminology/open "/Users/mark/Dev/hermes/snomed.db"))

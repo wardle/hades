@@ -65,9 +65,9 @@
     (println "codesystem/$subsumes: " {:codeA codeA :codeB codeB :system system :version version :codingA codingA :codingB codingB})
     (cond
       (and codeA codeB system)
-      (convert/subsumes? :svc svc :system (.getValue system) :codeA (Long/parseLong (.getValue codeA)) :codeB (Long/parseLong (.getValue codeB)))
-      (and codingA codingB (= (.getSystem codingA) (.getSystem codingB)))
-      (convert/subsumes? :svc svc :system (.getSystem codingA) :codeA (Long/parseLong (.getValue codingA)) :codeB (Long/parseLong (.getValue codingB))))))
+      (convert/subsumes? :svc svc :systemA (.getValue system) :codeA (.getValue codeA) :systemB (.getValue system) :codeB (.getValue codeB))
+      (and codingA codingB)
+      (convert/subsumes? :svc svc :systemA (.getSystem codingA) :codeA (.getValue codingA) :systemB (.getSystem codingB) :codeB (.getValue codingB)))))
 
 
 
