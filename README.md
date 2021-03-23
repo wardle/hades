@@ -22,3 +22,5 @@ $translate (on ConceptMap resource)
 $validate-code (on ValueSet resource)
 $validate-code (on CodeSystem resource)
 
+All of this functionality is obviously available in `hermes` but we need to expose using these
+FHIR operations.
