@@ -1,4 +1,4 @@
-# Hades : A HL7 FHIR terminology server.
+# 🔥 Hades : A HL7 FHIR terminology server 🔥
 
 [![Scc Count Badge](https://sloc.xyz/github/wardle/hades)](https://github.com/wardle/hades/)
 [![Scc Cocomo Badge](https://sloc.xyz/github/wardle/hades?category=cocomo&avg-wage=100000)](https://github.com/wardle/hades/)
@@ -71,7 +71,7 @@ The operations that are currently implemented are:
 - $lookup (on CodeSystem resource)    
 - $subsumes (on CodeSystem resource)
 
-The operations that will need to be supported are
+The operations that still need to be implemented are:
 
 - $expand (on ValueSet resource) - e.g. ECL, filters
 - $closure (on ConceptMap resource)
