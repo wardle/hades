@@ -70,8 +70,6 @@
       (convert/subsumes? :svc svc :systemA (.getSystem codingA) :codeA (.getValue codingA) :systemB (.getSystem codingB) :codeB (.getValue codingB)))))
 
 
-
-
 (defn ^Servlet make-r4-servlet [^SnomedService svc]
   (proxy [RestfulServer] [(FhirContext/forR4)]
     (initialize []
@@ -93,8 +91,8 @@
     server))
 
 (defn -main [& args]
-  (if-not (= 3 (count args))
-    (do (println "Usage: clj -M:fhir-r4 <snomed-index-path> <port>")
+  (if-not (= 2 (count args))
+    (do (println "Usage: clj -M:run <snomed-index-path> <port>")
         (System/exit 1))
     (let [[index-path port-str] args
           port (Integer/parseInt port-str)
