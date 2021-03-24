@@ -72,6 +72,10 @@ that is, give me any concepts that match the constraint
 * with a `clinical course` (<<263502005)  (or any more specific subtype of 'clinical course')
 * of `subacute` (<<19939008)
 
+Of course, you can use any ECL expression and add an optional filter as well. 
+If you add `&filter=sili` then you'll basically have an endpoint that can drive
+fast autocompletion. 
+
 ```shell
 curl -H "Accept: application/json" 'localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct?fhir_vs=ecl/<<50043002:<<263502005=<<19939008' | jq
 ```
