@@ -1,6 +1,7 @@
 (ns com.eldrix.hades.core
   "Implementation of a FHIR terminology server.
   See https://hl7.org/fhir/terminology-service.html"
+  (:gen-class)
   (:require [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.convert :as convert]
             [com.eldrix.hermes.terminology :as terminology]
@@ -111,20 +112,20 @@
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludeNotForUI"}} excludeNotForUI
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludePostCoordinated"}} excludePostCoordinated
             ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "displayLanguage"}} displayLanguage]
-    (log/debug "valueset/$expand:" {:url url :filter filter :activeOnly activeOnly :displayLanguage displayLanguage})
-    (let [constraint (convert/parse-implicit-value-set (.getValue url))
-          constraint' (if-not filter
-                        constraint
-                        (str constraint " {{ term = \"" (.getValue param-filter) "\", type = syn, dialect = (" (or displayLanguage (.toLanguageTag (Locale/getDefault))) ")  }}"))
-          _ (println "constraint = " constraint')
-          results (svc/search svc {:constraint constraint'})
-          components (map convert/result->vs-component results)]
-      (println "results: " results)
-      (println "components: " components)
-      (doto (ValueSet.)
-        (.setExpansion (doto (ValueSet$ValueSetExpansionComponent.)
-                         (.setTotal (count results) )
-                         (.setContains components)))))))    ;; components = ValueSetExpansionContainsComponent
+    (print "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
+    (when-let [constraint (convert/parse-implicit-value-set (.getValue url))]
+      (let [constraint' (if-not param-filter
+                          constraint
+                          (str constraint " {{ term = \"" (.getValue param-filter) "\", type = syn, dialect = (" (or displayLanguage (.toLanguageTag (Locale/getDefault))) ")  }}"))
+            _ (println "constraint = " constraint')
+            results (svc/search svc {:constraint constraint'})
+            components (map convert/result->vs-component results)]
+        (println "results: " results)
+        (println "components: " components)
+        (doto (ValueSet.)
+          (.setExpansion (doto (ValueSet$ValueSetExpansionComponent.)
+                           (.setTotal (count results))
+                           (.setContains components)))))))) ;; components = ValueSetExpansionContainsComponent
 
 (defn ^Servlet make-r4-servlet [^SnomedService svc]
   (proxy [RestfulServer] [(FhirContext/forR4)]

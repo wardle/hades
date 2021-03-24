@@ -62,7 +62,163 @@ Result:
 }
 ```
 
-#### Design / development notes
+### Expand a valueset
+
+Here we ask for the contents of a valueset as defined by the URL 
+`http://snomed.info/sct?fhir_vs=ecl/<<50043002%20:<<263502005=<<19939008`,
+that is, give me any concepts that match the constraint
+
+* `Disorder of the respiratory system` (<<50043002)
+* with a `clinical course` (<<263502005)  (or any more specific subtype of 'clinical course')
+* of `subacute` (<<19939008)
+
+```shell
+curl -H "Accept: application/json" 'localhost:8080/fhir/ValueSet/$expand?url=http://snomed.info/sct?fhir_vs=ecl/<<50043002:<<263502005=<<19939008' | jq
+```
+
+Result
+```json
+{
+  "resourceType": "ValueSet",
+  "expansion": {
+    "total": 13,
+    "contains": [
+      {
+        "system": "http://snomed.info/sct",
+        "code": "233761006",
+        "display": "Subacute silicosis",
+        "designation": [
+          {
+            "value": "Active silicosis"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "233761006",
+        "display": "Subacute silicosis",
+        "designation": [
+          {
+            "value": "Subacute silicosis"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "233753001",
+        "display": "Subacute berylliosis",
+        "designation": [
+          {
+            "value": "Subacute berylliosis"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "22482002",
+        "display": "Subacute obliterative bronchiolitis",
+        "designation": [
+          {
+            "value": "Subacute obliterative bronchiolitis"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "782761005",
+        "display": "Subacute invasive pulmonary aspergillosis",
+        "designation": [
+          {
+            "value": "Subacute invasive pulmonary aspergillosis"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "782761005",
+        "display": "Subacute invasive pulmonary aspergillosis",
+        "designation": [
+          {
+            "value": "Chronic necrotising pulmonary aspergillosis"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "782761005",
+        "display": "Subacute invasive pulmonary aspergillosis",
+        "designation": [
+          {
+            "value": "Chronic necrotizing pulmonary aspergillosis"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "836479005",
+        "display": "Subacute obliterative bronchiolitis due to vapour",
+        "designation": [
+          {
+            "value": "Subacute obliterative bronchiolitis due to vapor"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "836479005",
+        "display": "Subacute obliterative bronchiolitis due to vapour",
+        "designation": [
+          {
+            "value": "Subacute obliterative bronchiolitis due to vapour"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "836479005",
+        "display": "Subacute obliterative bronchiolitis due to vapour",
+        "designation": [
+          {
+            "value": "Subacute obliterative bronchiolitis caused by vapor"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "836479005",
+        "display": "Subacute obliterative bronchiolitis due to vapour",
+        "designation": [
+          {
+            "value": "Subacute obliterative bronchiolitis caused by vapour"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "836478002",
+        "display": "Subacute obliterative bronchiolitis due to chemical fumes",
+        "designation": [
+          {
+            "value": "Subacute obliterative bronchiolitis due to chemical fumes"
+          }
+        ]
+      },
+      {
+        "system": "http://snomed.info/sct",
+        "code": "836478002",
+        "display": "Subacute obliterative bronchiolitis due to chemical fumes",
+        "designation": [
+          {
+            "value": "Subacute obliterative bronchiolitis caused by chemical fumes"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+# Design / development notes
 
 see https://confluence.ihtsdotools.org/display/FHIR/Implementing+Terminology+Services+with+SNOMED+CT
 
@@ -93,3 +249,6 @@ in order to ensure the value sets and reference data they need are available. Th
 determined by the problem-at-hand. Decompose, make them available both as raw data and discrete computing services
 that makes using them easy, and then let others compose them together to suit their needs.
 
+See https://documenter.getpostman.com/view/784165/ontoserver-51-example-fhir-terminology-requests/RW1hhG1S 
+for examples of ontoserver requests
+https://web.postman.co/workspace/My-Workspace~35d42bd9-421c-4a5f-892c-0695c11c9437/request/8832141-3f2c5c88-a66a-43c9-8cc4-d6a15187511e

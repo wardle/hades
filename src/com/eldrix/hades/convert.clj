@@ -143,7 +143,7 @@
   - http://snomed.info/sct?fhir_vs=isa/[sctid] - all concepts subsumed by specified concept
   - http://snomed.info/sct?fhir_vs=refset - all concepts in a refset
   - http://snomed.info/sct?fhir_vs=refset/[sctid] - all conceots in the reference set
-  - http://snomed.info/sct?fhir_vs=ec/[ecl] - all concepts matching the ECL."
+  - http://snomed.info/sct?fhir_vs=ecl/[ecl] - all concepts matching the ECL."
   [uri]
   (let [[_ _ edition _ version query] (re-matches #"http://snomed.info/sct(/(\d*))?(/version/(\d{8}))?\?fhir_vs(.*)" uri)]
     (println "query " query)
@@ -153,7 +153,7 @@
       (str/starts-with? query "=isa/") (str "<" (subs query 5))
       (= "=refset" query) (throw (NotImplementedOperationException. "Valueset for all concepts in any refset not implemented"))
       (str/starts-with? query "=refset/") (str "^" (subs query 8))
-      (str/starts-with? query "=ec/") (subs query 4)
+      (str/starts-with? query "=ecl/") (subs query 5)
       :else (throw (NotImplementedOperationException. (str "Valueset for '" uri "' not implemented"))))))
 
 (defn ^ValueSet$ValueSetExpansionContainsComponent result->vs-component
@@ -177,4 +177,6 @@
   (= "<24700007" (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=isa/24700007"))
   (= "*" (parse-implicit-value-set "http://snomed.info/sct?fhir_vs"))
   (= nil (parse-implicit-value-set "http://snomed.info/sct?fhirvs=refset/123"))
+
+  (svc/getPreferredSynonym svc 19939008 "en")
   )

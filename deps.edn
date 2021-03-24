@@ -67,5 +67,5 @@
             :exec-fn      hf.depstar/uberjar
             :exec-args    {:jar        "target/hades-full-v0.1.0.jar"
                            :aot        true
-                           :main-class "com.eldrix.hermes.core"}}}}
+                           :main-class "com.eldrix.hades.core"}}}}
 
