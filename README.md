@@ -248,7 +248,3 @@ and recombined as needed. Otherwise, developers solving problems need to coordin
 in order to ensure the value sets and reference data they need are available. The exact choice will be 
 determined by the problem-at-hand. Decompose, make them available both as raw data and discrete computing services
 that makes using them easy, and then let others compose them together to suit their needs.
-
-See https://documenter.getpostman.com/view/784165/ontoserver-51-example-fhir-terminology-requests/RW1hhG1S 
-for examples of ontoserver requests
-https://web.postman.co/workspace/My-Workspace~35d42bd9-421c-4a5f-892c-0695c11c9437/request/8832141-3f2c5c88-a66a-43c9-8cc4-d6a15187511e
