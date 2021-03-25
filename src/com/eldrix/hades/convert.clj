@@ -131,8 +131,15 @@
 (defn parse-implicit-value-set
   "Parse a FHIR value set from a single URL into an expression constraint.
 
-  FHIR provides implicit value setsSee https://www.hl7.org/fhir/snomedct.html#implicit
-  to reference a value set based on reference set or by subsumption.
+  If parsing was successful, returns a map containing:
+     |- :query  : one of [:all :isa :refsets :in-refset :ecl]
+     |- :ecl    : an ECL constraint
+
+  Returns nil if the URL could not be parsed.
+
+  FHIR provides implicit value sets to reference a value set based on reference
+  set or by subsumption. See https://www.hl7.org/fhir/snomedct.html#implicit
+
   The URI may contain specific *edition* information.
   - http://snomed.info/sct   - latest edition
   - http://snomed.info/sct/900000000000207008 - International edition
@@ -141,20 +148,35 @@
   but these examples use the latest:
   - http://snomed.info/sct?fhir_vs  - all concepts
   - http://snomed.info/sct?fhir_vs=isa/[sctid] - all concepts subsumed by specified concept
-  - http://snomed.info/sct?fhir_vs=refset - all concepts in a refset
-  - http://snomed.info/sct?fhir_vs=refset/[sctid] - all conceots in the reference set
+  - http://snomed.info/sct?fhir_vs=refset - all installed reference sets
+  - http://snomed.info/sct?fhir_vs=refset/[sctid] - all concepts in the reference set
   - http://snomed.info/sct?fhir_vs=ecl/[ecl] - all concepts matching the ECL."
   [uri]
   (let [[_ _ edition _ version query] (re-matches #"http://snomed.info/sct(/(\d*))?(/version/(\d{8}))?\?fhir_vs(.*)" uri)]
-    (println "query " query)
     (cond
-      (nil? query) nil
-      (= query "") "*"
-      (str/starts-with? query "=isa/") (str "<" (subs query 5))
-      (= "=refset" query) (throw (NotImplementedOperationException. "Valueset for all concepts in any refset not implemented"))
-      (str/starts-with? query "=refset/") (str "^" (subs query 8))
-      (str/starts-with? query "=ecl/") (subs query 5)
-      :else (throw (NotImplementedOperationException. (str "Valueset for '" uri "' not implemented"))))))
+      (or edition version)
+      (throw (NotImplementedOperationException. "Implicit value sets with edition/version not supported."))
+
+      (nil? query)
+      nil
+
+      (= query "")
+      {:query :all :ecl "*"}
+
+      (str/starts-with? query "=isa/")
+      {:query :isa :ecl (str "<" (subs query 5))}
+
+      (= "=refset" query)
+      {:query :refsets :ecl (str "<" snomed/ReferenceSetConcept)}
+
+      (str/starts-with? query "=refset/")
+      {:query :in-refset :ecl (str "^" (subs query 8))}
+
+      (str/starts-with? query "=ecl/")
+      {:query :ecl :ecl (subs query 5)}
+
+      :else
+      (throw (NotImplementedOperationException. (str "Implicit valueset for '" uri "' not implemented"))))))
 
 (defn ^ValueSet$ValueSetExpansionContainsComponent result->vs-component
   "Turn a SNOMED search result into a FHIR ValueSetExpansion Component"
@@ -173,9 +195,9 @@
   (svc/getConcept svc 163271000000103)
   (svc/getPreferredSynonym svc 900000000000013009 "en-GB")
 
-  (= "^123" (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=refset/123"))
-  (= "<24700007" (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=isa/24700007"))
-  (= "*" (parse-implicit-value-set "http://snomed.info/sct?fhir_vs"))
+  (= {:query :in-refset :ecl "^123"} (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=refset/123"))
+  (= {:query :isa :ecl "<24700007"} (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=isa/24700007"))
+  (= {:query :all :ecl "*"} (parse-implicit-value-set "http://snomed.info/sct?fhir_vs"))
   (= nil (parse-implicit-value-set "http://snomed.info/sct?fhirvs=refset/123"))
 
   (svc/getPreferredSynonym svc 19939008 "en")

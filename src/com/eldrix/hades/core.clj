@@ -16,7 +16,8 @@
            (org.eclipse.jetty.server Server ServerConnector)
            (ca.uhn.fhir.rest.annotation OperationParam)
            (org.hl7.fhir.r4.model CodeSystem ValueSet ValueSet$ValueSetExpansionComponent)
-           (java.util Locale)))
+           (java.util Locale)
+           (org.hl7.fhir.r4.model.codesystems PublicationStatus)))
 
 (definterface LookupCodeSystemOperation
   (^org.hl7.fhir.r4.model.Parameters lookup [^ca.uhn.fhir.rest.param.StringParam code
@@ -114,14 +115,11 @@
             ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "displayLanguage"}} displayLanguage]
     (print "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
     (when-let [constraint (convert/parse-implicit-value-set (.getValue url))]
-      (let [constraint' (if-not param-filter
-                          constraint
-                          (str constraint " {{ term = \"" (.getValue param-filter) "\", type = syn, dialect = (" (or displayLanguage (.toLanguageTag (Locale/getDefault))) ")  }}"))
-            _ (println "constraint = " constraint')
-            results (svc/search svc {:constraint constraint'})
+      (let [ecl (if-not param-filter
+                  (:ecl constraint)
+                  (str (:ecl constraint) " {{ term = \"" (.getValue param-filter) "\", type = syn }}"))
+            results (svc/search svc {:constraint ecl})
             components (map convert/result->vs-component results)]
-        (println "results: " results)
-        (println "components: " components)
         (doto (ValueSet.)
           (.setExpansion (doto (ValueSet$ValueSetExpansionComponent.)
                            (.setTotal (count results))
