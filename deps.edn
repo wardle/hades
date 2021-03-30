@@ -10,7 +10,7 @@
            ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "5.3.0"}
 
            com.eldrix/hermes              {:git/url "https://github.com/wardle/hermes.git"
-                                           :sha     "bf6ca66d5d19c18ef60da3bb94db1a87f06ca90f"}
+                                           :sha     "ec9d1acd2aada4a575aa68fc3fbf37fa0c5dbb01"}
 
            }
 
