@@ -4,20 +4,18 @@
   (:gen-class)
   (:require [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.convert :as convert]
-            [com.eldrix.hermes.terminology :as terminology]
-            [com.eldrix.hermes.service :as svc]
-            [com.eldrix.hermes.snomed :as snomed])
-  (:import (com.eldrix.hermes.service SnomedService)
-           (ca.uhn.fhir.context FhirContext)
+            [com.eldrix.hermes.core :as hermes])
+  (:import (ca.uhn.fhir.context FhirContext)
            (org.eclipse.jetty.servlet ServletContextHandler ServletHolder)
            (ca.uhn.fhir.rest.server RestfulServer IResourceProvider)
            (javax.servlet Servlet)
            (ca.uhn.fhir.rest.server.interceptor ResponseHighlighterInterceptor)
            (org.eclipse.jetty.server Server ServerConnector)
            (ca.uhn.fhir.rest.annotation OperationParam)
-           (org.hl7.fhir.r4.model CodeSystem ValueSet ValueSet$ValueSetExpansionComponent)
+           (org.hl7.fhir.r4.model CodeSystem ValueSet ValueSet$ValueSetExpansionComponent ConceptMap)
            (java.util Locale)
-           (org.hl7.fhir.r4.model.codesystems PublicationStatus)))
+           (org.hl7.fhir.r4.model.codesystems PublicationStatus)
+           (com.eldrix.hermes.core Service)))
 
 (definterface LookupCodeSystemOperation
   (^org.hl7.fhir.r4.model.Parameters lookup [^ca.uhn.fhir.rest.param.StringParam code
@@ -52,8 +50,22 @@
                                            ^ca.uhn.fhir.rest.param.StringParam excludePostCoordinated
                                            ^ca.uhn.fhir.rest.param.TokenParam displayLanguage
                                            ]))
+;; see https://github.com/hapifhir/hapi-fhir/blob/cbb16ce3affd3fc53dcbfe98dd3181644fe68604/hapi-fhir-jpaserver-base/src/main/java/ca/uhn/fhir/jpa/provider/r4/BaseJpaResourceProviderConceptMapR4.java
+(definterface TranslateConceptMapOperation
+  (^org.hl7.fhir.r4.model.Parameters translate [^org.hl7.fhir.r4.model.UriType url
+                                                ^org.hl7.fhir.r4.model.StringType conceptMapVersion
+                                                ^org.hl7.fhir.r4.model.CodeType code
+                                                ^org.hl7.fhir.r4.model.UriType system
+                                                ^org.hl7.fhir.r4.model.StringType version
+                                                ^org.hl7.fhir.r4.model.UriType source
+                                                ^org.hl7.fhir.r4.model.Coding coding
+                                                ^org.hl7.fhir.r4.model.CodeableConcept codeableConcept
+                                                ^org.hl7.fhir.r4.model.UriType target
+                                                ^org.hl7.fhir.r4.model.UriType targetSystem
+                                                ^org.hl7.fhir.r4.model.BooleanType reverse]))
 
-(deftype CodeSystemResourceProvider [^SnomedService svc]
+
+(deftype CodeSystemResourceProvider [^Service svc]
   IResourceProvider
   (getResourceType [_this] CodeSystem)
   ;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -90,7 +102,7 @@
       (and codingA codingB)
       (convert/subsumes? :svc svc :systemA (.getSystem codingA) :codeA (.getValue codingA) :systemB (.getSystem codingB) :codeB (.getValue codingB)))))
 
-(deftype ValueSetResourceProvider [^SnomedService svc]
+(deftype ValueSetResourceProvider [^Service svc]
   IResourceProvider
   (getResourceType [_this] ValueSet)
   ;;;;;;;;;;;;;;;;;;;;;;;
@@ -113,27 +125,52 @@
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludeNotForUI"}} excludeNotForUI
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludePostCoordinated"}} excludePostCoordinated
             ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "displayLanguage"}} displayLanguage]
-    (print "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
+    (log/debug "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
     (when-let [constraint (convert/parse-implicit-value-set (.getValue url))]
       (let [ecl (if-not param-filter
                   (:ecl constraint)
                   (str (:ecl constraint) " {{ term = \"" (.getValue param-filter) "\", type = syn }}"))
-            results (svc/search svc {:constraint ecl})
+            results (hermes/search svc {:constraint         ecl
+                                        :inactive-concepts? (convert/parse-boolean activeOnly :default true :strict true)})
             components (map convert/result->vs-component results)]
         (doto (ValueSet.)
           (.setExpansion (doto (ValueSet$ValueSetExpansionComponent.)
                            (.setTotal (count results))
                            (.setContains components)))))))) ;; components = ValueSetExpansionContainsComponent
 
-(defn ^Servlet make-r4-servlet [^SnomedService svc]
+(deftype ConceptMapResourceProvider [^Service svc]
+  IResourceProvider
+  (getResourceType [_this] ConceptMap)
+  ;;;;;;;;;;;;;;;;;;;;;;;
+  TranslateConceptMapOperation
+  (^{:tag                                  org.hl7.fhir.r4.model.Parameters
+     ca.uhn.fhir.rest.annotation.Operation {:name "translate" :idempotent true}}
+    translate [_this
+               ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "url"}} url
+               ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "conceptMapVersion"}} conceptMapVersion
+               ^{:tag org.hl7.fhir.r4.model.CodeType OperationParam {:name "code"}} code
+               ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "system"}} system
+               ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "version"}} version
+               ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "source"}} source
+               ^{:tag org.hl7.fhir.r4.model.Coding OperationParam {:name "coding"}} coding
+               ^{:tag org.hl7.fhir.r4.model.CodeableConcept OperationParam {:name "codeableConcept"}} codeableConcept
+               ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "target"}} target
+               ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "targetSystem"}} targetSystem
+               ^{:tag org.hl7.fhir.r4.model.BooleanType OperationParam {:name "reverse"}} reverse]
+    (log/debug "conceptmap/$translate:" {:url url :code code :system system :version version :source source :coding coding :codeableConcept codeableConcept :target target :targetSystem targetSystem :reverse reverse})
+    (convert/make-parameters {:operation :translate :url url})))
+
+(defn ^Servlet make-r4-servlet [^Service svc]
   (proxy [RestfulServer] [(FhirContext/forR4)]
     (initialize []
       (log/info "Initialising HL7 FHIR R4 server; providers: CodeSystem ValueSet")
-      (.setResourceProviders this [(CodeSystemResourceProvider. svc) (ValueSetResourceProvider. svc)])
+      (.setResourceProviders this [(CodeSystemResourceProvider. svc)
+                                   (ValueSetResourceProvider. svc)
+                                   (ConceptMapResourceProvider. svc)])
       (log/debug "Resource providers:" (seq (.getResourceProviders this)))
       (.registerInterceptor this (ResponseHighlighterInterceptor.)))))
 
-(defn ^Server make-server [^SnomedService svc {:keys [port]}]
+(defn ^Server make-server [^Service svc {:keys [port]}]
   (let [servlet-holder (ServletHolder. ^Servlet (make-r4-servlet svc))
         handler (doto (ServletContextHandler. ServletContextHandler/SESSIONS)
                   (.setContextPath "/")
@@ -151,13 +188,13 @@
         (System/exit 1))
     (let [[index-path port-str] args
           port (Integer/parseInt port-str)
-          svc (terminology/open index-path)
+          svc (hermes/open index-path)
           server (make-server svc {:port port})]
       (.start server))))
 
 (comment
 
-  (def svc (com.eldrix.hermes.terminology/open "/Users/mark/Dev/hermes/snomed.db"))
+  (def svc (hermes/open "/Users/mark/Dev/hermes/snomed.db"))
 
   (def server (make-server svc {:port 8080}))
   (.start server)
@@ -168,11 +205,11 @@
     (def server (make-server svc {:port 8080}))
     (.start server))
 
-  (svc/search svc {:s "mnd"})
-  (svc/getConcept svc 24700007)
+  (hermes/search svc {:s "mnd"})
+  (hermes/get-concept svc 24700007)
 
-  (svc/getPreferredSynonym svc 233753001 "en")
-  (svc/getReleaseInformation svc)
-  (keys (svc/getExtendedConcept svc 138875005))
-  (get-in (svc/getExtendedConcept svc 24700007) [:parent-relationships com.eldrix.hermes.snomed/IsA])
+  (hermes/get-referred-synonym svc 233753001 "en")
+  (hermes/get-release-information svc)
+  (keys (hermes/get-extended-concept svc 138875005))
+  (get-in (hermes/getExtendedConcept svc 24700007) [:parent-relationships com.eldrix.hermes.snomed/IsA])
   )

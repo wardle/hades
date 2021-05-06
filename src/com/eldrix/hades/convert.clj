@@ -1,17 +1,27 @@
 (ns com.eldrix.hades.convert
-  (:require [com.eldrix.hermes.service :as svc]
+  (:require [clojure.string :as str]
             [clojure.walk :as walk]
-            [clojure.string :as str]
+            [com.eldrix.hermes.core :as hermes]
             [com.eldrix.hermes.snomed :as snomed])
   (:import (org.hl7.fhir.r4.model Parameters Base Parameters$ParametersParameterComponent StringType BooleanType CodeableConcept Coding CodeType ValueSet$ValueSetExpansionContainsComponent ValueSet$ConceptReferenceDesignationComponent)
            (java.util List Locale)
-           (com.eldrix.hermes.service SnomedService)
            (com.eldrix.hermes.snomed Description Result)
            (java.time.format DateTimeFormatter)
-           (ca.uhn.fhir.rest.server.exceptions NotImplementedOperationException)))
+           (ca.uhn.fhir.rest.server.exceptions NotImplementedOperationException)
+           (ca.uhn.fhir.context FhirContext)
+           (com.eldrix.hermes.core Service)))
 
 (def snomed-system-uri "http://snomed.info/sct")
 
+(defn parse-boolean
+  "Parse a FHIR boolean from a string but with an optional default.
+  See https://www.hl7.org/fhir/codesystem-data-types.html#data-types-boolean"
+  [s & {:keys [default strict] :or {strict true}}]
+  (cond
+    (.equalsIgnoreCase "true" s) true
+    (.equalsIgnoreCase "false" s) false
+    (and strict (not (nil? s))) (throw (IllegalArgumentException. (str "invalid boolean '" s "' : must be 'true' or 'false'")))
+    :else default))
 
 (def test-map {"name"        "SNOMED CT"
                "version"     "LATEST"
@@ -82,14 +92,14 @@
 (defn lookup
   "Lookup a SNOMED code.
   Returns properties as per https://www.hl7.org/fhir/terminology-service.html#standard-props."
-  [& {:keys [^SnomedService svc ^String system ^long code ^String displayLanguage]}]
+  [& {:keys [^Service svc ^String system ^long code ^String displayLanguage]}]
   (when (= snomed-system-uri system)
     (let [lang (or (when displayLanguage displayLanguage) (.toLanguageTag (Locale/getDefault)))
-          result (svc/getExtendedConcept svc code)
-          preferred-description ^String (:term (svc/getPreferredSynonym svc code lang))
-          usage-descriptions {snomed/Synonym            (svc/getPreferredSynonym svc snomed/Synonym lang)
-                              snomed/FullySpecifiedName (svc/getPreferredSynonym svc snomed/FullySpecifiedName lang)}
-          core-release-information (first (svc/getReleaseInformation svc))]
+          result (hermes/get-extended-concept svc code)
+          preferred-description ^String (:term (hermes/get-preferred-synonym svc code lang))
+          usage-descriptions {snomed/Synonym            (hermes/get-preferred-synonym svc snomed/Synonym lang)
+                              snomed/FullySpecifiedName (hermes/get-preferred-synonym svc snomed/FullySpecifiedName lang)}
+          core-release-information (first (hermes/get-release-information svc))]
       (make-parameters
         {"name"        (:term core-release-information)
          "version"     (str "http://snomed.info/sct/" (:moduleId core-release-information) "/" (.format (DateTimeFormatter/BASIC_ISO_DATE) (:effectiveTime core-release-information))) ;; FIXME: version from module from the concept at hand?
@@ -115,7 +125,7 @@
   - subsumes
   - subsumed-by
   - not-subsumed."
-  [& {:keys [^SnomedService svc ^String systemA ^String codeA ^String systemB ^String codeB]}]
+  [& {:keys [^Service svc ^String systemA ^String codeA ^String systemB ^String codeB]}]
   (when (and (= snomed-system-uri systemA) (= snomed-system-uri systemB)) ;;; TODO: support non SNOMED codes with automapping?
     (let [codeA' (Long/parseLong codeA)
           codeB' (Long/parseLong codeB)]
@@ -123,8 +133,8 @@
         {:outcome (cond
                     (and (= systemA systemB) (= codeA' codeB'))
                     "equivalent"                            ;; TODO: other equivalence checks?  (e.g. use SAME_AS reference set for example?
-                    (svc/subsumedBy? svc codeA' codeB') "subsumed-by" ;; A is subsumed by B
-                    (svc/subsumedBy? svc codeB' codeA') "subsumes" ;; A subsumes B
+                    (hermes/subsumed-by? svc codeA' codeB') "subsumed-by" ;; A is subsumed by B
+                    (hermes/subsumed-by? svc codeB' codeA') "subsumes" ;; A subsumes B
                     :else "not-subsumed")}))))
 
 
@@ -188,17 +198,23 @@
     (.setDesignation [(ValueSet$ConceptReferenceDesignationComponent. (StringType. (:term result)))])))
 
 (comment
-  (def svc (com.eldrix.hermes.terminology/open "/Users/mark/Dev/hermes/snomed.db"))
-  (require '[com.eldrix.hermes.service :as svc])
-  (svc/getExtendedConcept svc 24700007)
-  (svc/getReleaseInformation svc)
-  (svc/getConcept svc 163271000000103)
-  (svc/getPreferredSynonym svc 900000000000013009 "en-GB")
+  (def svc (hermes/open "/Users/mark/Dev/hermes/snomed.db"))
+  (hermes/get-extended-concept svc 24700007)
+  (hermes/get-release-information svc)
+  (hermes/get-concept svc 163271000000103)
+  (hermes/get-preferred-synonym svc 900000000000013009 "en-GB")
 
+  (hermes/search svc {:constraint "<<50043002:<<263502005=<<19939008"})
   (= {:query :in-refset :ecl "^123"} (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=refset/123"))
   (= {:query :isa :ecl "<24700007"} (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=isa/24700007"))
   (= {:query :all :ecl "*"} (parse-implicit-value-set "http://snomed.info/sct?fhir_vs"))
   (= nil (parse-implicit-value-set "http://snomed.info/sct?fhirvs=refset/123"))
+  (= {:query :ecl :ecl "<<50043002:<<263502005=<<19939008"}
+     (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=ecl/<<50043002:<<263502005=<<19939008"))
+  (hermes/get-preferred-synonym svc 19939008 "en")
 
-  (svc/getPreferredSynonym svc 19939008 "en")
+  (def ctx (ca.uhn.fhir.context.FhirContext/forR4))
+  (def parser (doto (.newJsonParser ctx)
+                (.setPrettyPrint true)))
+  (.encodeResourceToString parser (make-parameters test-map))
   )
