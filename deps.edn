@@ -1,6 +1,6 @@
 {:paths   ["src" "resources"]
 
- :deps    {org.clojure/clojure                      {:mvn/version "1.11.0-alpha1"}
+ :deps    {org.clojure/clojure                      {:mvn/version "1.11.0-alpha2"}
            org.clojure/tools.logging                {:mvn/version "1.1.0"}
            ch.qos.logback/logback-classic           {:mvn/version "1.2.3"}
 
@@ -10,7 +10,7 @@
            ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "5.3.0"}
 
            com.eldrix/hermes                        {:git/url "https://github.com/wardle/hermes.git"
-                                                     :sha     "e0b5819f6f12a19204e9db8fb90997c5ecc32907"}
+                                                     :sha     "467e2fb011ea1f54d05c3767ec7c01e00f7e7044"}
            io.pedestal/pedestal.jetty               {:mvn/version "0.5.8"}}
 
  :aliases {:run
