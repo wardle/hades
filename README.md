@@ -11,12 +11,27 @@ The HL7 FHIR specification includes support for a terminology API, including loo
 This software provides a simple FHIR server implementation, making use of the [HAPI FHIR](https://hapifhir.io) library
 in order to expose the functionality available in `hermes` via a FHIR terminology API.
 
-*This is currently incomplete*
+I do not *usually* advise using a FHIR terminology server in order to fully make use of
+SNOMED CT in health and care applications. In essence, the FHIR terminology standard
+supposes that you might wish to treat terminologies interchangeably, but any real
+usage outside of trivial applications ends up making use of ad-hoc extensions 
+that are usually terminology server specific. As such, you end up simply using 
+the FHIR standard as a transport. There are some trivial uses such as 
+code lookup, autocompletion and subsumption testing that `hades` supports. 
 
 # Quickstart
 
+You can run a FHIR SNOMED CT terminology server directly from source code, if you have the clojure
+command line tools installed:
+
 ```shell
 clj -M:run /path/to/snomed.db 8080
+```
+
+Otherwise, you can download a pre-built jar file. 
+
+```shell
+java -jar hades-server-v0.9.24.jar /path/to/snomed/db 8080
 ```
 
 Result:
@@ -29,7 +44,9 @@ Result:
 2021-03-23 14:50:58,308 [main] INFO  org.eclipse.jetty.server.Server - Started @14980ms
 ```
 
-Currently, use `hermes` to create your index file. That tool can automatically download and create an index. 
+# How do I create a SNOMED database file?
+
+Use [`hermes`](https://github.com/wardle/hermes) to create your index file. That tool can automatically download and create an index. 
 After download, it should take less than 5 minutes to start running your FHIR terminology server.
 
 # Example usage
