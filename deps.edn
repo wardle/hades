@@ -1,8 +1,8 @@
 {:paths   ["src" "resources"]
 
- :deps    {org.clojure/clojure                      {:mvn/version "1.11.0-alpha2"}
-           org.clojure/tools.logging                {:mvn/version "1.1.0"}
-           ch.qos.logback/logback-classic           {:mvn/version "1.2.3"}
+ :deps    {org.clojure/clojure                      {:mvn/version "1.10.3"}
+           org.clojure/tools.logging                {:mvn/version "1.2.4"}
+           ch.qos.logback/logback-classic           {:mvn/version "1.2.11"}
 
 
            ca.uhn.hapi.fhir/hapi-fhir-base          {:mvn/version "5.3.0"}
@@ -22,7 +22,7 @@
            {:extra-paths ["test" "test/resources"]
             :extra-deps  {com.cognitect/test-runner
                           {:git/url "https://github.com/cognitect-labs/test-runner.git"
-                           :sha     "b6b3193fcc42659d7e46ecd1884a228993441182"}}
+                           :sha     "cc75980b43011773162b485f46f939dc5fba91e4"}}
             :main-opts   ["-e" "(compile,'com.eldrix.hades.core)"
                           "-m" "cognitect.test-runner"
                           "-d" "test"]}
@@ -30,6 +30,10 @@
            :outdated
            {:extra-deps {com.github.liquidz/antq {:mvn/version "RELEASE"}}
             :main-opts  ["-m" "antq.core"]}
+
+           :upgrade
+           {:extra-deps {com.github.liquidz/antq {:mvn/version "RELEASE"}}
+            :main-opts  ["-m" "antq.core" "--upgrade"]}
 
            :check
            {:extra-deps {athos/clj-check
