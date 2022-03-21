@@ -48,8 +48,8 @@
                                            ^ca.uhn.fhir.rest.param.StringParam excludeNested
                                            ^ca.uhn.fhir.rest.param.StringParam excludeNotForUI
                                            ^ca.uhn.fhir.rest.param.StringParam excludePostCoordinated
-                                           ^ca.uhn.fhir.rest.param.TokenParam displayLanguage
-                                           ]))
+                                           ^ca.uhn.fhir.rest.param.TokenParam displayLanguage]))
+
 ;; see https://github.com/hapifhir/hapi-fhir/blob/cbb16ce3affd3fc53dcbfe98dd3181644fe68604/hapi-fhir-jpaserver-base/src/main/java/ca/uhn/fhir/jpa/provider/r4/BaseJpaResourceProviderConceptMapR4.java
 (definterface TranslateConceptMapOperation
   (^org.hl7.fhir.r4.model.Parameters translate [^org.hl7.fhir.r4.model.UriType url
@@ -185,6 +185,7 @@
 (defn -main [& args]
   (if-not (= 2 (count args))
     (do (println "Usage: clj -M:run <snomed-index-path> <port>")
+        (println "   or: java -jar hades-server.jar <snomed-index-path> <port>")
         (System/exit 1))
     (let [[index-path port-str] args
           port (Integer/parseInt port-str)
@@ -211,5 +212,5 @@
   (hermes/get-preferred-synonym svc 233753001 "en")
   (hermes/get-release-information svc)
   (keys (hermes/get-extended-concept svc 138875005))
-  (get-in (hermes/getExtendedConcept svc 24700007) [:parent-relationships com.eldrix.hermes.snomed/IsA])
-  )
+  (get-in (hermes/getExtendedConcept svc 24700007) [:parent-relationships com.eldrix.hermes.snomed/IsA]))
+
