@@ -31,7 +31,7 @@ clj -M:run /path/to/snomed.db 8080
 Otherwise, you can download a pre-built jar file. 
 
 ```shell
-java -jar hades-server-v0.9.24.jar /path/to/snomed/db 8080
+java -jar hades-server-v0.10.xxx.jar /path/to/snomed/db 8080
 ```
 
 Result:
