@@ -13,7 +13,8 @@
            io.pedestal/pedestal.jetty               {:mvn/version "0.5.10"}}
 
  :aliases {:build {:deps       {io.github.clojure/tools.build {:git/tag "v0.8.1" :git/sha "7d40500"}
-                                slipset/deps-deploy           {:mvn/version "RELEASE"}}
+                                slipset/deps-deploy           {:mvn/version "RELEASE"}
+                                io.github.borkdude/gh-release-artifact {:git/sha "05f8d8659e6805d513c59447ff41dc8497878462"}}
                    :ns-default build}
 
            :run
