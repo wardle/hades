@@ -9,7 +9,7 @@
            ca.uhn.hapi.fhir/hapi-fhir-server        {:mvn/version "5.3.0"}
            ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "5.3.0"}
 
-           com.eldrix/hermes                        {:mvn/version "1.0.776"}
+           com.eldrix/hermes                        {:mvn/version "1.0.804"}
            io.pedestal/pedestal.jetty               {:mvn/version "0.5.10"}}
 
  :aliases {:build {:deps       {io.github.clojure/tools.build {:git/tag "v0.8.1" :git/sha "7d40500"}
