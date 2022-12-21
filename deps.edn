@@ -2,7 +2,7 @@
 
  :deps    {org.clojure/clojure                      {:mvn/version "1.11.1"}
            org.clojure/tools.logging                {:mvn/version "1.2.4"}
-           ch.qos.logback/logback-classic           {:mvn/version "1.2.11"}
+           ch.qos.logback/logback-classic           {:mvn/version "1.4.5"}
 
 
            ca.uhn.hapi.fhir/hapi-fhir-base          {:mvn/version "5.3.0"}
