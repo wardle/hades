@@ -8,16 +8,73 @@ A lightweight HL7 FHIR facade over [hermes](https://github.com/wardle/hermes), a
 
 The HL7 FHIR specification includes support for a terminology API, including looking up codes and translation. 
 
-This software provides a simple FHIR server implementation, making use of the [HAPI FHIR](https://hapifhir.io) library
-in order to expose the functionality available in `hermes` via a FHIR terminology API.
+This software currently provides a simple FHIR server implementation, making use of the 
+[HAPI FHIR](https://hapifhir.io) library in order to expose the functionality available in `hermes` via a FHIR terminology API. 
 
-I do not *usually* advise using a FHIR terminology server in order to fully make use of
-SNOMED CT in health and care applications. In essence, the FHIR terminology standard
-supposes that you might wish to treat terminologies interchangeably, but any real
+However, the FHIR terminology specification is quite simple, defining a HTTP REST API 
+through which terminology data can be returned. In static languages, such as Java, one must
+take the FHIR specifications and generate code from those specifications. That code
+is then used to generate data. In dynamic languages, while code generation can be 
+used, it makes more sense to just process data.
+
+The current development plan is therefore to develop `hades` as a generic FHIR terminology
+server, which can provide access to multiple codesystems including those in the 
+FHIR standard, as well as external codesystems such as SNOMED CT. For small codesystems,
+and the codesystems that form part of FHIR itself, these can be imported directly
+from the local filesystem in their canonical formats. For larger codesystems, such
+as SNOMED CT, an external library such as [hermes](https://github.com/wardle/hermes), 
+can be used.
+
+Historically, I have not *usually* advised using a FHIR terminology server in 
+order to fully make use of SNOMED CT in health and care applications. In essence, 
+the FHIR terminology standard supposes that you might wish to treat 
+terminologies interchangeably, but any real
 usage outside of trivial applications ends up making use of ad-hoc extensions 
 that are usually terminology server specific. As such, you end up simply using 
-the FHIR standard as a transport. There are some trivial uses such as 
-code lookup, autocompletion and subsumption testing that `hades` supports. 
+the FHIR standard as a transport. 
+
+However, there is a need to be able to handle certain aspects of codesystems in
+a generic way, and the FHIR terminology specification enables that approach. We need
+good tooling to make sense of codes in context, independent of source applications. 
+
+The core principles behind the design of `hades` are therefore:
+
+- dynamic pluggable codesystems
+- immutability by default - prefer to build a new service rather than 
+changing-in-place - load codesystems declaratively and reproducibly with versioning
+- codesystems can be loaded from FHIR resources (e.g local JSON for built-in 
+FHIR codesystems), custom modules (e.g. for SNOMED CT via `hermes`), or
+local data such as CSV, JSON and EDN.
+
+The [[FHIR terminology service standard]](http://hl7.org/fhir/terminology-service.html) defines the following endpoints:
+
+- Specific results in the capabilities endpoint to list supported codesystems
+- [base]/ValueSet
+  - Value set expansion : e.g. `GET [base]/ValueSet/23/$expand?filter=abdo`
+  - Value set validation : e.g. `GET [base]/ValueSet/23/$validate-code?system=http://loinc.org&code=1963-8&display=test`
+  - Batch validation
+- [base]/CodeSystem
+  - Concept lookup : e.g. `GET [base]/CodeSystem/loinc/$lookup?code=1963-8` or 
+  `GET [base]/CodeSystem/$lookup?system=http://loinc.org&code=1963-8&property=code&property=display&property=designations`
+  - Subsumption testing : e.g. `GET [base]/CodeSystem/$subsumes?system=http://snomed.info/sct&codeA=235856003&codeB=3738000`
+- [base]/ConceptMap
+  - Translation : e.g. `GET [base]/ConceptMap/$translate?system=http://hl7.org/fhir/composition-status
+    &code=preliminary&source=http://hl7.org/fhir/ValueSet/composition-status
+    &target=http://terminology.hl7.org/ValueSet/v3-ActStatus`
+  - Batch translation - see [[https://hl7.org/fhir/terminology-service.html#batch2]](https://hl7.org/fhir/terminology-service.html#batch2
+
+This means that the architecture contains the following modules:
+
+- server - a web server with routes for a FHIR terminology server /ValueSet /CodeSystem and /ConceptMap
+- format - processing to parse and emit appropriately structured JSON and XML to and from FHIR standard
+- registry - a registry of supported codesystems and how they are implemented
+- implementations - different codesystems will have different implementations of each capability
+- import - a mechanism to import codesystems / valuesets from a filesystem, or another FHIR server, and make them
+available, or cached, within `hades`.
+
+
+
+
 
 # Quickstart
 
