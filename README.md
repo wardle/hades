@@ -4,7 +4,21 @@
 [![Scc Cocomo Badge](https://sloc.xyz/github/wardle/hades?category=cocomo&avg-wage=100000)](https://github.com/wardle/hades/)
 
 
-A lightweight HL7 FHIR facade over [hermes](https://github.com/wardle/hermes), a SNOMED CT terminology server. 
+A lightweight HL7 FHIR server.
+
+
+This is currently in development, but it currently works as a lightweight 
+wrapper over [hermes](https://github.com/wardle/hermes), a SNOMED CT terminology server. 
+
+The development plan is to turn this into a general purpose FHIR terminology 
+server. Unlike most servers, it will be lightweight and principally designed
+to operate read-only. It will provide access to terminology services via a 
+pluggable architecture, permitting the use of backend servers (such as `hermes` 
+for SNOMED CT) together with an ability to import general purpose and custom
+value sets from the filesystem.
+
+
+# Background
 
 The HL7 FHIR specification includes support for a terminology API, including looking up codes and translation. 
 
@@ -73,6 +87,17 @@ This means that the architecture contains the following modules:
 available, or cached, within `hades`.
 
 
+The current code tightly couples a FHIR terminology API with the underlying
+`hermes` service and so while an interesting proof-of-concept, needs reworking.
+
+The roadmap is therefore:
+
+1. Pluggable architecture with dynamic registration of codesystems, value sets and concept maps.
+2. Exploratory work to determine whether better to forego using the HAPI FHIR library in favour of 
+directly returning data. Initial experiments suggest this is possible, but for XML support.
+3. Ability to use Hermes as a codesystem, valueset and concept map 'provider'.
+4. Ability to load in and register FHIR value sets from the specification
+5. Ability to load in and register custom value sets from the local filesystem
 
 
 
@@ -296,7 +321,7 @@ Result
 }
 ```
 
-# Design / development notes
+# Original (and now outdated) design / development notes
 
 see https://confluence.ihtsdotools.org/display/FHIR/Implementing+Terminology+Services+with+SNOMED+CT
 
