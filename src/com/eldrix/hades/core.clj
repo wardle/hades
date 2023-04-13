@@ -6,16 +6,15 @@
             [com.eldrix.hades.convert :as convert]
             [com.eldrix.hermes.core :as hermes])
   (:import (ca.uhn.fhir.context FhirContext)
-           (org.eclipse.jetty.servlet ServletContextHandler ServletHolder)
-           (ca.uhn.fhir.rest.server RestfulServer IResourceProvider)
-           (javax.servlet Servlet)
-           (ca.uhn.fhir.rest.server.interceptor ResponseHighlighterInterceptor)
-           (org.eclipse.jetty.server Server ServerConnector)
            (ca.uhn.fhir.rest.annotation OperationParam)
-           (org.hl7.fhir.r4.model CodeSystem ValueSet ValueSet$ValueSetExpansionComponent ConceptMap)
-           (java.util Locale)
-           (org.hl7.fhir.r4.model.codesystems PublicationStatus)
-           (com.eldrix.hermes.core Service)))
+           (ca.uhn.fhir.rest.server RestfulServer IResourceProvider)
+           (ca.uhn.fhir.rest.server.interceptor ResponseHighlighterInterceptor)
+           (javax.servlet Servlet)
+           (org.eclipse.jetty.server Server ServerConnector)
+           (org.eclipse.jetty.servlet ServletContextHandler ServletHolder)
+           (org.hl7.fhir.r4.model CodeSystem ValueSet ValueSet$ValueSetExpansionComponent ConceptMap)))
+
+
 
 (definterface LookupCodeSystemOperation
   (^org.hl7.fhir.r4.model.Parameters lookup [^ca.uhn.fhir.rest.param.StringParam code
@@ -65,7 +64,7 @@
                                                 ^org.hl7.fhir.r4.model.BooleanType reverse]))
 
 
-(deftype CodeSystemResourceProvider [^Service svc]
+(deftype CodeSystemResourceProvider [svc]
   IResourceProvider
   (getResourceType [_this] CodeSystem)
   ;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -102,7 +101,7 @@
       (and codingA codingB)
       (convert/subsumes? :svc svc :systemA (.getSystem codingA) :codeA (.getValue codingA) :systemB (.getSystem codingB) :codeB (.getValue codingB)))))
 
-(deftype ValueSetResourceProvider [^Service svc]
+(deftype ValueSetResourceProvider [svc]
   IResourceProvider
   (getResourceType [_this] ValueSet)
   ;;;;;;;;;;;;;;;;;;;;;;;
@@ -127,18 +126,16 @@
             ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "displayLanguage"}} displayLanguage]
     (log/debug "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
     (when-let [constraint (convert/parse-implicit-value-set (.getValue url))]
-      (let [ecl (if-not param-filter
-                  (:ecl constraint)
-                  (str (:ecl constraint) " {{ term = \"" (.getValue param-filter) "\", type = syn }}"))
-            results (hermes/search svc {:constraint         ecl
-                                        :inactive-concepts? (convert/parse-boolean activeOnly :default true :strict true)})
+      (let [results (hermes/search svc (cond-> {:constraint (:ecl constraint)
+                                                :inactive-concepts? (convert/parse-boolean activeOnly :default true :strict true)}
+                                               param-filter (assoc :s (.getValue param-filter))))
             components (map convert/result->vs-component results)]
         (doto (ValueSet.)
           (.setExpansion (doto (ValueSet$ValueSetExpansionComponent.)
                            (.setTotal (count results))
                            (.setContains components)))))))) ;; components = ValueSetExpansionContainsComponent
 
-(deftype ConceptMapResourceProvider [^Service svc]
+(deftype ConceptMapResourceProvider [svc]
   IResourceProvider
   (getResourceType [_this] ConceptMap)
   ;;;;;;;;;;;;;;;;;;;;;;;
@@ -160,7 +157,7 @@
     (log/debug "conceptmap/$translate:" {:url url :code code :system system :version version :source source :coding coding :codeableConcept codeableConcept :target target :targetSystem targetSystem :reverse reverse})
     (convert/make-parameters {:operation :translate :url url})))
 
-(defn ^Servlet make-r4-servlet [^Service svc]
+(defn make-r4-servlet ^Servlet [svc]
   (proxy [RestfulServer] [(FhirContext/forR4)]
     (initialize []
       (log/info "Initialising HL7 FHIR R4 server; providers: CodeSystem ValueSet")
@@ -170,7 +167,7 @@
       (log/debug "Resource providers:" (seq (.getResourceProviders this)))
       (.registerInterceptor this (ResponseHighlighterInterceptor.)))))
 
-(defn ^Server make-server [^Service svc {:keys [port]}]
+(defn make-server ^Server [svc {:keys [port]}]
   (let [servlet-holder (ServletHolder. ^Servlet (make-r4-servlet svc))
         handler (doto (ServletContextHandler. ServletContextHandler/SESSIONS)
                   (.setContextPath "/")
