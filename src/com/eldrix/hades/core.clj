@@ -127,7 +127,7 @@
     (log/debug "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
     (when-let [constraint (convert/parse-implicit-value-set (.getValue url))]
       (let [results (hermes/search svc (cond-> {:constraint (:ecl constraint)
-                                                :inactive-concepts? (convert/parse-boolean activeOnly :default true :strict true)}
+                                                :inactive-concepts? (convert/parse-fhir-boolean activeOnly :default true :strict true)}
                                                param-filter (assoc :s (.getValue param-filter))))
             components (map convert/result->vs-component results)]
         (doto (ValueSet.)

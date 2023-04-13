@@ -10,7 +10,7 @@
 
 (def snomed-system-uri "http://snomed.info/sct")
 
-(defn parse-boolean
+(defn parse-fhir-boolean
   "Parse a FHIR boolean from a string but with an optional default.
   See https://www.hl7.org/fhir/codesystem-data-types.html#data-types-boolean"
   [s & {:keys [default strict] :or {strict true}}]
