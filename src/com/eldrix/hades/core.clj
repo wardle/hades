@@ -204,10 +204,10 @@
     (.start server))
 
   (hermes/search svc {:s "mnd"})
-  (hermes/get-concept svc 24700007)
+  (hermes/concept svc 24700007)
 
-  (hermes/get-preferred-synonym svc 233753001 "en")
-  (hermes/get-release-information svc)
-  (keys (hermes/get-extended-concept svc 138875005))
-  (get-in (hermes/getExtendedConcept svc 24700007) [:parent-relationships com.eldrix.hermes.snomed/IsA]))
+  (hermes/preferred-synonym svc 233753001 "en")
+  (hermes/release-information svc)
+  (keys (hermes/extended-concept svc 138875005))
+  (get-in (hermes/extended-concept svc 24700007) [:parent-relationships com.eldrix.hermes.snomed/IsA]))
 

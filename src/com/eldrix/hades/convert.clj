@@ -92,11 +92,11 @@
   [& {:keys [svc ^String system ^long code ^String displayLanguage]}]
   (when (= snomed-system-uri system)
     (let [lang (or (when displayLanguage displayLanguage) (.toLanguageTag (Locale/getDefault)))
-          result (hermes/get-extended-concept svc code)
-          preferred-description ^String (:term (hermes/get-preferred-synonym svc code lang))
-          usage-descriptions {snomed/Synonym            (hermes/get-preferred-synonym svc snomed/Synonym lang)
-                              snomed/FullySpecifiedName (hermes/get-preferred-synonym svc snomed/FullySpecifiedName lang)}
-          core-release-information (first (hermes/get-release-information svc))]
+          result (hermes/extended-concept svc code)
+          preferred-description ^String (:term (hermes/preferred-synonym svc code lang))
+          usage-descriptions {snomed/Synonym            (hermes/preferred-synonym svc snomed/Synonym lang)
+                              snomed/FullySpecifiedName (hermes/preferred-synonym svc snomed/FullySpecifiedName lang)}
+          core-release-information (first (hermes/release-information svc))]
       (make-parameters
         {"name"        (:term core-release-information)
          "version"     (str "http://snomed.info/sct/" (:moduleId core-release-information) "/" (.format (DateTimeFormatter/BASIC_ISO_DATE) (:effectiveTime core-release-information))) ;; FIXME: version from module from the concept at hand?
