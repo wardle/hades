@@ -129,12 +129,15 @@
     (let [codeA' (Long/parseLong codeA)
           codeB' (Long/parseLong codeB)]
       (make-parameters
-        {:outcome (cond
-                    ;; TODO: other equivalence checks?  (e.g. use SAME_AS reference set for example?
-                    (and (= systemA systemB) (= codeA' codeB')) "equivalent"
-                    (hermes/subsumed-by? svc codeA' codeB') "subsumed-by" ;; A is subsumed by B
-                    (hermes/subsumed-by? svc codeB' codeA') "subsumes" ;; A subsumes B
-                    :else "not-subsumed")}))))
+        {:outcome
+         (cond
+           ;; simple if they are the same
+           (and (= systemA systemB) (= codeA' codeB')) "equivalent"
+           (hermes/subsumed-by? svc codeA' codeB') "subsumed-by" ;; A is subsumed by B
+           (hermes/subsumed-by? svc codeB' codeA') "subsumes" ;; A subsumes B
+           ;; look up historical associations, and check for equivalence  - this catches SAME-AS and REPLACED-BY etc.
+           (and (= systemA systemB) ((hermes/with-historical svc codeA') codeB')) "equivalent"
+           :else "not-subsumed")}))))
 
 (defn parse-implicit-value-set
   "Parse a FHIR value set from a single URL into an expression constraint.
