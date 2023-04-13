@@ -1,15 +1,12 @@
 (ns com.eldrix.hades.convert
   (:require [clojure.string :as str]
-            [clojure.walk :as walk]
             [com.eldrix.hermes.core :as hermes]
             [com.eldrix.hermes.snomed :as snomed])
-  (:import (org.hl7.fhir.r4.model Parameters Base Parameters$ParametersParameterComponent StringType BooleanType CodeableConcept Coding CodeType ValueSet$ValueSetExpansionContainsComponent ValueSet$ConceptReferenceDesignationComponent)
-           (java.util List Locale)
+  (:import (ca.uhn.fhir.rest.server.exceptions NotImplementedOperationException)
            (com.eldrix.hermes.snomed Description Result)
            (java.time.format DateTimeFormatter)
-           (ca.uhn.fhir.rest.server.exceptions NotImplementedOperationException)
-           (ca.uhn.fhir.context FhirContext)
-           (com.eldrix.hermes.core Service)))
+           (java.util Locale)
+           (org.hl7.fhir.r4.model CodeType Coding Parameters Parameters$ParametersParameterComponent StringType ValueSet$ConceptReferenceDesignationComponent ValueSet$ValueSetExpansionContainsComponent BooleanType)))
 
 (def snomed-system-uri "http://snomed.info/sct")
 
@@ -92,7 +89,7 @@
 (defn lookup
   "Lookup a SNOMED code.
   Returns properties as per https://www.hl7.org/fhir/terminology-service.html#standard-props."
-  [& {:keys [^Service svc ^String system ^long code ^String displayLanguage]}]
+  [& {:keys [svc ^String system ^long code ^String displayLanguage]}]
   (when (= snomed-system-uri system)
     (let [lang (or (when displayLanguage displayLanguage) (.toLanguageTag (Locale/getDefault)))
           result (hermes/get-extended-concept svc code)
@@ -125,18 +122,17 @@
   - subsumes
   - subsumed-by
   - not-subsumed."
-  [& {:keys [^Service svc ^String systemA ^String codeA ^String systemB ^String codeB]}]
+  [& {:keys [svc ^String systemA ^String codeA ^String systemB ^String codeB]}]
   (when (and (= snomed-system-uri systemA) (= snomed-system-uri systemB)) ;;; TODO: support non SNOMED codes with automapping?
     (let [codeA' (Long/parseLong codeA)
           codeB' (Long/parseLong codeB)]
       (make-parameters
         {:outcome (cond
-                    (and (= systemA systemB) (= codeA' codeB'))
-                    "equivalent"                            ;; TODO: other equivalence checks?  (e.g. use SAME_AS reference set for example?
+                    ;; TODO: other equivalence checks?  (e.g. use SAME_AS reference set for example?
+                    (and (= systemA systemB) (= codeA' codeB')) "equivalent"
                     (hermes/subsumed-by? svc codeA' codeB') "subsumed-by" ;; A is subsumed by B
                     (hermes/subsumed-by? svc codeB' codeA') "subsumes" ;; A subsumes B
                     :else "not-subsumed")}))))
-
 
 (defn parse-implicit-value-set
   "Parse a FHIR value set from a single URL into an expression constraint.
@@ -216,5 +212,4 @@
   (def ctx (ca.uhn.fhir.context.FhirContext/forR4))
   (def parser (doto (.newJsonParser ctx)
                 (.setPrettyPrint true)))
-  (.encodeResourceToString parser (make-parameters test-map))
-  )
+  (.encodeResourceToString parser (make-parameters test-map)))
