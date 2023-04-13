@@ -111,7 +111,9 @@
                          (let [parents (get-in result [:direct-parent-relationships com.eldrix.hermes.snomed/IsA])]
                            (map #(hash-map :code :parent :value %) parents))
                          (let [children (get-in result [:direct-child-relationships com.eldrix.hermes.snomed/IsA])]
-                           (map #(hash-map :code :parent :value %) children)))
+                           (map #(hash-map :code :child :value %) children))
+                         (reduce (fn [acc {:keys [typeId relationshipGroup value]}]
+                                   (conj acc {:code typeId :display (:term (hermes/preferred-synonym svc typeId lang)) :value value :group relationshipGroup})) [] (hermes/concrete-values svc code)))
          "designation" (map #(description->params % usage-descriptions) (:descriptions result))}))))
 
 ;; TODO: we could quite easily provide subsumes for other coding systems for which we have maps - eg. Read code / ICD etc...
