@@ -17,6 +17,8 @@ pluggable architecture, permitting the use of backend servers (such as `hermes`
 for SNOMED CT) together with an ability to import general purpose and custom
 value sets from the filesystem.
 
+Please see branch ['decoupled-architecture'](https://github.com/wardle/hades/tree/decoupled-architecture)
+for ongoing development.
 
 # Background
 
