@@ -3,8 +3,10 @@
   See https://hl7.org/fhir/terminology-service.html"
   (:gen-class)
   (:require [clojure.tools.logging.readable :as log]
-            [com.eldrix.hades.convert :as convert]
-            [com.eldrix.hermes.core :as hermes])
+            [com.eldrix.hades.fhir :as fhir]
+            [com.eldrix.hermes.core :as hermes]
+            [com.eldrix.hades.registry :as registry]
+            [com.eldrix.hades.snomed :as snomed])
   (:import (ca.uhn.fhir.context FhirContext)
            (ca.uhn.fhir.rest.annotation OperationParam)
            (ca.uhn.fhir.rest.server RestfulServer IResourceProvider)
@@ -12,7 +14,7 @@
            (javax.servlet Servlet)
            (org.eclipse.jetty.server Server ServerConnector)
            (org.eclipse.jetty.servlet ServletContextHandler ServletHolder)
-           (org.hl7.fhir.r4.model CodeSystem ValueSet ValueSet$ValueSetExpansionComponent ConceptMap)))
+           (org.hl7.fhir.r4.model CodeSystem OperationOutcome ValueSet ValueSet$ValueSetExpansionComponent ConceptMap)))
 
 
 
@@ -81,7 +83,7 @@
     (log/debug "codesystem/$lookup: " {:code code :system system :version version :coding coding :lang displayLanguage :properties property})
     (let [code' (or (when code (.getValue code)) (when coding (.getValue coding)))
           system' (or (when system (.getValue system)) (when coding (.getSystem coding)))]
-      (convert/lookup :svc svc :code (Long/parseLong code') :system system' :displayLanguage displayLanguage)))
+      (fhir/map->parameters (registry/codesystem-lookup {:system system' :code code' :displayLanguage displayLanguage}))))
 
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;
   SubsumesCodeSystemOperation
@@ -95,11 +97,12 @@
               ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "codingA"}} codingA
               ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "codingB"}} codingB]
     (log/debug "codesystem/$subsumes: " {:codeA codeA :codeB codeB :system system :version version :codingA codingA :codingB codingB})
-    (cond
-      (and codeA codeB system)
-      (convert/subsumes? :svc svc :systemA (.getValue system) :codeA (.getValue codeA) :systemB (.getValue system) :codeB (.getValue codeB))
-      (and codingA codingB)
-      (convert/subsumes? :svc svc :systemA (.getSystem codingA) :codeA (.getValue codingA) :systemB (.getSystem codingB) :codeB (.getValue codingB)))))
+    (fhir/map->parameters
+      (cond
+        (and codeA codeB system)
+        (registry/codesystem-subsumes {:systemA (.getValue system) :codeA (.getValue codeA) :systemB (.getValue system) :codeB (.getValue codeB)})
+        (and codingA codingB)
+        (registry/codesystem-subsumes {:systemA (.getSystem codingA) :codeA (.getValue codingA) :systemB (.getSystem codingB) :codeB (.getValue codingB)})))))
 
 (deftype ValueSetResourceProvider [svc]
   IResourceProvider
@@ -125,15 +128,14 @@
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludePostCoordinated"}} excludePostCoordinated
             ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "displayLanguage"}} displayLanguage]
     (log/debug "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
-    (when-let [constraint (convert/parse-implicit-value-set (.getValue url))]
-      (let [results (hermes/search svc (cond-> {:constraint (:ecl constraint)
-                                                :inactive-concepts? (not (and activeOnly (convert/parse-fhir-boolean (.getValue activeOnly) :default false :strict true)))}
-                                               param-filter (assoc :s (.getValue param-filter))))
-            components (map convert/result->vs-component results)]
-        (doto (ValueSet.)
-          (.setExpansion (doto (ValueSet$ValueSetExpansionComponent.)
-                           (.setTotal (count results))
-                           (.setContains components)))))))) ;; components = ValueSetExpansionContainsComponent
+    (if-let [results (registry/valueset-expand {:url             (some-> url .getValueAsUriDt .getValueAsString)
+                                                :activeOnly      (some-> activeOnly .getValue fhir/parse-fhir-boolean)
+                                                :filter          (some-> param-filter .getValue)
+                                                :displayLanguage (some-> displayLanguage .getValue)})]
+      (doto (ValueSet.)
+        (.setExpansion (doto (ValueSet$ValueSetExpansionComponent.)
+                         (.setTotal (count results))
+                         (.setContains (map fhir/map->vs-expansion results))))))))
 
 (deftype ConceptMapResourceProvider [svc]
   IResourceProvider
@@ -155,7 +157,7 @@
                ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "targetSystem"}} targetSystem
                ^{:tag org.hl7.fhir.r4.model.BooleanType OperationParam {:name "reverse"}} reverse]
     (log/debug "conceptmap/$translate:" {:url url :code code :system system :version version :source source :coding coding :codeableConcept codeableConcept :target target :targetSystem targetSystem :reverse reverse})
-    (convert/make-parameters {:operation :translate :url url})))
+    (fhir/map->parameters {:operation :translate :url url})))
 
 (defn make-r4-servlet ^Servlet [svc]
   (proxy [RestfulServer] [(FhirContext/forR4)]
@@ -187,7 +189,12 @@
     (let [[index-path port-str] args
           port (Integer/parseInt port-str)
           svc (hermes/open index-path)
+          snomed (snomed/->HermesService svc)
           server (make-server svc {:port port})]
+      (registry/register-codesystem "http://snomed.info/sct" snomed)
+      (registry/register-codesystem "sct" snomed)
+      (registry/register-valueset "http://snomed.info/sct" snomed)
+      (registry/register-valueset "sct" snomed)
       (.start server))))
 
 (comment
