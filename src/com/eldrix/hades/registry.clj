@@ -83,12 +83,10 @@
 
 (defn valueset
   ^ValueSet [uri-or-logical-id]
-  (println "looking for valueset " uri-or-logical-id)
   (if-let [cs (get @valuesets uri-or-logical-id)]
     cs
     (when-let [uri (uri-without-query uri-or-logical-id)]
       (when-not (= uri-or-logical-id uri)
-        (println "trying again: looking for valueset" uri)
         (get @valuesets uri)))))
 
 (defn register-concept-map
