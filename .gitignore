@@ -1,3 +1,4 @@
+.DS_Store
 pom.xml
 pom.xml.asc
 *.jar
@@ -6,6 +7,7 @@ pom.xml.asc
 /classes/
 /target/
 /checkouts/
+/.clj-kondo/
 .lein-deps-sum
 .lein-repl-history
 .lein-plugins/
