@@ -32,8 +32,7 @@
             :extra-deps  {com.cognitect/test-runner
                           {:git/url "https://github.com/cognitect-labs/test-runner.git"
                            :sha     "7284cda41fb9edc0f3bc6b6185cfb7138fc8a023"}}
-            :main-opts   ["-e" "(compile,'com.eldrix.hades.core)"
-                          "-m" "cognitect.test-runner"
+            :main-opts   ["-m" "cognitect.test-runner"
                           "-d" "test"]}
 
            :outdated

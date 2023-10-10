@@ -4,7 +4,9 @@
   (:require [clojure.string :as str]
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hermes.core :as hermes]
-            [com.eldrix.hermes.snomed :as snomed])
+            [com.eldrix.hermes.snomed :as snomed]
+            [lambdaisland.uri :as uri]
+            [lambdaisland.uri.normalize :as normalize])
   (:import (ca.uhn.fhir.rest.server.exceptions NotImplementedOperationException)
            (com.eldrix.hermes.snomed Description)
            (java.time.format DateTimeFormatter)))
@@ -32,6 +34,18 @@
                 :display (:term (get use-terms-map (:typeId d)))}
     "display"  (:term d)}))
 
+
+(defn ^:private parse-snomed-uri
+  "Parses a SNOMED uri into a map of properties."
+  [uri]
+  (let [parsed (uri/parse uri)
+        query-map (uri/query-string->map (:query parsed))
+        [_ _ edition-refset-id _ _ version] (re-matches #"/sct(/(\d*))?(/(version)/(\d{8}))?" (:path parsed))]
+    (assoc (into {} parsed)
+      :query query-map
+      :edition edition-refset-id
+      :version version)))
+
 (defn parse-implicit-value-set
   "Parse a FHIR value set from a single URL into an expression constraint.
   If parsing was successful, returns a map containing:
@@ -51,27 +65,28 @@
   - http://snomed.info/sct?fhir_vs=refset/[sctid] - all concepts in the reference set
   - http://snomed.info/sct?fhir_vs=ecl/[ecl] - all concepts matching the ECL."
   [^String uri]
-  (let [[_ _ edition _ version query] (re-matches #"http://snomed.info/sct(/(\d*))?(/version/(\d{8}))?\?fhir_vs(.*)" uri)]
+  (let [{:keys [edition version query]} (parse-snomed-uri uri)
+        fhir-vs (:fhir_vs query)]
     (cond
       (or edition version)
       (throw (NotImplementedOperationException. "Implicit value sets with edition/version not supported."))
-      (nil? query)
+      (nil? fhir-vs)
       nil
-      (= query "")
+      (= fhir-vs "")
       {:query :all, :ecl "*"}
-      (str/starts-with? query "=isa/")
-      {:query :isa, :ecl (str "<" (subs query 5))}
-      (= "=refset" query)
-      {:query :refsets, :ecl (str "<" snomed/ReferenceSetConcept)}
-      (str/starts-with? query "=refset/")
-      {:query :in-refset, :ecl (str "^" (subs query 8))}
-      (str/starts-with? query "=ecl/")
-      {:query :ecl, :ecl (subs query 5)}
+      (str/starts-with? fhir-vs "isa/")
+      {:query :isa, :ecl (str "<" (subs fhir-vs 4))}
+      (= "refset" fhir-vs)
+      {:query :refsets, :ecl (str "<" snomed/ReferenceSetConcept)} ;; TODO: actually return only reference sets with installed members?
+      (str/starts-with? fhir-vs "refset/")
+      {:query :in-refset, :ecl (str "^" (subs fhir-vs 7))}
+      (str/starts-with? fhir-vs "ecl/")
+      {:query :ecl, :ecl (subs fhir-vs 4)}
       :else
       (throw (NotImplementedOperationException. (str "Implicit valueset for '" uri "' not implemented"))))))
 
-
-(deftype HermesService [svc]
+(deftype HermesService
+  [svc]
   protos/CodeSystem
   (cs-resource [this params])
   (cs-lookup
@@ -103,7 +118,9 @@
                                               :value   value :group relationshipGroup})) [] (hermes/concrete-values svc code')))
          "designation" (map #(description->params % usage-descriptions) (:descriptions result))})))
   (cs-validate-code [this params])
-  (cs-subsumes [this {:keys [systemA codeA systemB codeB]}]
+
+  (cs-subsumes
+    [this {:keys [systemA codeA systemB codeB]}]
     (let [codeA' (Long/parseLong codeA)
           codeB' (Long/parseLong codeB)]
       {:outcome
