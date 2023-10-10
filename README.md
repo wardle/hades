@@ -6,7 +6,6 @@
 
 A lightweight HL7 FHIR server.
 
-
 This is currently in development, but it currently works as a lightweight 
 wrapper over [hermes](https://github.com/wardle/hermes), a SNOMED CT terminology server. 
 
@@ -16,9 +15,6 @@ to operate read-only. It will provide access to terminology services via a
 pluggable architecture, permitting the use of backend servers (such as `hermes` 
 for SNOMED CT) together with an ability to import general purpose and custom
 value sets from the filesystem.
-
-Please see branch ['decoupled-architecture'](https://github.com/wardle/hades/tree/decoupled-architecture)
-for ongoing development.
 
 # Background
 
