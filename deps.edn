@@ -4,14 +4,13 @@
            org.clojure/tools.logging                {:mvn/version "1.2.4"}
            ch.qos.logback/logback-classic           {:mvn/version "1.4.6"}
 
-
-           ca.uhn.hapi.fhir/hapi-fhir-base          {:mvn/version "6.4.4"}
-           ca.uhn.hapi.fhir/hapi-fhir-server        {:mvn/version "6.4.4"}
-           ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "6.4.4"}
+           ca.uhn.hapi.fhir/hapi-fhir-base          {:mvn/version "6.8.3"}
+           ca.uhn.hapi.fhir/hapi-fhir-server        {:mvn/version "6.8.3"}
+           ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "6.8.3"}
 
            com.eldrix/hermes                        {:mvn/version "1.4.1296"}
-           io.pedestal/pedestal.jetty               {:mvn/version "0.5.10"}
-           lambdaisland/uri                         {:mvn/version "1.15.125"}}
+           io.pedestal/pedestal.jetty               {:mvn/version "0.6.1"}
+           lambdaisland/uri                         {:mvn/version "1.16.134"}}
 
  :aliases {:build
            {:deps       {io.github.clojure/tools.build          {:git/tag "v0.9.4" :git/sha "76b78fe"}
