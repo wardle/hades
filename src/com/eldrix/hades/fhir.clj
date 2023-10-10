@@ -1,4 +1,5 @@
 (ns com.eldrix.hades.fhir
+  (:require [clojure.data.json :as json])
   (:import
     (org.hl7.fhir.r4.model CodeType Coding Parameters Parameters$ParametersParameterComponent StringType ValueSet$ConceptReferenceDesignationComponent ValueSet$ValueSetExpansionContainsComponent BooleanType)))
 
@@ -59,7 +60,6 @@
       params)))
 
 
-
 (defn map->vs-expansion
   "Create a FHIR ValueSetExpansion Component from a plain map"
   ^ValueSet$ValueSetExpansionContainsComponent [{:keys [system code display designations]}]
@@ -71,22 +71,23 @@
       (mapv #(ValueSet$ConceptReferenceDesignationComponent. (StringType. %)) designations))))
 
 (comment
-  (def svc (hermes/open "/Users/mark/Dev/hermes/snomed.db"))
-  (hermes/get-extended-concept svc 24700007)
-  (hermes/get-release-information svc)
-  (hermes/get-concept svc 163271000000103)
-  (hermes/get-preferred-synonym svc 900000000000013009 "en-GB")
+  ;; import using plain ol' data
+  (require '[clojure.data.json :as json])
+  (require '[clojure.java.io :as io])
+  (def fhir-valuesets (json/read (io/reader (io/file "/Users/mark/Downloads/definitions/valuesets.json")) :key-fn keyword))
+  (def entries (reduce (fn [acc {:keys [fullUrl] :as entry}] (assoc acc fullUrl entry) ) {} (:entry fhir-valuesets)))
 
-  (hermes/search svc {:constraint "<<50043002:<<263502005=<<19939008"})
-  (= {:query :in-refset :ecl "^123"} (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=refset/123"))
-  (= {:query :isa :ecl "<24700007"} (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=isa/24700007"))
-  (= {:query :all :ecl "*"} (parse-implicit-value-set "http://snomed.info/sct?fhir_vs"))
-  (= nil (parse-implicit-value-set "http://snomed.info/sct?fhirvs=refset/123"))
-  (= {:query :ecl :ecl "<<50043002:<<263502005=<<19939008"}
-     (parse-implicit-value-set "http://snomed.info/sct?fhir_vs=ecl/<<50043002:<<263502005=<<19939008"))
-  (hermes/get-preferred-synonym svc 19939008 "en")
-
+  ;; import using HAPI (r4)
+  (import org.hl7.fhir.r4.model.Bundle)
   (def ctx (ca.uhn.fhir.context.FhirContext/forR4))
-  (def parser (doto (.newJsonParser ctx)
-                (.setPrettyPrint true)))
-  (.encodeResourceToString parser (map->parameters test-map)))
+  (def parser (.newJsonParser ctx))
+
+  (def bundle (.parseResource parser Bundle (io/reader (io/file "/Users/mark/Downloads/definitions/valuesets.json"))))
+
+;; import using HAPI (r5)
+  (import org.hl7.fhir.r5.model.Bundle)
+  (def ctx (ca.uhn.fhir.context.FhirContext/forR5))
+  (def parser (.newJsonParser ctx))
+
+  (def bundle (.parseResource parser Bundle (io/reader (io/file "/Users/mark/Downloads/definitions/valuesets.json")))))
+
