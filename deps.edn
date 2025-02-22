@@ -1,20 +1,20 @@
 {:paths   ["src" "resources"]
 
- :deps    {org.clojure/clojure                      {:mvn/version "1.11.1"}
-           org.clojure/tools.logging                {:mvn/version "1.2.4"}
-           org.clojure/data.json                    {:mvn/version "2.4.0"}
-           ch.qos.logback/logback-classic           {:mvn/version "1.4.11"}
+ :deps    {org.clojure/clojure                      {:mvn/version "1.12.0"}
+           org.clojure/tools.logging                {:mvn/version "1.3.0"}
+           org.clojure/data.json                    {:mvn/version "2.5.1"}
+           ch.qos.logback/logback-classic           {:mvn/version "1.5.16"}
 
            ca.uhn.hapi.fhir/hapi-fhir-base          {:mvn/version "6.8.3"}
            ca.uhn.hapi.fhir/hapi-fhir-server        {:mvn/version "6.8.3"}
            ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "6.8.3"}
 
-           com.eldrix/hermes                        {:mvn/version "1.4.1312"}
+           com.eldrix/hermes                        {:mvn/version "1.4.1454"}
            io.pedestal/pedestal.jetty               {:mvn/version "0.6.1"}
-           lambdaisland/uri                         {:mvn/version "1.16.134"}}
+           lambdaisland/uri                         {:mvn/version "1.19.155"}}
 
  :aliases {:build
-           {:deps       {io.github.clojure/tools.build          {:git/tag "v0.9.6" :git/sha "8e78bcc"}
+           {:deps       {io.github.clojure/tools.build          {:git/tag "v0.10.7" :git/sha "573711e"}
                          slipset/deps-deploy                    {:mvn/version "RELEASE"}
                          io.github.borkdude/gh-release-artifact {:git/sha "4a9a74f0e50e897c45df8cc70684360eb30fce80"}}
             :ns-default build}
@@ -32,7 +32,7 @@
            {:extra-paths ["test" "test/resources"]
             :extra-deps  {com.cognitect/test-runner
                           {:git/url "https://github.com/cognitect-labs/test-runner.git"
-                           :sha     "7284cda41fb9edc0f3bc6b6185cfb7138fc8a023"}}
+                           :sha     "3f288f1f16d167723ad87cc35b1dfee3c1681e10"}}
             :main-opts   ["-m" "cognitect.test-runner"
                           "-d" "test"]}
 
@@ -47,7 +47,7 @@
            :check
            {:extra-deps {athos/clj-check
                          {:git/url "https://github.com/athos/clj-check.git"
-                          :sha     "518d5a1cbfcd7c952f548e6dbfcb9a4a5faf9062"}}
+                          :sha     "d997df866b2a04b7ce7b17533093ee0a2e2cb729"}}
             :main-opts  ["-m" "clj-check.check"]}
 
            :test/cloverage
