@@ -5,12 +5,12 @@
            org.clojure/data.json                    {:mvn/version "2.5.1"}
            ch.qos.logback/logback-classic           {:mvn/version "1.5.16"}
 
-           ca.uhn.hapi.fhir/hapi-fhir-base          {:mvn/version "6.8.3"}
-           ca.uhn.hapi.fhir/hapi-fhir-server        {:mvn/version "6.8.3"}
-           ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "6.8.3"}
+           ca.uhn.hapi.fhir/hapi-fhir-base          {:mvn/version "8.0.0"}
+           ca.uhn.hapi.fhir/hapi-fhir-server        {:mvn/version "8.0.0"}
+           ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "8.0.0"}
 
            com.eldrix/hermes                        {:mvn/version "1.4.1454"}
-           io.pedestal/pedestal.jetty               {:mvn/version "0.6.1"}
+           io.pedestal/pedestal.jetty               {:mvn/version "0.7.2"}
            lambdaisland/uri                         {:mvn/version "1.19.155"}}
 
  :aliases {:build

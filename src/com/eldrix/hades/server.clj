@@ -9,7 +9,7 @@
            (ca.uhn.fhir.rest.annotation OperationParam)
            (ca.uhn.fhir.rest.server RestfulServer IResourceProvider)
            (ca.uhn.fhir.rest.server.interceptor ResponseHighlighterInterceptor)
-           (javax.servlet Servlet)
+           (jakarta.servlet Servlet)
            (org.eclipse.jetty.server Server ServerConnector)
            (org.eclipse.jetty.servlet ServletContextHandler ServletHolder)
            (org.hl7.fhir.r4.model CodeSystem OperationOutcome ValueSet ValueSet$ValueSetExpansionComponent ConceptMap)))
