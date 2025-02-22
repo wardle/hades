@@ -72,11 +72,13 @@
 
 (comment
   ;; import using plain ol' data
-  (require '[clojure.data.json :as json])
   (require '[clojure.java.io :as io])
   (def fhir-valuesets (json/read (io/reader (io/file "/Users/mark/Downloads/definitions/valuesets.json")) :key-fn keyword))
   (def entries (reduce (fn [acc {:keys [fullUrl] :as entry}] (assoc acc fullUrl entry) ) {} (:entry fhir-valuesets)))
-
+  (get entries "http://hl7.org/fhir/CodeSystem/unit-of-presentation")
+  (into #{} (map #(get-in % [:resource :resourceType]) (vals entries)))
+  (def codesystems (filter (fn [entry]
+                             (= "CodeSystem" (get-in entry [:resource :resourceType]))) (vals entries)))
   ;; import using HAPI (r4)
   (import org.hl7.fhir.r4.model.Bundle)
   (def ctx (ca.uhn.fhir.context.FhirContext/forR4))
