@@ -84,20 +84,24 @@ This means that the architecture contains the following modules:
 - import - a mechanism to import codesystems / valuesets from a filesystem, or another FHIR server, and make them
 available, or cached, within `hades`.
 
+## Current development roadmap
 
-The current code tightly couples a FHIR terminology API with the underlying
-`hermes` service and so while an interesting proof-of-concept, needs reworking.
+`hades` can already be used in production as a lightweight FHIR terminology server for SNOMED CT, but it does not 
+yet support other codesystems. Such support will be straightforward, and we simply need to add additional
+'pluggable' modules into the registry.
 
-The roadmap is therefore:
+The roadmap for development is
 
-1. Pluggable architecture with dynamic registration of codesystems, value sets and concept maps.
-2. Exploratory work to determine whether better to forego using the HAPI FHIR library in favour of 
-directly returning data. Initial experiments suggest this is possible, but for XML support.
-3. Ability to use Hermes as a codesystem, valueset and concept map 'provider'.
-4. Ability to load in and register FHIR value sets from the specification
-5. Ability to load in and register custom value sets from the local filesystem
-
-
+- [x] proof-of-concept FHIR terminology server
+- [x] pluggable architecture with dynamic registration of codesystems, value sets and concept maps
+- [x] add ability to use `hermes` as a codesystem, value and concept map 'provider'
+- [ ] exploratory work to determine whether better to forego using the HAPI FHIR library in favour of directly returning data. Initial experiments suggest this is possible, but not for XML support.
+- [ ] add ability to load in and register FHIR value sets from the specification
+- [ ] add ability to load in and register custom value sets from the local filesystem, using JSON, EDN or CSVW
+- [ ] add Java and Clojure APIs for FHIR terminology capabilities when used as a library
+- [ ] improvements to CLI options
+- [ ] build declarative configuration to permit users to choose which codesystems are made available through the hades terminology service
+- [ ] consider exposing functions from hermes to automate the download and installation of SNOMED CT distributions via the hades CLI - make it easier for users to not worry about matching versions for compatibility.
 
 # Quickstart
 
@@ -128,6 +132,8 @@ Result:
 
 Use [`hermes`](https://github.com/wardle/hermes) to create your index file. That tool can automatically download and create an index. 
 After download, it should take less than 5 minutes to start running your FHIR terminology server.
+
+You need to use the correct version of `hermes`. For `hades` v1.4 series, use `hermes` v1.4 series.
 
 # Example usage
 
