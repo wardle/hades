@@ -102,6 +102,7 @@ The roadmap for development is
 - [ ] improvements to CLI options
 - [ ] build declarative configuration to permit users to choose which codesystems are made available through the hades terminology service
 - [ ] consider exposing functions from hermes to automate the download and installation of SNOMED CT distributions via the hades CLI - make it easier for users to not worry about matching versions for compatibility.
+- [ ] add support to test subsumption across codesystems when a map can be found to a common codesystem that permits subsumption testing (e.g. one could test a Read code against ICD-10 by mapping both to SNOMED CT first)
 
 # Quickstart
 
