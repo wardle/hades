@@ -52,8 +52,9 @@
 (s/def ::identifiers (s/coll-of ::identifier))
 (s/def ::name string?)
 (s/def ::title string?)
+(s/def ::description string?)
 (s/def ::codesystem (s/keys :req-un [::url ::identifiers]
-                            :opt-un [::name ::title]))
+                            :opt-un [::name ::title ::description]))
 
 (defn uri-without-query
   [s]
