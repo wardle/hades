@@ -1,0 +1,389 @@
+(ns com.eldrix.hades.fhir-codesystem
+  "Generic file-backed CodeSystem and ValueSet provider.
+
+  Creates providers from FHIR CodeSystem JSON (as Clojure maps). Used both for
+  loading code systems from the filesystem and for the tx-resource mechanism."
+  (:require [clojure.string :as str]
+            [com.eldrix.hades.protocols :as protos]
+            [com.eldrix.hades.registry :as registry]))
+
+(def ^:private value-keys
+  ["valueCode" "valueCoding" "valueString" "valueInteger"
+   "valueBoolean" "valueDecimal" "valueDateTime"])
+
+(defn- extract-property-value
+  "Extract the value from a FHIR concept property, which uses one of several
+  typed keys: valueCode, valueCoding, valueString, valueInteger, etc."
+  [prop]
+  (reduce (fn [_ k]
+            (let [v (get prop k ::not-found)]
+              (if (not= v ::not-found)
+                (reduced v)
+                nil)))
+          nil value-keys))
+
+(defn- flatten-concepts
+  "Recursively flatten nested FHIR CodeSystem concepts into a flat sequence,
+  tracking the parent code for hierarchy building."
+  ([concepts] (flatten-concepts concepts nil))
+  ([concepts parent-code]
+   (mapcat (fn [c]
+             (let [code (get c "code")
+                   entry {:code        code
+                          :display     (get c "display")
+                          :definition  (get c "definition")
+                          :designations (get c "designation")
+                          :properties  (get c "property")
+                          :parent-code parent-code}
+                   children (get c "concept")]
+               (cons entry (when children (flatten-concepts children code)))))
+           concepts)))
+
+(defn- build-code-index
+  "Build a {code-string -> concept-map} index from a flat concept sequence."
+  [flat-concepts]
+  (reduce (fn [idx c] (assoc idx (:code c) c))
+          {} flat-concepts))
+
+(defn- build-hierarchy
+  "Build bidirectional parent/child maps from flat concepts.
+  Uses both structural nesting (parent-code from flatten-concepts) and explicit
+  'parent'/'child' properties."
+  [flat-concepts]
+  (let [add-edge (fn [m from to]
+                   (update m from (fnil conj #{}) to))]
+    (reduce
+      (fn [{:keys [parents children]} c]
+        (let [code (:code c)
+              ;; structural parent from nesting
+              p1 (when (:parent-code c)
+                   [{:parent (:parent-code c)}])
+              ;; explicit parent/child properties
+              props (:properties c)
+              p2 (keep (fn [prop]
+                         (when (= "parent" (get prop "code"))
+                           {:parent (extract-property-value prop)}))
+                       props)
+              c2 (keep (fn [prop]
+                         (when (= "child" (get prop "code"))
+                           {:child (extract-property-value prop)}))
+                       props)
+              all-parents (map :parent (concat p1 p2))
+              all-children (map :child c2)]
+          {:parents  (reduce (fn [m p] (add-edge m code p)) parents all-parents)
+           :children (reduce (fn [m ch] (-> (add-edge m code ch)
+                                            (add-edge ch code)))
+                             (reduce (fn [m p] (add-edge m p code)) children all-parents)
+                             all-children)}))
+      {:parents {} :children {}}
+      flat-concepts)))
+
+(defn- ancestor?
+  "Check whether `ancestor-code` is an ancestor of `code` by walking the
+  parent map. Uses BFS with a visited set to handle cycles defensively."
+  [parents-map code ancestor-code]
+  (loop [queue (vec (get parents-map code))
+         visited #{}]
+    (when (seq queue)
+      (let [current (peek queue)
+            queue' (pop queue)]
+        (cond
+          (= current ancestor-code) true
+          (visited current) (recur queue' visited)
+          :else (recur (into queue' (get parents-map current))
+                       (conj visited current)))))))
+
+(defn- collect-ancestors
+  "Collect all ancestor codes of `code` via BFS on parents map."
+  [parents-map code]
+  (loop [queue (vec (get parents-map code))
+         visited #{}
+         result []]
+    (if (seq queue)
+      (let [current (peek queue)
+            queue' (pop queue)]
+        (if (visited current)
+          (recur queue' visited result)
+          (recur (into queue' (get parents-map current))
+                 (conj visited current)
+                 (conj result current))))
+      result)))
+
+(defn- get-concept-property
+  "Extract the value of a named property from a concept's :properties list.
+  Returns ::not-found when the property is not present (as distinct from
+  a property with a falsy value like false or 0)."
+  [concept property-name]
+  (reduce (fn [_ prop]
+            (if (= property-name (get prop "code"))
+              (reduced (extract-property-value prop))
+              ::not-found))
+          ::not-found
+          (:properties concept)))
+
+(defn- concept-matches-filter?
+  "Test whether a concept matches a single FHIR filter criterion.
+  Returns true if the concept passes the filter."
+  [_code-index _children-map parents-map concept {:keys [property op value]}]
+  (case op
+    "is-a" (or (= (:code concept) value)
+               (ancestor? parents-map (:code concept) value))
+    "descendant-of" (ancestor? parents-map (:code concept) value)
+    "is-not-a" (not (or (= (:code concept) value)
+                        (ancestor? parents-map (:code concept) value)))
+    "generalizes" (or (= (:code concept) value)
+                      (contains? (set (collect-ancestors parents-map value)) (:code concept)))
+    "=" (if (= property "code")
+          (= (:code concept) value)
+          (let [pv (get-concept-property concept property)]
+            (and (not= pv ::not-found) (= (str pv) value))))
+    "regex" (let [pat (re-pattern value)
+                  pv (if (= property "code")
+                       (:code concept)
+                       (let [v (get-concept-property concept property)]
+                         (when (not= v ::not-found) (str v))))]
+              (boolean (when pv (re-matches pat pv))))
+    "in" (let [vals (set (str/split value #","))]
+           (if (= property "code")
+             (contains? vals (:code concept))
+             (let [pv (get-concept-property concept property)]
+               (and (not= pv ::not-found) (contains? vals (str pv))))))
+    "not-in" (let [vals (set (str/split value #","))]
+               (if (= property "code")
+                 (not (contains? vals (:code concept)))
+                 (let [pv (get-concept-property concept property)]
+                   (or (= pv ::not-found) (not (contains? vals (str pv)))))))
+    "exists" (let [exists? (= "true" value)
+                   pv (get-concept-property concept property)]
+               (if exists?
+                 (not= pv ::not-found)
+                 (= pv ::not-found)))
+    false))
+
+(defn- display-matches?
+  "Check whether a display string matches the concept, checking against the
+  primary display and all designations. Always case-insensitive for display
+  matching per FHIR terminology service spec."
+  [concept display]
+  (let [display-lower (str/lower-case display)
+        primary (:display concept)
+        designations (:designations concept)]
+    (or (and primary (= display-lower (str/lower-case primary)))
+        (some (fn [d]
+                (when-let [v (get d "value")]
+                  (= display-lower (str/lower-case v))))
+              designations))))
+
+(defn- concept-inactive?
+  "Check whether a concept is inactive based on its properties.
+  Checks both 'status' property (retired/inactive/deprecated) and
+  'inactive' boolean property."
+  [concept]
+  (let [inactive-prop (get-concept-property concept "inactive")
+        status-prop (get-concept-property concept "status")]
+    (or (and (not= inactive-prop ::not-found) (boolean inactive-prop))
+        (and (not= status-prop ::not-found)
+             (contains? #{"retired" "inactive" "deprecated"} status-prop)))))
+
+(defn- concept-abstract?
+  "Check whether a concept has the notSelectable/abstract property."
+  [concept]
+  (let [v (get-concept-property concept "notSelectable")]
+    (if (not= v ::not-found)
+      (boolean v)
+      false)))
+
+(deftype FhirCodeSystem [url version metadata code-index hierarchy]
+  protos/CodeSystem
+  (cs-resource [_ _params]
+    (assoc metadata "url" url "version" version))
+
+  (cs-lookup [_ {:keys [code]}]
+    (when-let [concept (get code-index code)]
+      (let [cs-name (get metadata "name")
+            parents (get (:parents hierarchy) code)
+            children (get (:children hierarchy) code)
+            props (:properties concept)
+            has-children? (boolean (seq children))
+            inactive? (or (some (fn [prop]
+                                  (and (= "status" (get prop "code"))
+                                       (= "retired" (extract-property-value prop))))
+                                props)
+                          false)]
+        {"name"        cs-name
+         "version"     version
+         "display"     (:display concept)
+         "system"      url
+         "code"        (keyword code)
+         "definition"  (:definition concept)
+         "abstract"    has-children?
+         "property"    (concat
+                         [{:code :inactive :value inactive?}]
+                         (when parents
+                           (map (fn [p] {:code :parent
+                                         :value (keyword p)
+                                         "description" (:display (get code-index p))})
+                                parents))
+                         (when children
+                           (map (fn [c] {:code :child
+                                         :value (keyword c)
+                                         "description" (:display (get code-index c))})
+                                children))
+                         (keep (fn [prop]
+                                 (let [pc (get prop "code")
+                                       v (extract-property-value prop)]
+                                   (when (and pc v (not (#{"parent" "child"} pc)))
+                                     {:code (keyword pc) :value v})))
+                               props))
+         "designation" (mapv (fn [d]
+                               (let [use-coding (get d "use")]
+                                 (cond-> {"value" (get d "value")}
+                                   (get d "language") (assoc "language" (keyword (get d "language")))
+                                   use-coding (assoc "use" {:system  (get use-coding "system")
+                                                            :code    (get use-coding "code")
+                                                            :display (get use-coding "display")}))))
+                             (:designations concept))})))
+
+  (cs-validate-code [_ {:keys [code display]}]
+    (if-let [concept (get code-index code)]
+      (let [result {"result"  true
+                    "display" (:display concept)
+                    "code"    (keyword code)
+                    "system"  url
+                    "version" version}]
+        (if (and display (not (display-matches? concept display)))
+          (let [msg (str "Display '" display "' not found for code '" code "'")]
+            (assoc result "result" false
+                          "message" msg
+                          "issues" [{:severity     "error"
+                                     :type         "invalid"
+                                     :details-code "invalid-display"
+                                     :text         msg
+                                     :expression   ["display"]}]))
+          result))
+      (let [msg (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'")]
+        {"result"  false
+         "code"    (keyword code)
+         "system"  url
+         "version" version
+         "message" msg
+         "issues"  [{:severity     "error"
+                     :type         "code-invalid"
+                     :details-code "invalid-code"
+                     :text         msg
+                     :expression   ["code"]}]})))
+
+  (cs-subsumes [_ {:keys [codeA codeB]}]
+    {:outcome
+     (cond
+       (= codeA codeB) "equivalent"
+       (ancestor? (:parents hierarchy) codeA codeB) "subsumed-by"
+       (ancestor? (:parents hierarchy) codeB codeA) "subsumes"
+       :else "not-subsumed")})
+
+  (cs-find-matches [_ {:keys [filters]}]
+    (let [all-concepts (vals code-index)
+          children-map (:children hierarchy)
+          parents-map (:parents hierarchy)
+          matching (if (seq filters)
+                     (clojure.core/filter
+                       (fn [c]
+                         (every? #(concept-matches-filter? code-index children-map parents-map c %) filters))
+                       all-concepts)
+                     all-concepts)]
+      (map (fn [c]
+             (cond-> {:code    (:code c)
+                      :system  url
+                      :display (:display c)
+                      :designations (mapv #(get % "value") (:designations c))}
+               (concept-inactive? c) (assoc :inactive true)
+               (concept-abstract? c) (assoc :abstract true)))
+           matching)))
+
+  protos/ValueSet
+  (vs-resource [_ _params]
+    {"resourceType" "ValueSet"
+     "url"          url
+     "version"      version
+     "name"         (get metadata "name")
+     "title"        (get metadata "title")
+     "status"       (get metadata "status")})
+
+  (vs-expand [_ {:keys [filter offset count]}]
+    (let [concepts (vals code-index)
+          filtered (if (str/blank? filter)
+                     concepts
+                     (let [f (str/lower-case filter)]
+                       (clojure.core/filter
+                         (fn [c]
+                           (or (and (:display c) (str/includes? (str/lower-case (:display c)) f))
+                               (some (fn [d]
+                                       (when-let [v (get d "value")]
+                                         (str/includes? (str/lower-case v) f)))
+                                     (:designations c))))
+                         concepts)))
+          offset' (or offset 0)
+          paged (cond->> filtered
+                  (pos? offset') (drop offset')
+                  count (take count))]
+      (map (fn [c]
+             (cond-> {:code    (:code c)
+                      :system  url
+                      :display (:display c)
+                      :designations (mapv #(get % "value") (:designations c))}
+               (concept-inactive? c) (assoc :inactive true)
+               (concept-abstract? c) (assoc :abstract true)))
+           paged)))
+
+  (vs-validate-code [_ {:keys [code system display ctx]}]
+    (when (or (nil? system) (= system url))
+      (if-let [concept (get code-index code)]
+        (let [result {"result"  true
+                      "display" (:display concept)
+                      "code"    (keyword code)
+                      "system"  url
+                      "version" version}]
+          (if (and display (not (display-matches? concept display)))
+            (let [lenient? (get ctx :lenient-display-validation true)
+                  msg (str "Display '" display "' differs from preferred '" (:display concept) "'")]
+              (assoc result "result" (boolean lenient?)
+                            "message" msg
+                            "issues" [{:severity     (if lenient? "warning" "error")
+                                       :type         "invalid"
+                                       :details-code "invalid-display"
+                                       :text         msg
+                                       :expression   ["display"]}]))
+            result))
+        (let [msg (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'")]
+          {"result"  false
+           "code"    (keyword code)
+           "system"  url
+           "version" version
+           "message" msg
+           "issues"  [{:severity     "error"
+                       :type         "code-invalid"
+                       :details-code "invalid-code"
+                       :text         msg
+                       :expression   ["code"]}]})))))
+
+(defn make-fhir-code-system
+  "Create a FhirCodeSystem from a parsed FHIR CodeSystem JSON map (string keys).
+  The map must contain at minimum a \"url\" and \"concept\" array."
+  [cs-map]
+  (let [url (get cs-map "url")
+        version (get cs-map "version")
+        flat (flatten-concepts (get cs-map "concept"))
+        code-idx (build-code-index flat)
+        hier (build-hierarchy flat)
+        metadata (select-keys cs-map ["resourceType" "name" "title" "status"
+                                      "description" "experimental" "hierarchyMeaning"
+                                      "content" "caseSensitive" "compositional" "versionNeeded"
+                                      "count"])]
+    (->FhirCodeSystem url version metadata code-idx hier)))
+
+(defn register!
+  "Register a FhirCodeSystem with the global registry under its canonical URL."
+  [^FhirCodeSystem fcs]
+  (let [url (.-url fcs)]
+    (registry/register-codesystem url fcs)
+    (registry/register-valueset url fcs)))

@@ -17,3 +17,6 @@ pom.xml.asc
 .idea
 hades.iml
 /.lsp
+.hades/
+test/resources/conformance-results.json
+test/resources/conformance/

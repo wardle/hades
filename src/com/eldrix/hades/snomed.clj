@@ -13,6 +13,11 @@
 
 (def snomed-system-uri "http://snomed.info/sct")
 
+(defn- version-uri [svc]
+  (let [ri (first (hermes/release-information svc))]
+    (str snomed-system-uri "/" (:moduleId ri) "/version/"
+         (.format (DateTimeFormatter/BASIC_ISO_DATE) (:effectiveTime ri)))))
+
 (def default-use-terms
   {snomed/Synonym            {:term "Synonym"}
    snomed/FullySpecifiedName {:term "Fully specified name"}})
@@ -90,34 +95,80 @@
   protos/CodeSystem
   (cs-resource [this params])
   (cs-lookup
-    [this {:keys [code displayLanguage]}]
+    [_ {:keys [code displayLanguage]}]
     (when-let [code' (parse-long code)]
-      (let [result (hermes/extended-concept svc code')
-            lang-refset-ids (hermes/match-locale svc displayLanguage true)
-            preferred-description ^String (:term (hermes/preferred-synonym* svc code' lang-refset-ids))
-            usage-descriptions {snomed/Synonym            (hermes/preferred-synonym* svc snomed/Synonym lang-refset-ids)
-                                snomed/FullySpecifiedName (hermes/preferred-synonym* svc snomed/FullySpecifiedName lang-refset-ids)}
-            core-release-information (first (hermes/release-information svc))]
-        {"name"        (:term core-release-information)
-         "version"     (str snomed-system-uri (:moduleId core-release-information) "/" (.format (DateTimeFormatter/BASIC_ISO_DATE) (:effectiveTime core-release-information))) ;; FIXME: version from module from the concept at hand?
-         "display"     preferred-description
-         "property"    (concat
-                         [{:code  :inactive
-                           :value (not (get-in result [:concept :active]))}
-                          {:code  :sufficientlyDefined
-                           :value (= snomed/Defined (get-in result [:concept :definitionStatusId]))}
-                          {:code  :moduleId
-                           :value (get-in result [:concept :moduleId])}]
-                         (let [parents (get-in result [:direct-parent-relationships com.eldrix.hermes.snomed/IsA])]
-                           (map #(hash-map :code :parent :value %) parents))
-                         (let [children (get-in result [:direct-child-relationships com.eldrix.hermes.snomed/IsA])]
-                           (map #(hash-map :code :child :value %) children))
-                         (reduce (fn [acc {:keys [typeId relationshipGroup value]}]
-                                   (conj acc {:code    typeId
-                                              :display (:term (hermes/preferred-synonym* svc typeId lang-refset-ids))
-                                              :value   value :group relationshipGroup})) [] (hermes/concrete-values svc code')))
-         "designation" (map #(description->params % usage-descriptions) (:descriptions result))})))
-  (cs-validate-code [this params])
+      (when-let [ec (hermes/extended-concept svc code')]
+        (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
+            preferred (:term (hermes/preferred-synonym* svc code' lang-refset-ids))
+            usage {snomed/Synonym            (hermes/preferred-synonym* svc snomed/Synonym lang-refset-ids)
+                   snomed/FullySpecifiedName  (hermes/preferred-synonym* svc snomed/FullySpecifiedName lang-refset-ids)}
+            ver (version-uri svc)
+            parents (get-in ec [:directParentRelationships snomed/IsA])
+            children (hermes/child-relationships-of-type svc code' snomed/IsA)
+            attrs (dissoc (:directParentRelationships ec) snomed/IsA)]
+        {"name"    "SNOMED CT"
+         "version" ver
+         "display" preferred
+         "system"  snomed-system-uri
+         "code"    (keyword code)
+         "property" (concat
+                      [{:code :inactive :value (not (get-in ec [:concept :active]))}
+                       {:code :sufficientlyDefined :value (= snomed/Defined (get-in ec [:concept :definitionStatusId]))}]
+                      (map (fn [pid] {:code :parent
+                                      :value (keyword (str pid))
+                                      "description" (:term (hermes/preferred-synonym* svc pid lang-refset-ids))})
+                           parents)
+                      (map (fn [cid] {:code :child
+                                      :value (keyword (str cid))
+                                      "description" (:term (hermes/preferred-synonym* svc cid lang-refset-ids))})
+                           children)
+                      (mapcat (fn [[type-id target-ids]]
+                                (map (fn [tid] {:code (keyword (str type-id))
+                                                "code-display" (:term (hermes/preferred-synonym* svc type-id lang-refset-ids))
+                                                :value (keyword (str tid))
+                                                "description" (:term (hermes/preferred-synonym* svc tid lang-refset-ids))})
+                                     target-ids))
+                              attrs)
+                      (map (fn [{:keys [typeId value]}]
+                             {:code (keyword (str typeId))
+                              "code-display" (:term (hermes/preferred-synonym* svc typeId lang-refset-ids))
+                              :value value})
+                           (hermes/concrete-values svc code')))
+         "designation" (map (fn [d] {"language" (keyword (:languageCode d))
+                                      "use" {:system snomed-system-uri
+                                             :code (str (:typeId d))
+                                             :display (:term (get usage (:typeId d)))}
+                                      "value" (:term d)})
+                            (:descriptions ec))}))))
+  (cs-validate-code [_ {:keys [code display displayLanguage]}]
+    (when-let [code' (parse-long code)]
+      (let [ver (version-uri svc)]
+        (if (hermes/concept svc code')
+          (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
+                preferred (:term (hermes/preferred-synonym* svc code' lang-refset-ids))
+                result {"result" true "display" preferred "code" (keyword code)
+                        "system" snomed-system-uri "version" ver}]
+            (if (and display (not= display preferred))
+              (let [msg (str "Display '" display "' not found for code '" code "'")]
+                (assoc result "result" false
+                              "message" msg
+                              "issues" [{:severity     "error"
+                                         :type         "invalid"
+                                         :details-code "invalid-display"
+                                         :text         msg
+                                         :expression   ["display"]}]))
+              result))
+          (let [msg (str "Unknown code '" code "' in the CodeSystem '" snomed-system-uri "' version '" ver "'")]
+            {"result"  false
+             "code"    (keyword code)
+             "system"  snomed-system-uri
+             "version" ver
+             "message" msg
+             "issues"  [{:severity     "error"
+                         :type         "code-invalid"
+                         :details-code "invalid-code"
+                         :text         msg
+                         :expression   ["code"]}]})))))
 
   (cs-subsumes
     [this {:keys [systemA codeA systemB codeB]}]
@@ -132,7 +183,25 @@
          ;; look up historical associations, and check for equivalence  - this catches SAME-AS and REPLACED-BY etc.
          (and (= systemA systemB) ((hermes/with-historical svc codeA') codeB')) "equivalent"
          :else "not-subsumed")}))
-  (cs-find-matches [this params])
+  (cs-find-matches [_ {:keys [filters]}]
+    (let [ecl (if (seq filters)
+                (->> filters
+                     (keep (fn [{:keys [property op value]}]
+                             (when (= property "concept")
+                               (case op
+                                 "is-a" (str "<< " value)
+                                 "descendant-of" (str "< " value)
+                                 "is-not-a" (str "* MINUS << " value)
+                                 "generalizes" (str ">> " value)
+                                 nil))))
+                     (str/join " AND "))
+                "*")]
+      (when-not (str/blank? ecl)
+        (->> (hermes/search svc {:constraint ecl})
+             (map (fn [{:keys [conceptId preferredTerm]}]
+                    {:code    (str conceptId)
+                     :system  snomed-system-uri
+                     :display preferredTerm}))))))
   protos/ValueSet
   (vs-resource [this params])
   (vs-expand [this {:keys [url filter activeOnly]}]
@@ -145,7 +214,47 @@
                             :system snomed-system-uri
                             :display preferredTerm
                             :designations [term]))))))
-  (vs-validate-code [this params])
+  (vs-validate-code [_ {:keys [url code system display displayLanguage]}]
+    (when (= system snomed-system-uri)
+      (when-let [code' (parse-long code)]
+        (let [ver (version-uri svc)]
+          (if-let [{ecl :ecl} (parse-implicit-value-set url)]
+            (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
+                  preferred (:term (hermes/preferred-synonym* svc code' lang-refset-ids))
+                  member? (seq (hermes/intersect-ecl svc [code'] ecl))]
+              (if member?
+                (let [result {"result" true "display" preferred "code" (keyword code)
+                              "system" system "version" ver}]
+                  (if (and display (not= display preferred))
+                    (let [msg (str "Display '" display "' differs from preferred '" preferred "'")]
+                      (assoc result "message" msg
+                                    "issues" [{:severity     "warning"
+                                               :type         "invalid"
+                                               :details-code "invalid-display"
+                                               :text         msg
+                                               :expression   ["display"]}]))
+                    result))
+                (let [code-ref (cond-> (str system "#" code)
+                                display (str " ('" display "')"))
+                      msg (str "The provided code '" code-ref "' was not found in the value set '" url "'")]
+                  {"result"  false
+                   "code"    (keyword code)
+                   "system"  system
+                   "version" ver
+                   "message" msg
+                   "issues"  [{:severity     "error"
+                               :type         "code-invalid"
+                               :details-code "not-in-vs"
+                               :text         msg
+                               :expression   ["code"]}]})))
+            (let [msg (str "Cannot parse value set URL: " url)]
+              {"result"  false
+               "message" msg
+               "issues"  [{:severity     "error"
+                           :type         "not-supported"
+                           :details-code "not-found"
+                           :text         msg
+                           :expression   ["url"]}]}))))))
   protos/ConceptMap
   (cm-resource [this params])
   (cm-translate [this params]))

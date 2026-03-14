@@ -30,6 +30,7 @@
   should be a URL which resolves to the location of the master version of the
   code system, though this is not always possible."
   (:require [clojure.spec.alpha :as s]
+            [clojure.string]
             [com.eldrix.hades.protocols :as protos]
             [lambdaisland.uri :as uri])
   (:import (com.eldrix.hades.protocols CodeSystem ConceptMap ValueSet)
@@ -56,9 +57,33 @@
 (s/def ::codesystem (s/keys :req-un [::url ::identifiers]
                             :opt-un [::name ::title ::description]))
 
+;; Request-scoped overlay context, built from tx-resource parameters.
+;; Overlays are maps of {uri → protocol-impl}. All keys are optional;
+;; nil and {} are equivalent (no overlay).
+(s/def ::codesystems (s/map-of ::uri #(satisfies? protos/CodeSystem %)))
+(s/def ::valuesets (s/map-of ::uri #(satisfies? protos/ValueSet %)))
+(s/def ::conceptmaps (s/map-of ::uri #(satisfies? protos/ConceptMap %)))
+(s/def ::ctx (s/nilable (s/keys :opt-un [::codesystems ::valuesets ::conceptmaps])))
+
 (defn uri-without-query
   [s]
   (str (assoc (uri/uri s) :query nil)))
+
+(defn parse-versioned-uri
+  "Split a FHIR canonical reference into [url version].
+  'http://example.com/cs|1.0' => ['http://example.com/cs' '1.0']
+  'http://example.com/cs'     => ['http://example.com/cs' nil]"
+  [s]
+  (when s
+    (let [idx (.lastIndexOf ^String s "|")]
+      (if (pos? idx)
+        [(.substring ^String s 0 idx) (.substring ^String s (inc idx))]
+        [s nil]))))
+
+(defn versioned-uri
+  "Construct a versioned canonical: url|version. Returns url if version is nil."
+  [url version]
+  (if version (str url "|" version) url))
 
 (defn register-codesystem
   "Register a codesystem implementation by virtue of URI and identifiers within
@@ -66,16 +91,28 @@
   [uri-or-logical-id ^CodeSystem impl]
   (swap! codesystems assoc uri-or-logical-id impl))
 
+(defn- lookup-impl
+  "Look up an implementation from an overlay map and a global atom.
+  Tries the key as-is, then splits url|version if present, then strips query params."
+  [overlay-map global-atom key]
+  (or (get overlay-map key)
+      (get @global-atom key)
+      (let [[base-url version] (parse-versioned-uri key)]
+        (when version
+          (or (get overlay-map (versioned-uri base-url version))
+              (get @global-atom (versioned-uri base-url version)))))
+      (when-let [uri (uri-without-query key)]
+        (when (not= key uri)
+          (or (get overlay-map uri)
+              (get @global-atom uri))))))
+
 (defn codesystem
   "Return a codesystem implementation for the given URI or logical id.
-  If a match cannot be found, and the URI has query parameters, the URI without
-  those query parameters will be used to find an implementation as a fallback."
-  ^CodeSystem [uri-or-logical-id]
-  (if-let [cs (get @codesystems uri-or-logical-id)]
-    cs
-    (when-let [uri (uri-or-logical-id uri-or-logical-id)]
-      (when (not= uri-or-logical-id uri)
-        (get @codesystems uri-or-logical-id)))))
+  Handles url|version syntax and query parameter fallback.
+  When ctx is provided, its :codesystems overlay is checked before global atoms."
+  (^CodeSystem [uri-or-logical-id] (codesystem nil uri-or-logical-id))
+  (^CodeSystem [ctx uri-or-logical-id]
+   (lookup-impl (:codesystems ctx) codesystems uri-or-logical-id)))
 
 (defn register-valueset
   "Register a valueset implementation"
@@ -83,57 +120,179 @@
   (swap! valuesets assoc uri-or-logical-id impl))
 
 (defn valueset
-  ^ValueSet [uri-or-logical-id]
-  (if-let [cs (get @valuesets uri-or-logical-id)]
-    cs
-    (when-let [uri (uri-without-query uri-or-logical-id)]
-      (when-not (= uri-or-logical-id uri)
-        (get @valuesets uri)))))
+  "Return a valueset implementation for the given URI or logical id.
+  Handles url|version syntax and query parameter fallback.
+  When ctx is provided, its :valuesets overlay is checked before global atoms."
+  (^ValueSet [uri-or-logical-id] (valueset nil uri-or-logical-id))
+  (^ValueSet [ctx uri-or-logical-id]
+   (lookup-impl (:valuesets ctx) valuesets uri-or-logical-id)))
 
 (defn register-concept-map
   [source-uri target-uri ^ConceptMap impl]
   (swap! conceptmaps assoc (vector source-uri target-uri) impl))
 
 (defn concept-map
-  ^ConceptMap [uri-or-logical-id]
-  (if-let [cs (get @conceptmaps uri-or-logical-id)]
-    cs
-    (when-let [uri (uri-or-logical-id uri-or-logical-id)]
-      (when (not= uri-or-logical-id uri)
-        (get @conceptmaps uri-or-logical-id)))))
+  (^ConceptMap [uri-or-logical-id] (concept-map nil uri-or-logical-id))
+  (^ConceptMap [ctx uri-or-logical-id]
+   (or (get (:conceptmaps ctx) uri-or-logical-id)
+       (if-let [cm (get @conceptmaps uri-or-logical-id)]
+         cm
+         (when-let [uri (uri-without-query uri-or-logical-id)]
+           (when (not= uri-or-logical-id uri)
+             (or (get (:conceptmaps ctx) uri)
+                 (get @conceptmaps uri))))))))
 
 
 
 
 (defn codesystem-resource
-  [params])
+  ([params] (codesystem-resource nil params))
+  ([ctx params]))
 
 (s/fdef codesystem-lookup
-  :args (s/cat :params ::protos/codesystem-lookup))
+  :args (s/cat :ctx ::ctx :params ::protos/codesystem-lookup))
 (defn codesystem-lookup
   "Given a code/system, get additional details about the concept,
     including definition, status, designations, and properties. One of the
     products of this operation is a full decomposition of a code from a
     structured terminology."
-  [{:keys [system] :as params}]
-  (when-let [cs (codesystem system)]
-    (protos/cs-lookup cs params)))
+  ([params] (codesystem-lookup nil params))
+  ([ctx {:keys [system version] :as params}]
+   (let [lookup-key (if version (versioned-uri system version) system)]
+     (when-let [cs (codesystem ctx lookup-key)]
+       (protos/cs-lookup cs params)))))
 
+(defn codesystem-validate-code
+  ([params] (codesystem-validate-code nil params))
+  ([ctx {:keys [system code version] :as params}]
+   (let [lookup-key (if version (versioned-uri system version) system)]
+   (if-let [cs (codesystem ctx lookup-key)]
+     (protos/cs-validate-code cs params)
+     (let [msg (str "A definition for CodeSystem '" system "' could not be found, so the code cannot be validated")]
+       {"result"  false
+        "code"    (when code (keyword code))
+        "system"  system
+        "message" msg
+        "issues"  [{:severity     "error"
+                    :type         "not-found"
+                    :details-code "not-found"
+                    :text         msg
+                    :expression   ["system"]}]})))))
 
-(defn codesystem-validate-code [params])
 (defn codesystem-subsumes
-  [{:keys [systemA systemB] :as params}]
-  (when-not (= systemA systemB)
-    (throw (ex-info "Currently, can only check subsumption within same codesystem" params)))
-  (when-let [cs (codesystem systemA)]
-    (protos/cs-subsumes cs params)))
-(defn codesystem-find-matches [params])
+  ([params] (codesystem-subsumes nil params))
+  ([ctx {:keys [systemA systemB] :as params}]
+   (when-not (= systemA systemB)
+     (throw (ex-info "Currently, can only check subsumption within same codesystem" params)))
+   (when-let [cs (codesystem ctx systemA)]
+     (protos/cs-subsumes cs params))))
 
-(defn valueset-resource [params])
-(defn valueset-expand [{:keys [url] :as params}]
-  (when-let [vs (valueset url)]
-    (protos/vs-expand vs params)))
-(defn valueset-validate-code [params])
+(defn codesystem-find-matches
+  ([params] (codesystem-find-matches nil params))
+  ([ctx {:keys [system] :as params}]
+   (when-let [cs (codesystem ctx system)]
+     (protos/cs-find-matches cs params))))
 
-(defn conceptmap-resource [params])
-(defn conceptmap-translate [params])
+(defn valueset-resource
+  ([params] (valueset-resource nil params))
+  ([ctx params]))
+
+(defn valueset-expand
+  ([params] (valueset-expand nil params))
+  ([ctx {:keys [url valueSetVersion] :as params}]
+   (let [lookup-key (if valueSetVersion (versioned-uri url valueSetVersion) url)]
+     (when-let [vs (valueset ctx lookup-key)]
+       (protos/vs-expand vs (assoc params :ctx ctx))))))
+
+(defn- format-code-ref
+  "Format a code reference for error messages, optionally including display."
+  [system code display]
+  (cond-> (str (when system (str system "#")) code)
+    display (str " ('" display "')")))
+
+(defn- code-expression
+  "Return the FHIRPath expression for code based on the input mode."
+  [input-mode]
+  (case input-mode
+    :coding "Coding.code"
+    :codeableConcept "CodeableConcept.coding[0].code"
+    "code"))
+
+(defn- enrich-vs-validate-result
+  "When a VS validate-code returns result=false, add a not-in-vs issue and
+  check whether the code exists in the CodeSystem to add an invalid-code issue."
+  [ctx result {:keys [url system code display input-mode]}]
+  (if (get result "result")
+    result
+    (let [expr (code-expression input-mode)
+          existing-issues (get result "issues" [])
+          has-not-in-vs? (some #(= "not-in-vs" (:details-code %)) existing-issues)
+          not-in-vs-msg (when (and url (not has-not-in-vs?))
+                          (let [code-ref (format-code-ref system code display)
+                                vs-version (get result "version")
+                                vs-ref (if vs-version (str url "|" vs-version) url)]
+                            (str "The provided code '" code-ref
+                                 "' was not found in the value set '" vs-ref "'")))
+          not-in-vs-issue (when not-in-vs-msg
+                            {:severity     "error"
+                             :type         "code-invalid"
+                             :details-code "not-in-vs"
+                             :text         not-in-vs-msg
+                             :expression   [expr]})
+          has-invalid-code? (some #(= "invalid-code" (:details-code %)) existing-issues)
+          cs-result (when (and system code (not has-invalid-code?))
+                      (codesystem-validate-code ctx {:system system :code code}))
+          cs-invalid? (and cs-result (false? (get cs-result "result")))
+          cs-issue (when cs-invalid?
+                     (let [orig-issue (first (get cs-result "issues"))]
+                       (if (= "not-found" (:details-code orig-issue))
+                         orig-issue
+                         (assoc orig-issue :expression [expr]))))
+          updated-existing (mapv (fn [i]
+                                   (if (= "not-found" (:details-code i))
+                                     i
+                                     (assoc i :expression [expr])))
+                                 existing-issues)
+          all-issues (cond-> []
+                       not-in-vs-issue (conj not-in-vs-issue)
+                       true (into updated-existing)
+                       cs-issue (conj cs-issue))
+          messages (keep :text all-issues)
+          combined-msg (when (seq messages) (clojure.string/join "; " messages))
+          cs-display (when (and cs-result (get cs-result "result"))
+                       (get cs-result "display"))
+          cs-version (when cs-result (get cs-result "version"))]
+      (cond-> result
+        (seq all-issues) (assoc "issues" all-issues)
+        combined-msg (assoc "message" combined-msg)
+        (and cs-display (nil? (get result "display"))) (assoc "display" cs-display)
+        (and cs-version (nil? (get result "version"))) (assoc "version" cs-version)))))
+
+(defn valueset-validate-code
+  ([params] (valueset-validate-code nil params))
+  ([ctx {:keys [url system code valueSetVersion] :as params}]
+   (let [vs-lookup (if url
+                     (if valueSetVersion (versioned-uri url valueSetVersion) url)
+                     (when system system))]
+   (if-let [vs (when vs-lookup (valueset ctx vs-lookup))]
+     (enrich-vs-validate-result ctx
+       (protos/vs-validate-code vs (assoc params :ctx ctx))
+       params)
+     (let [target (or url system)
+           msg (str "A definition for ValueSet '" target "' could not be found, so the code cannot be validated")]
+       {"result"  false
+        "code"    (when code (keyword code))
+        "system"  system
+        "message" msg
+        "issues"  [{:severity     "error"
+                    :type         "not-found"
+                    :details-code "not-found"
+                    :text         msg}]})))))
+
+(defn conceptmap-resource
+  ([params] (conceptmap-resource nil params))
+  ([ctx params]))
+
+(defn conceptmap-translate
+  ([params] (conceptmap-translate nil params))
+  ([ctx params]))
