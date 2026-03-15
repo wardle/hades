@@ -37,6 +37,13 @@
   Bound per-request in the servlet service method."
   nil)
 
+(defn- resolve-display-language
+  "Resolve the display language from the operation parameter and/or the
+  Accept-Language HTTP header, following the same approach as Snowstorm."
+  [^String display-language-param ^HttpServletRequest request]
+  (or display-language-param
+      (some-> request (.getHeader "Accept-Language"))))
+
 (defn- parse-post-params
   "Parse a POST body (bytes) as FHIR Parameters JSON. Returns a map with:
     :tx-resources — seq of resource maps from tx-resource entries
@@ -122,8 +129,9 @@
                                              ^ca.uhn.fhir.rest.param.UriParam system
                                              ^ca.uhn.fhir.rest.param.StringParam version
                                              ^ca.uhn.fhir.rest.param.TokenParam coding
-                                             ^ca.uhn.fhir.rest.param.StringParam displayLanguage
-                                             ^ca.uhn.fhir.rest.param.StringAndListParam property]))
+                                             ^String displayLanguage
+                                             ^ca.uhn.fhir.rest.param.StringAndListParam property
+                                             ^jakarta.servlet.http.HttpServletRequest request]))
 
 (definterface SubsumesCodeSystemOperation
   (^org.hl7.fhir.r4.model.Parameters subsumes [^ca.uhn.fhir.rest.param.StringParam codeA
@@ -148,7 +156,8 @@
                                            ^ca.uhn.fhir.rest.param.StringParam excludeNested
                                            ^ca.uhn.fhir.rest.param.StringParam excludeNotForUI
                                            ^ca.uhn.fhir.rest.param.StringParam excludePostCoordinated
-                                           ^ca.uhn.fhir.rest.param.TokenParam displayLanguage]))
+                                           ^String displayLanguage
+                                           ^jakarta.servlet.http.HttpServletRequest request]))
 
 (definterface ValidateCodeValueSetOperation
   (^org.hl7.fhir.r4.model.Parameters validateCode [^ca.uhn.fhir.rest.param.UriParam url
@@ -158,7 +167,8 @@
                                                     ^ca.uhn.fhir.rest.param.StringParam display
                                                     ^org.hl7.fhir.r4.model.Coding coding
                                                     ^org.hl7.fhir.r4.model.CodeableConcept codeableConcept
-                                                    ^ca.uhn.fhir.rest.param.StringParam displayLanguage]))
+                                                    ^String displayLanguage
+                                                    ^jakarta.servlet.http.HttpServletRequest request]))
 
 (definterface ValidateCodeCodeSystemOperation
   (^org.hl7.fhir.r4.model.Parameters validateCode [^ca.uhn.fhir.rest.param.UriParam url
@@ -167,7 +177,8 @@
                                                     ^org.hl7.fhir.r4.model.Coding coding
                                                     ^ca.uhn.fhir.rest.param.StringParam version
                                                     ^ca.uhn.fhir.rest.param.UriParam system
-                                                    ^ca.uhn.fhir.rest.param.StringParam displayLanguage]))
+                                                    ^String displayLanguage
+                                                    ^jakarta.servlet.http.HttpServletRequest request]))
 
 ;; see https://github.com/hapifhir/hapi-fhir/blob/cbb16ce3affd3fc53dcbfe98dd3181644fe68604/hapi-fhir-jpaserver-base/src/main/java/ca/uhn/fhir/jpa/provider/r4/BaseJpaResourceProviderConceptMapR4.java
 (definterface TranslateConceptMapOperation
@@ -199,8 +210,9 @@
             ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "system"}} system
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "version"}} version
             ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "coding"}} coding
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "displayLanguage"}} displayLanguage
-            ^{:tag ca.uhn.fhir.rest.param.StringAndListParam OperationParam {:name "property"}} property]
+            ^{:tag String OperationParam {:name "displayLanguage"}} displayLanguage
+            ^{:tag ca.uhn.fhir.rest.param.StringAndListParam OperationParam {:name "property"}} property
+            ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "codesystem/$lookup: " {:code code :system system :version version :coding coding :lang displayLanguage :properties property})
     (let [ctx *tx-ctx*
           code' (or (when code (.getValue code)) (when coding (.getValue coding)))
@@ -208,7 +220,7 @@
           result (registry/codesystem-lookup ctx {:system         system'
                                                    :code           code'
                                                    :version        (some-> version .getValue)
-                                                   :displayLanguage (some-> displayLanguage .getValue)})]
+                                                   :displayLanguage (resolve-display-language displayLanguage request)})]
       (when-not result
         (if (registry/codesystem ctx system')
           (throw (ResourceNotFoundException. (str "Unknown code '" code' "' in code system '" system' "'")))
@@ -226,7 +238,8 @@
                   ^{:tag org.hl7.fhir.r4.model.Coding OperationParam {:name "coding"}} coding
                   ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "version"}} version
                   ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "system"}} system
-                  ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "displayLanguage"}} displayLanguage]
+                  ^{:tag String OperationParam {:name "displayLanguage"}} displayLanguage
+                  ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "codesystem/$validate-code:" {:url url :code code :display display :coding coding :system system})
     (let [ctx *tx-ctx*
           coding? (and coding (some-> coding .getCode))
@@ -238,7 +251,7 @@
                                                           :code           code'
                                                           :display        (or (some-> display .getValue) (when coding? (.getDisplay coding)))
                                                           :version        (some-> version .getValue)
-                                                          :displayLanguage (some-> displayLanguage .getValue)
+                                                          :displayLanguage (resolve-display-language displayLanguage request)
                                                           :input-mode     (if coding? :coding :code)})]
       (fhir/map->parameters result)))
 
@@ -277,9 +290,11 @@
                   ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "display"}} display
                   ^{:tag org.hl7.fhir.r4.model.Coding OperationParam {:name "coding"}} coding
                   ^{:tag org.hl7.fhir.r4.model.CodeableConcept OperationParam {:name "codeableConcept"}} codeableConcept
-                  ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "displayLanguage"}} displayLanguage]
+                  ^{:tag String OperationParam {:name "displayLanguage"}} displayLanguage
+                  ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "valueset/$validate-code:" {:url url :code code :system system :coding coding :cc codeableConcept})
     (let [ctx *tx-ctx*
+          display-lang (resolve-display-language displayLanguage request)
           url' (some-> url .getValueAsUriDt .getValueAsString)
           cc? (and codeableConcept (seq (.getCoding codeableConcept)))
           coding? (and coding (some-> coding .getCode))
@@ -296,7 +311,7 @@
                                     :display         (.getDisplay c)
                                     :version         (some-> systemVersion .getValue)
                                     :valueSetVersion (:valueSetVersion ctx)
-                                    :displayLanguage (some-> displayLanguage .getValue)
+                                    :displayLanguage display-lang
                                     :input-mode      :codeableConcept
                                     :coding-index    idx}))
                                codings)
@@ -340,7 +355,7 @@
                                       (when coding? (.getDisplay coding)))
                  :version         (some-> systemVersion .getValue)
                  :valueSetVersion (:valueSetVersion ctx)
-                 :displayLanguage (some-> displayLanguage .getValue)
+                 :displayLanguage display-lang
                  :input-mode      input-mode})))
           vs-not-found? (some #(and (= "not-found" (:details-code %))
                                     (nil? (:expression %)))
@@ -369,7 +384,8 @@
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludeNested"}} excludeNested
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludeNotForUI"}} excludeNotForUI
             ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludePostCoordinated"}} excludePostCoordinated
-            ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "displayLanguage"}} displayLanguage]
+            ^{:tag String OperationParam {:name "displayLanguage"}} displayLanguage
+            ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
     (let [ctx *tx-ctx*
           include-desig? (some-> includeDesignations .getValue fhir/parse-fhir-boolean)
@@ -378,11 +394,12 @@
           exclude-nested-raw (some-> excludeNested .getValue)
           exclude-nested? (if exclude-nested-raw
                             (fhir/parse-fhir-boolean exclude-nested-raw)
-                            true)]
+                            true)
+          display-lang (resolve-display-language displayLanguage request)]
       (if-let [results (registry/valueset-expand ctx {:url             url'
                                                        :activeOnly      active-only?
                                                        :filter          (some-> param-filter .getValue)
-                                                       :displayLanguage (some-> displayLanguage .getValue)})]
+                                                       :displayLanguage display-lang})]
         (let [vs-impl (registry/valueset ctx url')
               vs-meta (when vs-impl (protos/vs-resource vs-impl {}))
               used-systems (into #{} (keep :system results))
@@ -416,7 +433,6 @@
                                   (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                           (.setName "warning-withdrawn")
                                           (.setValue (UriType. ^String vs-version-uri)))))
-              display-lang (some-> displayLanguage .getValue)
               expansion-params (-> (cond-> []
                                      (some? display-lang)
                                      (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
