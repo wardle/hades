@@ -159,7 +159,15 @@
     (when inactive (.setInactive comp true))
     (when (and include-designations (seq designations))
       (.setDesignation comp
-        (mapv #(ValueSet$ConceptReferenceDesignationComponent. (StringType. %)) designations)))
+        (mapv (fn [d]
+                (let [dc (ValueSet$ConceptReferenceDesignationComponent.)]
+                  (if (map? d)
+                    (do (.setValue dc (str (get d "value")))
+                        (when-let [lang (get d "language")]
+                          (.setLanguage dc (str lang)))
+                        dc)
+                    (doto dc (.setValue (str d))))))
+              designations)))
     comp))
 
 (comment

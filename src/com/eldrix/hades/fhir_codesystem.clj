@@ -295,7 +295,7 @@
              (cond-> {:code    (:code c)
                       :system  url
                       :display (:display c)
-                      :designations (mapv #(get % "value") (:designations c))}
+                      :designations (:designations c)}
                (concept-inactive? c) (assoc :inactive true)
                (concept-abstract? c) (assoc :abstract true)))
            matching)))
@@ -330,7 +330,7 @@
              (cond-> {:code    (:code c)
                       :system  url
                       :display (:display c)
-                      :designations (mapv #(get % "value") (:designations c))}
+                      :designations (:designations c)}
                (concept-inactive? c) (assoc :inactive true)
                (concept-abstract? c) (assoc :abstract true)))
            paged)))
