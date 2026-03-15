@@ -212,21 +212,32 @@
 
 (defn- code-expression
   "Return the FHIRPath expression for code based on the input mode."
-  [input-mode]
-  (case input-mode
-    :coding "Coding.code"
-    :codeableConcept "CodeableConcept.coding[0].code"
-    "code"))
+  ([input-mode] (code-expression input-mode 0))
+  ([input-mode coding-index]
+   (case input-mode
+     :coding "Coding.code"
+     :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "].code")
+     "code")))
 
 (defn- enrich-vs-validate-result
   "When a VS validate-code returns result=false, add a not-in-vs issue and
   check whether the code exists in the CodeSystem to add an invalid-code issue."
-  [ctx result {:keys [url system code display input-mode]}]
+  [ctx result {:keys [url system code display input-mode coding-index]}]
   (if (get result "result")
     result
-    (let [expr (code-expression input-mode)
-          existing-issues (get result "issues" [])
-          has-not-in-vs? (some #(= "not-in-vs" (:details-code %)) existing-issues)
+    (let [expr (code-expression input-mode coding-index)
+          cc-mode? (= :codeableConcept input-mode)
+          raw-issues (get result "issues" [])
+          existing-issues (if cc-mode?
+                            (mapv (fn [i]
+                                    (if (= "not-in-vs" (:details-code i))
+                                      (assoc i :details-code "this-code-not-in-vs"
+                                               :severity "information")
+                                      i))
+                                  raw-issues)
+                            raw-issues)
+          has-not-in-vs? (some #(contains? #{"not-in-vs" "this-code-not-in-vs"} (:details-code %))
+                               existing-issues)
           not-in-vs-msg (when (and url (not has-not-in-vs?))
                           (let [code-ref (format-code-ref system code display)
                                 vs-version (get result "version")
@@ -234,9 +245,9 @@
                             (str "The provided code '" code-ref
                                  "' was not found in the value set '" vs-ref "'")))
           not-in-vs-issue (when not-in-vs-msg
-                            {:severity     "error"
+                            {:severity     (if cc-mode? "information" "error")
                              :type         "code-invalid"
-                             :details-code "not-in-vs"
+                             :details-code (if cc-mode? "this-code-not-in-vs" "not-in-vs")
                              :text         not-in-vs-msg
                              :expression   [expr]})
           has-invalid-code? (some #(= "invalid-code" (:details-code %)) existing-issues)
@@ -253,10 +264,13 @@
                                      i
                                      (assoc i :expression [expr])))
                                  existing-issues)
-          all-issues (cond-> []
-                       not-in-vs-issue (conj not-in-vs-issue)
-                       true (into updated-existing)
-                       cs-issue (conj cs-issue))
+          severity-rank {"fatal" 0 "error" 1 "warning" 2 "information" 3}
+          all-issues (->> (cond-> []
+                            not-in-vs-issue (conj not-in-vs-issue)
+                            true (into updated-existing)
+                            cs-issue (conj cs-issue))
+                          (sort-by #(get severity-rank (:severity %) 4))
+                          vec)
           messages (keep :text all-issues)
           combined-msg (when (seq messages) (clojure.string/join "; " messages))
           cs-display (when (and cs-result (get cs-result "result"))

@@ -282,36 +282,74 @@
     (let [ctx *tx-ctx*
           url' (some-> url .getValueAsUriDt .getValueAsString)
           cc? (and codeableConcept (seq (.getCoding codeableConcept)))
-          first-coding (when cc? (first (.getCoding codeableConcept)))
           coding? (and coding (some-> coding .getCode))
-          system' (or (some-> system .getValueAsUriDt .getValueAsString)
-                      (when coding? (.getSystem coding))
-                      (when first-coding (.getSystem first-coding)))
-          code' (or (some-> code .getValue)
-                    (when coding? (.getCode coding))
-                    (when first-coding (.getCode first-coding)))
-          input-mode (cond cc? :codeableConcept coding? :coding :else :code)
-          result (registry/valueset-validate-code ctx {:url             url'
-                                                        :system          system'
-                                                        :code            code'
-                                                        :display         (or (some-> display .getValue)
-                                                                             (when coding? (.getDisplay coding))
-                                                                             (when first-coding (.getDisplay first-coding)))
-                                                        :version         (some-> systemVersion .getValue)
-                                                        :valueSetVersion (:valueSetVersion ctx)
-                                                        :displayLanguage (some-> displayLanguage .getValue)
-                                                        :input-mode      input-mode})
+          result
+          (if cc?
+            ;; CodeableConcept: iterate all codings, find valid one
+            (let [codings (vec (.getCoding codeableConcept))
+                  per-coding (map-indexed
+                               (fn [idx ^org.hl7.fhir.r4.model.Coding c]
+                                 (registry/valueset-validate-code ctx
+                                   {:url             url'
+                                    :system          (.getSystem c)
+                                    :code            (.getCode c)
+                                    :display         (.getDisplay c)
+                                    :version         (some-> systemVersion .getValue)
+                                    :valueSetVersion (:valueSetVersion ctx)
+                                    :displayLanguage (some-> displayLanguage .getValue)
+                                    :input-mode      :codeableConcept
+                                    :coding-index    idx}))
+                               codings)
+                  valid (last (filter #(get % "result") per-coding))
+                  invalid (remove #(get % "result") per-coding)
+                  all-issues (vec (mapcat #(get % "issues") invalid))]
+              (let [vs-not-found? (some #(and (= "not-found" (:details-code %))
+                                              (nil? (:expression %)))
+                                         all-issues)]
+                (if vs-not-found?
+                  (let [nf-issue (first (filter #(= "not-found" (:details-code %)) all-issues))]
+                    {"result" false
+                     "message" (:text nf-issue)
+                     "issues" [nf-issue]})
+                  (if valid
+                    (cond-> valid
+                      (seq invalid) (assoc "result" false)
+                      (seq all-issues) (update "issues" (fnil into []) all-issues)
+                      true (assoc "codeableConcept" codeableConcept))
+                    (let [vs-impl (registry/valueset ctx url')
+                          vs-ver (when vs-impl (get (protos/vs-resource vs-impl {}) "version"))
+                          vs-url-ver (if vs-ver (str url' "|" vs-ver) url')
+                          no-valid-msg (str "No valid coding was found for the value set '" vs-url-ver "'")
+                          no-valid-issue {:severity "error" :type "code-invalid"
+                                          :details-code "not-in-vs" :text no-valid-msg}]
+                      {"result" false
+                       "codeableConcept" codeableConcept
+                       "message" no-valid-msg
+                       "issues" (into [no-valid-issue] all-issues)})))))
+            ;; Single code or Coding
+            (let [system' (or (some-> system .getValueAsUriDt .getValueAsString)
+                              (when coding? (.getSystem coding)))
+                  code' (or (some-> code .getValue)
+                            (when coding? (.getCode coding)))
+                  input-mode (if coding? :coding :code)]
+              (registry/valueset-validate-code ctx
+                {:url             url'
+                 :system          system'
+                 :code            code'
+                 :display         (or (some-> display .getValue)
+                                      (when coding? (.getDisplay coding)))
+                 :version         (some-> systemVersion .getValue)
+                 :valueSetVersion (:valueSetVersion ctx)
+                 :displayLanguage (some-> displayLanguage .getValue)
+                 :input-mode      input-mode})))
           vs-not-found? (some #(and (= "not-found" (:details-code %))
-                                       (nil? (:expression %)))
-                                  (get result "issues"))
-          result' (if cc?
-                    (assoc result "codeableConcept" codeableConcept)
-                    result)]
+                                    (nil? (:expression %)))
+                              (get result "issues"))]
       (if vs-not-found?
         (throw (ResourceNotFoundException.
                  ^String (get result "message")
                  (fhir/build-operation-outcome (get result "issues"))))
-        (fhir/map->parameters result'))))
+        (fhir/map->parameters result))))
   ;;;;;;;;;;;;;;;;;;;;;;;
   ExpandValueSetOperation
   (^{:tag                                  org.hl7.fhir.r4.model.ValueSet
