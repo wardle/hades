@@ -449,7 +449,11 @@
                                      (some? active-only?)
                                      (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                              (.setName "activeOnly")
-                                             (.setValue (BooleanType. (boolean active-only?))))))
+                                             (.setValue (BooleanType. (boolean active-only?)))))
+                                     (some-> param-filter .getValue)
+                                     (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                             (.setName "filter")
+                                             (.setValue (StringType. ^String (.getValue param-filter))))))
                                    (into (map (fn [{:keys [uri]}]
                                                 (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                                   (.setName "used-codesystem")

@@ -40,14 +40,16 @@
 
 (defn- expand-include-filters
   "Expand an include element that has filters, delegating to cs-find-matches."
-  [ctx system filters]
-  (registry/codesystem-find-matches ctx {:system system :filters (parse-filters filters)}))
+  [ctx system filters params]
+  (registry/codesystem-find-matches ctx {:system system :filters (parse-filters filters)
+                                          :displayLanguage (:displayLanguage params)}))
 
 (defn- expand-include-all
   "Expand an include element with just a system (no concept list, no filters).
   Returns all concepts from the CodeSystem."
-  [ctx system]
-  (registry/codesystem-find-matches ctx {:system system :filters nil}))
+  [ctx system params]
+  (registry/codesystem-find-matches ctx {:system system :filters nil
+                                          :displayLanguage (:displayLanguage params)}))
 
 (defn- expand-valueset-refs
   "Expand referenced ValueSets, checking for circular references."
@@ -69,8 +71,8 @@
         expanding (or (:expanding params) #{})
         system-results (cond
                          concepts (expand-include-concepts ctx system concepts)
-                         filters (expand-include-filters ctx system filters)
-                         system (expand-include-all ctx system)
+                         filters (expand-include-filters ctx system filters params)
+                         system (expand-include-all ctx system params)
                          :else nil)
         vs-results (when (seq vs-urls)
                      (expand-valueset-refs ctx vs-urls expanding))]

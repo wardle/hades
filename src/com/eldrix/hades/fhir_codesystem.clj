@@ -281,7 +281,7 @@
        (ancestor? (:parents hierarchy) codeB codeA) "subsumes"
        :else "not-subsumed")})
 
-  (cs-find-matches [_ {:keys [filters]}]
+  (cs-find-matches [_ {:keys [filters displayLanguage]}]
     (let [all-concepts (vals code-index)
           children-map (:children hierarchy)
           parents-map (:parents hierarchy)
@@ -292,12 +292,18 @@
                        all-concepts)
                      all-concepts)]
       (map (fn [c]
-             (cond-> {:code    (:code c)
-                      :system  url
-                      :display (:display c)
-                      :designations (:designations c)}
-               (concept-inactive? c) (assoc :inactive true)
-               (concept-abstract? c) (assoc :abstract true)))
+             (let [display (or (when displayLanguage
+                                 (some (fn [d]
+                                         (when (= (get d "language") displayLanguage)
+                                           (get d "value")))
+                                       (:designations c)))
+                               (:display c))]
+               (cond-> {:code    (:code c)
+                        :system  url
+                        :display display
+                        :designations (:designations c)}
+                 (concept-inactive? c) (assoc :inactive true)
+                 (concept-abstract? c) (assoc :abstract true))))
            matching)))
 
   protos/ValueSet
@@ -309,7 +315,7 @@
      "title"        (get metadata "title")
      "status"       (get metadata "status")})
 
-  (vs-expand [_ {:keys [filter offset count]}]
+  (vs-expand [_ {:keys [filter offset count displayLanguage]}]
     (let [concepts (vals code-index)
           filtered (if (str/blank? filter)
                      concepts
@@ -327,12 +333,18 @@
                   (pos? offset') (drop offset')
                   count (take count))]
       (map (fn [c]
-             (cond-> {:code    (:code c)
-                      :system  url
-                      :display (:display c)
-                      :designations (:designations c)}
-               (concept-inactive? c) (assoc :inactive true)
-               (concept-abstract? c) (assoc :abstract true)))
+             (let [display (or (when displayLanguage
+                                 (some (fn [d]
+                                         (when (= (get d "language") displayLanguage)
+                                           (get d "value")))
+                                       (:designations c)))
+                               (:display c))]
+               (cond-> {:code    (:code c)
+                        :system  url
+                        :display display
+                        :designations (:designations c)}
+                 (concept-inactive? c) (assoc :inactive true)
+                 (concept-abstract? c) (assoc :abstract true))))
            paged)))
 
   (vs-validate-code [_ {:keys [code system display ctx]}]
