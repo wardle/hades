@@ -219,13 +219,33 @@
      :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "].code")
      "code")))
 
+(defn- display-expression
+  "Return the FHIRPath expression for display based on the input mode."
+  ([input-mode] (display-expression input-mode 0))
+  ([input-mode coding-index]
+   (case input-mode
+     :coding "Coding.display"
+     :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "].display")
+     "display")))
+
 (defn- enrich-vs-validate-result
   "When a VS validate-code returns result=false, add a not-in-vs issue and
   check whether the code exists in the CodeSystem to add an invalid-code issue."
   [ctx result {:keys [url system code display input-mode coding-index]}]
+  (let [disp-expr (display-expression input-mode coding-index)
+        result (if-let [issues (seq (get result "issues"))]
+                 (assoc result "issues"
+                   (mapv (fn [i]
+                           (if (and (= "invalid-display" (:details-code i))
+                                    (= ["display"] (:expression i)))
+                             (assoc i :expression [disp-expr])
+                             i))
+                         issues))
+                 result)]
   (if (get result "result")
     result
-    (let [expr (code-expression input-mode coding-index)
+    (let [code-expr (code-expression input-mode coding-index)
+          disp-expr (display-expression input-mode coding-index)
           cc-mode? (= :codeableConcept input-mode)
           raw-issues (get result "issues" [])
           existing-issues (if cc-mode?
@@ -238,7 +258,8 @@
                             raw-issues)
           has-not-in-vs? (some #(contains? #{"not-in-vs" "this-code-not-in-vs"} (:details-code %))
                                existing-issues)
-          not-in-vs-msg (when (and url (not has-not-in-vs?))
+          has-display-issue? (some #(= "invalid-display" (:details-code %)) existing-issues)
+          not-in-vs-msg (when (and url (not has-not-in-vs?) (not has-display-issue?))
                           (let [code-ref (format-code-ref system code display)
                                 vs-version (get result "version")
                                 vs-ref (if vs-version (str url "|" vs-version) url)]
@@ -249,20 +270,22 @@
                              :type         "code-invalid"
                              :details-code (if cc-mode? "this-code-not-in-vs" "not-in-vs")
                              :text         not-in-vs-msg
-                             :expression   [expr]})
+                             :expression   [code-expr]})
           has-invalid-code? (some #(= "invalid-code" (:details-code %)) existing-issues)
-          cs-result (when (and system code (not has-invalid-code?))
+          cs-result (when (and system code (not has-invalid-code?) (not has-display-issue?))
                       (codesystem-validate-code ctx {:system system :code code}))
           cs-invalid? (and cs-result (false? (get cs-result "result")))
           cs-issue (when cs-invalid?
                      (let [orig-issue (first (get cs-result "issues"))]
                        (if (= "not-found" (:details-code orig-issue))
                          orig-issue
-                         (assoc orig-issue :expression [expr]))))
+                         (assoc orig-issue :expression [code-expr]))))
           updated-existing (mapv (fn [i]
-                                   (if (= "not-found" (:details-code i))
-                                     i
-                                     (assoc i :expression [expr])))
+                                   (cond
+                                     (= "not-found" (:details-code i)) i
+                                     (= "invalid-display" (:details-code i))
+                                     (assoc i :expression [disp-expr])
+                                     :else (assoc i :expression [code-expr])))
                                  existing-issues)
           severity-rank {"fatal" 0 "error" 1 "warning" 2 "information" 3}
           all-issues (->> (cond-> []
@@ -280,7 +303,7 @@
         (seq all-issues) (assoc "issues" all-issues)
         combined-msg (assoc "message" combined-msg)
         (and cs-display (nil? (get result "display"))) (assoc "display" cs-display)
-        (and cs-version (nil? (get result "version"))) (assoc "version" cs-version)))))
+        (and cs-version (nil? (get result "version"))) (assoc "version" cs-version))))))
 
 (defn valueset-validate-code
   ([params] (valueset-validate-code nil params))

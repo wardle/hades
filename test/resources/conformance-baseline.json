@@ -1,5 +1,6 @@
 {
   "total": 572,
-  "passed": 248,
-  "failed": 324
+  "passed": 270,
+  "failed": 299,
+  "skipped": 3
 }

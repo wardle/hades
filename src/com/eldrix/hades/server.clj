@@ -3,6 +3,7 @@
   See https://hl7.org/fhir/terminology-service.html"
   (:gen-class)
   (:require [clojure.data.json :as json]
+            [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.fhir :as fhir]
             [com.eldrix.hades.fhir-codesystem :as fhir-cs]
@@ -10,7 +11,9 @@
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.registry :as registry])
   (:import (ca.uhn.fhir.context FhirContext)
+           (ca.uhn.fhir.parser LenientErrorHandler StrictErrorHandler)
            (ca.uhn.fhir.rest.annotation OperationParam)
+           (ca.uhn.fhir.rest.api EncodingEnum)
            (ca.uhn.fhir.rest.api.server RequestDetails)
            (ca.uhn.fhir.rest.server RestfulServer IResourceProvider IServerConformanceProvider)
            (ca.uhn.fhir.rest.server.exceptions ResourceNotFoundException)
@@ -20,12 +23,12 @@
            (org.eclipse.jetty.server Server ServerConnector)
            (org.eclipse.jetty.servlet ServletContextHandler ServletHolder)
            (org.hl7.fhir.instance.model.api IBaseConformance)
-           (org.hl7.fhir.r4.model CapabilityStatement CapabilityStatement$CapabilityStatementSoftwareComponent
-                                   BooleanType CodeSystem StringType UriType
-                                   ValueSet ValueSet$ValueSetExpansionComponent ValueSet$ValueSetExpansionParameterComponent
-                                   ConceptMap
+           (org.hl7.fhir.r4.model BooleanType CapabilityStatement CapabilityStatement$CapabilityStatementSoftwareComponent
+                                   CodeSystem CodeType Coding ConceptMap
+                                   Enumerations$PublicationStatus StringType
                                    TerminologyCapabilities TerminologyCapabilities$TerminologyCapabilitiesCodeSystemComponent
-                                   Enumerations$PublicationStatus)
+                                   UriType ValueSet ValueSet$ValueSetExpansionComponent
+                                   ValueSet$ValueSetExpansionParameterComponent)
            (java.util Date)))
 
 ;; ---------------------------------------------------------------------------
@@ -125,59 +128,59 @@
 ;; ---------------------------------------------------------------------------
 
 (definterface LookupCodeSystemOperation
-  (^org.hl7.fhir.r4.model.Parameters lookup [^ca.uhn.fhir.rest.param.StringParam code
-                                             ^ca.uhn.fhir.rest.param.UriParam system
-                                             ^ca.uhn.fhir.rest.param.StringParam version
-                                             ^ca.uhn.fhir.rest.param.TokenParam coding
-                                             ^String displayLanguage
-                                             ^ca.uhn.fhir.rest.param.StringAndListParam property
+  (^org.hl7.fhir.r4.model.Parameters lookup [^org.hl7.fhir.r4.model.CodeType code
+                                             ^org.hl7.fhir.r4.model.UriType system
+                                             ^org.hl7.fhir.r4.model.StringType version
+                                             ^org.hl7.fhir.r4.model.Coding coding
+                                             ^org.hl7.fhir.r4.model.StringType displayLanguage
+                                             ^org.hl7.fhir.r4.model.CodeType property
                                              ^jakarta.servlet.http.HttpServletRequest request]))
 
 (definterface SubsumesCodeSystemOperation
-  (^org.hl7.fhir.r4.model.Parameters subsumes [^ca.uhn.fhir.rest.param.StringParam codeA
-                                               ^ca.uhn.fhir.rest.param.StringParam codeB
-                                               ^ca.uhn.fhir.rest.param.UriParam system
-                                               ^ca.uhn.fhir.rest.param.StringParam version
-                                               ^ca.uhn.fhir.rest.param.TokenParam codingA
-                                               ^ca.uhn.fhir.rest.param.TokenParam codingB]))
+  (^org.hl7.fhir.r4.model.Parameters subsumes [^org.hl7.fhir.r4.model.CodeType codeA
+                                               ^org.hl7.fhir.r4.model.CodeType codeB
+                                               ^org.hl7.fhir.r4.model.UriType system
+                                               ^org.hl7.fhir.r4.model.StringType version
+                                               ^org.hl7.fhir.r4.model.Coding codingA
+                                               ^org.hl7.fhir.r4.model.Coding codingB]))
 
 (definterface ExpandValueSetOperation
-  (^org.hl7.fhir.r4.model.ValueSet expand [^ca.uhn.fhir.rest.param.UriParam url
-                                           ^ca.uhn.fhir.rest.param.UriParam context
-                                           ^ca.uhn.fhir.rest.param.TokenParam contextDirection
-                                           ^ca.uhn.fhir.rest.param.StringParam filter
-                                           ^ca.uhn.fhir.rest.param.DateParam date
-                                           ^ca.uhn.fhir.rest.param.NumberParam offset
-                                           ^ca.uhn.fhir.rest.param.NumberParam count
-                                           ^ca.uhn.fhir.rest.param.StringParam includeDesignations
-                                           ^ca.uhn.fhir.rest.param.StringParam designation
-                                           ^ca.uhn.fhir.rest.param.StringParam includeDefinition
-                                           ^ca.uhn.fhir.rest.param.StringParam activeOnly
-                                           ^ca.uhn.fhir.rest.param.StringParam excludeNested
-                                           ^ca.uhn.fhir.rest.param.StringParam excludeNotForUI
-                                           ^ca.uhn.fhir.rest.param.StringParam excludePostCoordinated
-                                           ^String displayLanguage
+  (^org.hl7.fhir.r4.model.ValueSet expand [^org.hl7.fhir.r4.model.UriType url
+                                           ^org.hl7.fhir.r4.model.UriType context
+                                           ^org.hl7.fhir.r4.model.CodeType contextDirection
+                                           ^org.hl7.fhir.r4.model.UriType filter
+                                           ^org.hl7.fhir.r4.model.DateTimeType date
+                                           ^org.hl7.fhir.r4.model.IntegerType offset
+                                           ^org.hl7.fhir.r4.model.IntegerType count
+                                           ^org.hl7.fhir.r4.model.BooleanType includeDesignations
+                                           ^org.hl7.fhir.r4.model.StringType designation
+                                           ^org.hl7.fhir.r4.model.BooleanType includeDefinition
+                                           ^org.hl7.fhir.r4.model.BooleanType activeOnly
+                                           ^org.hl7.fhir.r4.model.BooleanType excludeNested
+                                           ^org.hl7.fhir.r4.model.BooleanType excludeNotForUI
+                                           ^org.hl7.fhir.r4.model.BooleanType excludePostCoordinated
+                                           ^org.hl7.fhir.r4.model.StringType displayLanguage
                                            ^jakarta.servlet.http.HttpServletRequest request]))
 
 (definterface ValidateCodeValueSetOperation
-  (^org.hl7.fhir.r4.model.Parameters validateCode [^ca.uhn.fhir.rest.param.UriParam url
-                                                    ^ca.uhn.fhir.rest.param.StringParam code
-                                                    ^ca.uhn.fhir.rest.param.UriParam system
-                                                    ^ca.uhn.fhir.rest.param.StringParam systemVersion
-                                                    ^ca.uhn.fhir.rest.param.StringParam display
+  (^org.hl7.fhir.r4.model.Parameters validateCode [^org.hl7.fhir.r4.model.UriType url
+                                                    ^org.hl7.fhir.r4.model.CodeType code
+                                                    ^org.hl7.fhir.r4.model.UriType system
+                                                    ^org.hl7.fhir.r4.model.StringType systemVersion
+                                                    ^org.hl7.fhir.r4.model.StringType display
                                                     ^org.hl7.fhir.r4.model.Coding coding
                                                     ^org.hl7.fhir.r4.model.CodeableConcept codeableConcept
-                                                    ^String displayLanguage
+                                                    ^org.hl7.fhir.r4.model.StringType displayLanguage
                                                     ^jakarta.servlet.http.HttpServletRequest request]))
 
 (definterface ValidateCodeCodeSystemOperation
-  (^org.hl7.fhir.r4.model.Parameters validateCode [^ca.uhn.fhir.rest.param.UriParam url
-                                                    ^ca.uhn.fhir.rest.param.StringParam code
-                                                    ^ca.uhn.fhir.rest.param.StringParam display
+  (^org.hl7.fhir.r4.model.Parameters validateCode [^org.hl7.fhir.r4.model.UriType url
+                                                    ^org.hl7.fhir.r4.model.CodeType code
+                                                    ^org.hl7.fhir.r4.model.StringType display
                                                     ^org.hl7.fhir.r4.model.Coding coding
-                                                    ^ca.uhn.fhir.rest.param.StringParam version
-                                                    ^ca.uhn.fhir.rest.param.UriParam system
-                                                    ^String displayLanguage
+                                                    ^org.hl7.fhir.r4.model.StringType version
+                                                    ^org.hl7.fhir.r4.model.UriType system
+                                                    ^org.hl7.fhir.r4.model.StringType displayLanguage
                                                     ^jakarta.servlet.http.HttpServletRequest request]))
 
 ;; see https://github.com/hapifhir/hapi-fhir/blob/cbb16ce3affd3fc53dcbfe98dd3181644fe68604/hapi-fhir-jpaserver-base/src/main/java/ca/uhn/fhir/jpa/provider/r4/BaseJpaResourceProviderConceptMapR4.java
@@ -206,21 +209,21 @@
   (^{:tag                                  org.hl7.fhir.r4.model.Parameters
      ca.uhn.fhir.rest.annotation.Operation {:name "lookup" :idempotent true}}
     lookup [_this
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "code"}} code
-            ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "system"}} system
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "version"}} version
-            ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "coding"}} coding
-            ^{:tag String OperationParam {:name "displayLanguage"}} displayLanguage
-            ^{:tag ca.uhn.fhir.rest.param.StringAndListParam OperationParam {:name "property"}} property
+            ^{:tag org.hl7.fhir.r4.model.CodeType OperationParam {:name "code"}} code
+            ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "system"}} system
+            ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "version"}} version
+            ^{:tag org.hl7.fhir.r4.model.Coding OperationParam {:name "coding"}} coding
+            ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "displayLanguage"}} displayLanguage
+            ^{:tag org.hl7.fhir.r4.model.CodeType OperationParam {:name "property"}} property
             ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "codesystem/$lookup: " {:code code :system system :version version :coding coding :lang displayLanguage :properties property})
     (let [ctx *tx-ctx*
-          code' (or (when code (.getValue code)) (when coding (.getValue coding)))
-          system' (or (when system (.getValue system)) (when coding (.getSystem coding)))
+          code' (or (some-> code .getValue) (some-> coding .getCode))
+          system' (or (some-> system .getValue) (some-> coding .getSystem))
           result (registry/codesystem-lookup ctx {:system         system'
                                                    :code           code'
                                                    :version        (some-> version .getValue)
-                                                   :displayLanguage (resolve-display-language displayLanguage request)})]
+                                                   :displayLanguage (resolve-display-language (some-> displayLanguage .getValue) request)})]
       (when-not result
         (if (registry/codesystem ctx system')
           (throw (ResourceNotFoundException. (str "Unknown code '" code' "' in code system '" system' "'")))
@@ -232,26 +235,26 @@
   (^{:tag                                  org.hl7.fhir.r4.model.Parameters
      ca.uhn.fhir.rest.annotation.Operation {:name "validate-code" :idempotent true}}
     validateCode [_this
-                  ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "url"}} url
-                  ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "code"}} code
-                  ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "display"}} display
+                  ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "url"}} url
+                  ^{:tag org.hl7.fhir.r4.model.CodeType OperationParam {:name "code"}} code
+                  ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "display"}} display
                   ^{:tag org.hl7.fhir.r4.model.Coding OperationParam {:name "coding"}} coding
-                  ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "version"}} version
-                  ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "system"}} system
-                  ^{:tag String OperationParam {:name "displayLanguage"}} displayLanguage
+                  ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "version"}} version
+                  ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "system"}} system
+                  ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "displayLanguage"}} displayLanguage
                   ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "codesystem/$validate-code:" {:url url :code code :display display :coding coding :system system})
     (let [ctx *tx-ctx*
           coding? (and coding (some-> coding .getCode))
-          system' (or (some-> url .getValueAsUriDt .getValueAsString)
-                      (some-> system .getValueAsUriDt .getValueAsString)
+          system' (or (some-> url .getValue)
+                      (some-> system .getValue)
                       (when coding? (.getSystem coding)))
           code' (or (some-> code .getValue) (when coding? (.getCode coding)))
           result (registry/codesystem-validate-code ctx {:system         system'
                                                           :code           code'
                                                           :display        (or (some-> display .getValue) (when coding? (.getDisplay coding)))
                                                           :version        (some-> version .getValue)
-                                                          :displayLanguage (resolve-display-language displayLanguage request)
+                                                          :displayLanguage (resolve-display-language (some-> displayLanguage .getValue) request)
                                                           :input-mode     (if coding? :coding :code)})]
       (fhir/map->parameters result)))
 
@@ -260,12 +263,12 @@
   (^{:tag                                  org.hl7.fhir.r4.model.Parameters
      ca.uhn.fhir.rest.annotation.Operation {:name "subsumes" :idempotent true}}
     subsumes [_this
-              ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "codeA"}} codeA
-              ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "codeB"}} codeB
-              ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "system"}} system
-              ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "version"}} version
-              ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "codingA"}} codingA
-              ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "codingB"}} codingB]
+              ^{:tag org.hl7.fhir.r4.model.CodeType OperationParam {:name "codeA"}} codeA
+              ^{:tag org.hl7.fhir.r4.model.CodeType OperationParam {:name "codeB"}} codeB
+              ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "system"}} system
+              ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "version"}} version
+              ^{:tag org.hl7.fhir.r4.model.Coding OperationParam {:name "codingA"}} codingA
+              ^{:tag org.hl7.fhir.r4.model.Coding OperationParam {:name "codingB"}} codingB]
     (log/debug "codesystem/$subsumes: " {:codeA codeA :codeB codeB :system system :version version :codingA codingA :codingB codingB})
     (let [ctx *tx-ctx*]
       (fhir/map->parameters
@@ -273,7 +276,7 @@
           (and codeA codeB system)
           (registry/codesystem-subsumes ctx {:systemA (.getValue system) :codeA (.getValue codeA) :systemB (.getValue system) :codeB (.getValue codeB)})
           (and codingA codingB)
-          (registry/codesystem-subsumes ctx {:systemA (.getSystem codingA) :codeA (.getValue codingA) :systemB (.getSystem codingB) :codeB (.getValue codingB)}))))))
+          (registry/codesystem-subsumes ctx {:systemA (.getSystem codingA) :codeA (.getCode codingA) :systemB (.getSystem codingB) :codeB (.getCode codingB)}))))))
 
 (deftype ValueSetResourceProvider [svc]
   IResourceProvider
@@ -283,19 +286,19 @@
   (^{:tag                                  org.hl7.fhir.r4.model.Parameters
      ca.uhn.fhir.rest.annotation.Operation {:name "validate-code" :idempotent true}}
     validateCode [_this
-                  ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "url"}} url
-                  ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "code"}} code
-                  ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "system"}} system
-                  ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "systemVersion"}} systemVersion
-                  ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "display"}} display
+                  ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "url"}} url
+                  ^{:tag org.hl7.fhir.r4.model.CodeType OperationParam {:name "code"}} code
+                  ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "system"}} system
+                  ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "systemVersion"}} systemVersion
+                  ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "display"}} display
                   ^{:tag org.hl7.fhir.r4.model.Coding OperationParam {:name "coding"}} coding
                   ^{:tag org.hl7.fhir.r4.model.CodeableConcept OperationParam {:name "codeableConcept"}} codeableConcept
-                  ^{:tag String OperationParam {:name "displayLanguage"}} displayLanguage
+                  ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "displayLanguage"}} displayLanguage
                   ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "valueset/$validate-code:" {:url url :code code :system system :coding coding :cc codeableConcept})
     (let [ctx *tx-ctx*
-          display-lang (resolve-display-language displayLanguage request)
-          url' (some-> url .getValueAsUriDt .getValueAsString)
+          display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
+          url' (some-> url .getValue)
           cc? (and codeableConcept (seq (.getCoding codeableConcept)))
           coding? (and coding (some-> coding .getCode))
           result
@@ -303,7 +306,7 @@
             ;; CodeableConcept: iterate all codings, find valid one
             (let [codings (vec (.getCoding codeableConcept))
                   per-coding (map-indexed
-                               (fn [idx ^org.hl7.fhir.r4.model.Coding c]
+                               (fn [idx ^Coding c]
                                  (registry/valueset-validate-code ctx
                                    {:url             url'
                                     :system          (.getSystem c)
@@ -326,23 +329,30 @@
                     {"result" false
                      "message" (:text nf-issue)
                      "issues" [nf-issue]})
-                  (if valid
-                    (cond-> valid
-                      (seq invalid) (assoc "result" false)
-                      (seq all-issues) (update "issues" (fnil into []) all-issues)
-                      true (assoc "codeableConcept" codeableConcept))
-                    (let [vs-impl (registry/valueset ctx url')
-                          vs-ver (when vs-impl (get (protos/vs-resource vs-impl {}) "version"))
-                          vs-url-ver (if vs-ver (str url' "|" vs-ver) url')
-                          no-valid-msg (str "No valid coding was found for the value set '" vs-url-ver "'")
-                          no-valid-issue {:severity "error" :type "code-invalid"
-                                          :details-code "not-in-vs" :text no-valid-msg}]
-                      {"result" false
-                       "codeableConcept" codeableConcept
-                       "message" no-valid-msg
-                       "issues" (into [no-valid-issue] all-issues)})))))
+                  (let [cs-error-msgs (distinct (keep (fn [i] (when (= "invalid-code" (:details-code i)) (:text i)))
+                                                        all-issues))
+                        error-msg (first cs-error-msgs)]
+                    (if valid
+                      (cond-> valid
+                        (seq invalid) (assoc "result" false)
+                        (seq all-issues) (update "issues" (fnil into []) all-issues)
+                        error-msg (assoc "message" error-msg)
+                        true (assoc "codeableConcept" codeableConcept))
+                      (let [vs-impl (registry/valueset ctx url')
+                            vs-ver (when vs-impl (get (protos/vs-resource vs-impl {}) "version"))
+                            vs-url-ver (if vs-ver (str url' "|" vs-ver) url')
+                            no-valid-msg (str "No valid coding was found for the value set '" vs-url-ver "'")
+                            combined-msg (if (seq cs-error-msgs)
+                                           (str no-valid-msg "; " (str/join "; " cs-error-msgs))
+                                           no-valid-msg)
+                            no-valid-issue {:severity "error" :type "code-invalid"
+                                            :details-code "not-in-vs" :text no-valid-msg}]
+                        {"result" false
+                         "codeableConcept" codeableConcept
+                         "message" combined-msg
+                         "issues" (into [no-valid-issue] all-issues)}))))))
             ;; Single code or Coding
-            (let [system' (or (some-> system .getValueAsUriDt .getValueAsString)
+            (let [system' (or (some-> system .getValue)
                               (when coding? (.getSystem coding)))
                   code' (or (some-> code .getValue)
                             (when coding? (.getCode coding)))
@@ -370,32 +380,29 @@
   (^{:tag                                  org.hl7.fhir.r4.model.ValueSet
      ca.uhn.fhir.rest.annotation.Operation {:name "expand" :idempotent true}}
     expand [_this
-            ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "url"}} url
-            ^{:tag ca.uhn.fhir.rest.param.UriParam OperationParam {:name "context"}} context
-            ^{:tag ca.uhn.fhir.rest.param.TokenParam OperationParam {:name "contextDirection"}} contextDirection
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "filter"}} param-filter
-            ^{:tag ca.uhn.fhir.rest.param.DateParam OperationParam {:name "date"}} date
-            ^{:tag ca.uhn.fhir.rest.param.NumberParam OperationParam {:name "offset"}} offset
-            ^{:tag ca.uhn.fhir.rest.param.NumberParam OperationParam {:name "count"}} param-count
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "includeDesignations"}} includeDesignations
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "designation"}} designation
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "includeDefinition"}} includeDefinition
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "activeOnly"}} activeOnly
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludeNested"}} excludeNested
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludeNotForUI"}} excludeNotForUI
-            ^{:tag ca.uhn.fhir.rest.param.StringParam OperationParam {:name "excludePostCoordinated"}} excludePostCoordinated
-            ^{:tag String OperationParam {:name "displayLanguage"}} displayLanguage
+            ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "url"}} url
+            ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "context"}} context
+            ^{:tag org.hl7.fhir.r4.model.CodeType OperationParam {:name "contextDirection"}} contextDirection
+            ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "filter"}} param-filter
+            ^{:tag org.hl7.fhir.r4.model.DateTimeType OperationParam {:name "date"}} date
+            ^{:tag org.hl7.fhir.r4.model.IntegerType OperationParam {:name "offset"}} offset
+            ^{:tag org.hl7.fhir.r4.model.IntegerType OperationParam {:name "count"}} param-count
+            ^{:tag org.hl7.fhir.r4.model.BooleanType OperationParam {:name "includeDesignations"}} includeDesignations
+            ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "designation"}} designation
+            ^{:tag org.hl7.fhir.r4.model.BooleanType OperationParam {:name "includeDefinition"}} includeDefinition
+            ^{:tag org.hl7.fhir.r4.model.BooleanType OperationParam {:name "activeOnly"}} activeOnly
+            ^{:tag org.hl7.fhir.r4.model.BooleanType OperationParam {:name "excludeNested"}} excludeNested
+            ^{:tag org.hl7.fhir.r4.model.BooleanType OperationParam {:name "excludeNotForUI"}} excludeNotForUI
+            ^{:tag org.hl7.fhir.r4.model.BooleanType OperationParam {:name "excludePostCoordinated"}} excludePostCoordinated
+            ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "displayLanguage"}} displayLanguage
             ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
     (let [ctx *tx-ctx*
-          include-desig? (some-> includeDesignations .getValue fhir/parse-fhir-boolean)
-          url' (some-> url .getValueAsUriDt .getValueAsString)
-          active-only? (some-> activeOnly .getValue fhir/parse-fhir-boolean)
-          exclude-nested-raw (some-> excludeNested .getValue)
-          exclude-nested? (if exclude-nested-raw
-                            (fhir/parse-fhir-boolean exclude-nested-raw)
-                            true)
-          display-lang (resolve-display-language displayLanguage request)]
+          include-desig? (some-> includeDesignations .getValue)
+          url' (some-> url .getValue)
+          active-only? (some-> activeOnly .getValue)
+          exclude-nested? (if excludeNested (.getValue excludeNested) true)
+          display-lang (resolve-display-language (some-> displayLanguage .getValue) request)]
       (if-let [results (registry/valueset-expand ctx {:url             url'
                                                        :activeOnly      active-only?
                                                        :filter          (some-> param-filter .getValue)
@@ -437,8 +444,8 @@
                                      (some? display-lang)
                                      (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                              (.setName "displayLanguage")
-                                             (.setValue (org.hl7.fhir.r4.model.CodeType. ^String display-lang))))
-                                     exclude-nested-raw
+                                             (.setValue (CodeType. ^String display-lang))))
+                                     excludeNested
                                      (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                              (.setName "excludeNested")
                                              (.setValue (BooleanType. (boolean exclude-nested?)))))
@@ -512,14 +519,25 @@
 
 (defn- make-terminology-capabilities
   ^IBaseConformance []
-  (doto (proxy [TerminologyCapabilities IBaseConformance] [])
-    (.setStatus Enumerations$PublicationStatus/ACTIVE)
-    (.setVersion hades-version)
-    (.setName "Hades")
-    (.setTitle "Hades FHIR Terminology Server")
-    (.setKind (org.hl7.fhir.r4.model.TerminologyCapabilities$CapabilityStatementKind/INSTANCE))
-    (.addCodeSystem (doto (TerminologyCapabilities$TerminologyCapabilitiesCodeSystemComponent.)
-                      (.setUri "http://snomed.info/sct")))))
+  (let [tc (doto (proxy [TerminologyCapabilities IBaseConformance] [])
+              (.setStatus Enumerations$PublicationStatus/ACTIVE)
+              (.setDate (Date.))
+              (.setVersion hades-version)
+              (.setName "Hades")
+              (.setTitle "Hades FHIR Terminology Server")
+              (.setKind (org.hl7.fhir.r4.model.TerminologyCapabilities$CapabilityStatementKind/INSTANCE)))
+        expansion (.getExpansion tc)]
+    (doseq [uri (keys @registry/codesystems)]
+      (.addCodeSystem tc
+        (doto (TerminologyCapabilities$TerminologyCapabilitiesCodeSystemComponent.)
+          (.setUri uri))))
+    (doseq [p ["activeOnly" "check-system-version" "count" "displayLanguage"
+               "excludeNested" "force-system-version" "includeDefinition"
+               "includeDesignations" "offset" "property" "system-version" "tx-resource"]]
+      (.addParameter expansion
+        (doto (org.hl7.fhir.r4.model.TerminologyCapabilities$TerminologyCapabilitiesExpansionParameterComponent.)
+          (.setName p))))
+    tc))
 
 (definterface IConformanceProvider
   (^org.hl7.fhir.instance.model.api.IBaseConformance getMetadataResource
@@ -553,11 +571,24 @@
   (proxy [RestfulServer] [(FhirContext/forR4)]
     (initialize []
       (log/info "Initialising HL7 FHIR R4 server; providers: CodeSystem ValueSet ConceptMap")
-      (.setResourceProviders this [(CodeSystemResourceProvider. svc)
-                                   (ValueSetResourceProvider. svc)
-                                   (ConceptMapResourceProvider. svc)])
-      (.setServerConformanceProvider this (HadesConformanceProvider. this))
-      (log/debug "Resource providers:" (seq (.getResourceProviders this))))
+      ;; Hybrid parser error handler: strict by default, lenient for unknown elements.
+      ;; Conformance test payloads may include elements from newer FHIR versions or
+      ;; extensions that HAPI's R4 model doesn't know about.
+      (let [^RestfulServer this this
+            lenient (LenientErrorHandler.)
+            ^FhirContext fhir-ctx (.getFhirContext this)]
+        (.setParserErrorHandler fhir-ctx
+          (proxy [StrictErrorHandler] []
+            (unknownAttribute [_loc _name] (.unknownAttribute lenient _loc _name))
+            (unknownElement [_loc _name] (.unknownElement lenient _loc _name))
+            (unknownReference [_loc _ref] (.unknownReference lenient _loc _ref)))))
+      (let [^RestfulServer this this]
+        (.setDefaultResponseEncoding this EncodingEnum/JSON)
+        (.setResourceProviders this [(CodeSystemResourceProvider. svc)
+                                     (ValueSetResourceProvider. svc)
+                                     (ConceptMapResourceProvider. svc)])
+        (.setServerConformanceProvider this (HadesConformanceProvider. this))
+        (log/debug "Resource providers:" (seq (.getResourceProviders this)))))
     (service [^HttpServletRequest request ^HttpServletResponse response]
       (if (= "POST" (.getMethod request))
         (let [body (.readAllBytes (.getInputStream request))

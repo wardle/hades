@@ -23,7 +23,8 @@ clj -X:conformance :snomed '"path/to/snomed.db"' :output-dir '"test/resources/co
 
 Start an nREPL server (includes test paths):
 ```bash
-clj -M:nrepl
+clj -M:nrepl                    # without conformance deps
+clj -M:nrepl:conformance        # with conformance deps (for REPL-driven conformance testing)
 ```
 
 Then use `clj-nrepl-eval` to start a Hades server and test interactively:
@@ -54,6 +55,65 @@ clj-nrepl-eval -p <port> '
 # Stop
 clj-nrepl-eval -p <port> '(.stop srv) (.close svc)'
 ```
+
+### REPL-driven conformance testing (the default workflow)
+
+**Always use the REPL for conformance work.** The CLI (`clj -X:conformance`) is
+slow and doesn't support the edit→reload→test cycle. Use the REPL to iterate
+on changes: edit code, `restart!`, run filtered tests, check diffs.
+
+**Setup** — start nREPL with conformance deps (port written to `.nrepl-port`):
+```bash
+clj -M:nrepl:conformance
+```
+
+**REPL API** in `com.eldrix.hades.conformance-test`:
+
+| Function | Purpose |
+|----------|---------|
+| `(start! path)` | Start server with Hermes, store state. Optional `:port`. |
+| `(stop!)` | Stop server, close Hermes. |
+| `(restart!)` | Stop, reload all Hades namespaces, restart. |
+| `(run-tests)` | Run all conformance tests. Optional `:filter`, `:modes`. |
+| `(print-suites r)` | Per-suite pass/fail table. |
+| `(print-failures r)` | All failures with messages. |
+| `(print-failures r "suite")` | Failures in one suite. |
+| `(print-diff old new)` | Gained/lost tests between two runs. |
+| `(save-results! r)` | Timestamped archive + latest.json. |
+| `(save-baseline! r)` | Update baseline (intentional only). |
+| `(load-latest)` | Load most recent saved results. |
+| `(load-baseline)` | Load baseline counts. |
+
+**Typical edit→test cycle from Claude Code** (using `clj-nrepl-eval`):
+
+```bash
+# 1. Start (once per session) — use double quotes to avoid shell escaping issues
+clj-nrepl-eval -p $(cat .nrepl-port) "(require '[com.eldrix.hades.conformance-test :as ct])"
+clj-nrepl-eval -p $(cat .nrepl-port) "(ct/start! \"/Users/mark/Dev/hermes/snomed.db\")"
+
+# 2. Run tests (filtered or all)
+clj-nrepl-eval -p $(cat .nrepl-port) "(def r (ct/run-tests))"
+clj-nrepl-eval -p $(cat .nrepl-port) "(def r (ct/run-tests :filter \"permutations\"))"
+clj-nrepl-eval -p $(cat .nrepl-port) "(ct/print-suites r)"
+clj-nrepl-eval -p $(cat .nrepl-port) "(ct/print-failures r \"permutations\")"
+
+# 3. Edit code, then reload and retest
+clj-nrepl-eval -p $(cat .nrepl-port) "(ct/restart!)"
+clj-nrepl-eval -p $(cat .nrepl-port) "(def r2 (ct/run-tests :filter \"permutations\"))"
+clj-nrepl-eval -p $(cat .nrepl-port) "(ct/print-diff r r2)"
+
+# 4. When satisfied, save baseline
+clj-nrepl-eval -p $(cat .nrepl-port) "(ct/save-baseline! r2)"
+
+# 5. Stop when done
+clj-nrepl-eval -p $(cat .nrepl-port) "(ct/stop!)"
+```
+
+**Important shell escaping notes for `clj-nrepl-eval`:**
+- Wrap the entire Clojure form in double quotes: `"(ct/start! ...)"`
+- Escape inner double quotes with backslash: `\"/path/to/snomed.db\"`
+- The `!` character does NOT need escaping when inside double quotes
+- Do NOT use single quotes for the outer wrapper — use double quotes
 
 ## Architecture
 
