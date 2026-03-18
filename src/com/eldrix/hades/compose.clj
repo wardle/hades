@@ -43,11 +43,17 @@
                looked-up (when system
                            (registry/codesystem-lookup ctx {:system system :code code :version version}))
                display (or provided-display (get looked-up "display"))
-               result-version (or (get looked-up "version") version)]
+               result-version (or (get looked-up "version") version)
+               inactive? (when looked-up
+                           (some (fn [p] (and (= :inactive (:code p)) (:value p)))
+                                 (get looked-up "property")))
+               abstract? (get looked-up "abstract")]
            (cond-> {:code    code
                     :system  system
                     :display display}
-             result-version (assoc :version result-version))))
+             result-version (assoc :version result-version)
+             abstract? (assoc :abstract true)
+             inactive? (assoc :inactive true))))
        concepts))
 
 (defn- expand-include-filters

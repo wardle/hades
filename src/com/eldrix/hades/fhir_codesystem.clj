@@ -195,15 +195,25 @@
       status-prop
       "inactive")))
 
-(defn- concept-abstract?
-  "Check whether a concept has the notSelectable/abstract property."
-  [concept]
-  (let [v (get-concept-property concept "notSelectable")]
-    (if (not= v ::not-found)
-      (boolean v)
-      false)))
+(def ^:private notSelectable-uri
+  "http://hl7.org/fhir/concept-properties#notSelectable")
 
-(deftype FhirCodeSystem [url version metadata code-index hierarchy]
+(defn- concept-abstract?
+  "Check whether a concept has the notSelectable/abstract property.
+  Checks both the standard code 'notSelectable' and any code mapped to
+  the standard notSelectable URI in the CodeSystem's property definitions."
+  [property-uri-map concept]
+  (let [uri-code (get property-uri-map notSelectable-uri)
+        codes (cond-> #{"notSelectable"}
+                uri-code (conj uri-code))]
+    (boolean
+      (some (fn [code]
+              (let [v (get-concept-property concept code)]
+                (when (and (not= v ::not-found) v)
+                  true)))
+            codes))))
+
+(deftype FhirCodeSystem [url version metadata code-index hierarchy property-uri-map]
   protos/CodeSystem
   (cs-resource [_ _params]
     (assoc metadata "url" url "version" version))
@@ -214,21 +224,17 @@
             parents (get (:parents hierarchy) code)
             children (get (:children hierarchy) code)
             props (:properties concept)
-            has-children? (boolean (seq children))
-            inactive? (or (some (fn [prop]
-                                  (and (= "status" (get prop "code"))
-                                       (= "retired" (extract-property-value prop))))
-                                props)
-                          false)]
+            inactive? (concept-inactive? concept)
+            abstract? (concept-abstract? property-uri-map concept)]
         {"name"        cs-name
          "version"     version
          "display"     (:display concept)
          "system"      url
          "code"        (keyword code)
          "definition"  (:definition concept)
-         "abstract"    has-children?
+         "abstract"    abstract?
          "property"    (concat
-                         [{:code :inactive :value inactive?}]
+                         [{:code :inactive :value (boolean inactive?)}]
                          (when parents
                            (map (fn [p] {:code :parent
                                          :value (keyword p)
@@ -318,7 +324,7 @@
                         :designations (:designations c)}
                  (concept-inactive? c) (assoc :inactive true
                                               :inactive-status (concept-inactive-status c))
-                 (concept-abstract? c) (assoc :abstract true))))
+                 (concept-abstract? property-uri-map c) (assoc :abstract true))))
            matching)))
 
   protos/ValueSet
@@ -361,7 +367,7 @@
                         :designations (:designations c)}
                  (concept-inactive? c) (assoc :inactive true
                                               :inactive-status (concept-inactive-status c))
-                 (concept-abstract? c) (assoc :abstract true))))
+                 (concept-abstract? property-uri-map c) (assoc :abstract true))))
            paged)))
 
   (vs-validate-code [_ {:keys [code system display ctx]}]
@@ -398,6 +404,20 @@
                        :text         msg
                        :expression   ["code"]}]})))))
 
+(defn- build-property-uri-map
+  "Build a {uri → concept-property-code} map from the CodeSystem's property definitions.
+  This allows resolving standard FHIR property URIs to the local property codes
+  used by this CodeSystem's concepts (which may differ from the standard codes)."
+  [cs-map]
+  (reduce (fn [m prop-def]
+            (let [uri (get prop-def "uri")
+                  code (get prop-def "code")]
+              (if (and uri code)
+                (assoc m uri code)
+                m)))
+          {}
+          (get cs-map "property")))
+
 (defn make-fhir-code-system
   "Create a FhirCodeSystem from a parsed FHIR CodeSystem JSON map (string keys).
   The map must contain at minimum a \"url\" and \"concept\" array."
@@ -410,8 +430,9 @@
         metadata (select-keys cs-map ["resourceType" "name" "title" "status"
                                       "description" "experimental" "hierarchyMeaning"
                                       "content" "caseSensitive" "compositional" "versionNeeded"
-                                      "count"])]
-    (->FhirCodeSystem url version metadata code-idx hier)))
+                                      "count"])
+        prop-uri-map (build-property-uri-map cs-map)]
+    (->FhirCodeSystem url version metadata code-idx hier prop-uri-map)))
 
 (defn register!
   "Register a FhirCodeSystem with the global registry under its canonical URL."

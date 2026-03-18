@@ -28,7 +28,10 @@
                                                 "display" "Concept A2a"}]}]}
                        {"code"    "B"
                         "display" "Concept B"
-                        "property" [{"code" "status" "valueCode" "active"}]}]})
+                        "property" [{"code" "status" "valueCode" "active"}]}
+                       {"code"    "C"
+                        "display" "Abstract Concept C"
+                        "property" [{"code" "notSelectable" "valueBoolean" true}]}]})
 
 (def flat-cs
   {"resourceType" "CodeSystem"
@@ -67,6 +70,10 @@
       (is (= "TestCodeSystem" (get result "name")))
       (is (= :A (get result "code")))
       (is (= "The first concept" (get result "definition")))
+      (is (false? (get result "abstract")) "concept A has children but no notSelectable property")))
+
+  (testing "notSelectable concept has abstract=true"
+    (let [result (protos/cs-lookup hier-fcs {:code "C"})]
       (is (true? (get result "abstract")))))
 
   (testing "leaf node has abstract=false"
@@ -176,8 +183,13 @@
 (deftest vs-expand-test
   (testing "expand all"
     (let [result (protos/vs-expand hier-fcs {:url "http://example.com/test-cs"})]
-      (is (= 5 (count result)))
+      (is (= 6 (count result)))
       (is (every? #(= "http://example.com/test-cs" (:system %)) result))))
+
+  (testing "abstract concept in expansion"
+    (let [result (protos/vs-expand hier-fcs {:url "http://example.com/test-cs"})
+          c-concept (first (filter #(= "C" (:code %)) result))]
+      (is (true? (:abstract c-concept)))))
 
   (testing "expand with filter"
     (let [result (protos/vs-expand hier-fcs {:url "http://example.com/test-cs" :filter "A2"})]
@@ -223,13 +235,13 @@
 (deftest cs-find-matches-nil-filters-test
   (testing "nil filters returns all concepts"
     (let [result (protos/cs-find-matches hier-fcs {:filters nil})]
-      (is (= 5 (count result)))
+      (is (= 6 (count result)))
       (is (every? #(= "http://example.com/test-cs" (:system %)) result)))))
 
 (deftest cs-find-matches-empty-filters-test
   (testing "empty filters returns all concepts"
     (let [result (protos/cs-find-matches hier-fcs {:filters []})]
-      (is (= 5 (count result))))))
+      (is (= 6 (count result))))))
 
 (deftest cs-find-matches-is-a-test
   (testing "is-a filter"
