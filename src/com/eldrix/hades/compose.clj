@@ -47,11 +47,13 @@
                inactive? (when looked-up
                            (some (fn [p] (and (= :inactive (:code p)) (:value p)))
                                  (get looked-up "property")))
-               abstract? (get looked-up "abstract")]
+               abstract? (get looked-up "abstract")
+               designations (get looked-up "designation")]
            (cond-> {:code    code
                     :system  system
                     :display display}
              result-version (assoc :version result-version)
+             (seq designations) (assoc :designations designations)
              abstract? (assoc :abstract true)
              inactive? (assoc :inactive true))))
        concepts))

@@ -177,8 +177,8 @@
   "Run conformance tests against the running server.
   Options:
     :filter — test name filter pattern (e.g. \"language\")
-    :modes  — set of mode strings (default #{\"general\" \"snomed\"})"
-  [& {:keys [filter modes] :or {modes #{"general" "snomed"}}}]
+    :modes  — set of mode strings (default #{\"general\" \"snomed\" \"flat\"})"
+  [& {:keys [filter modes] :or {modes #{"general" "snomed" "flat"}}}]
   (when-not (server-url)
     (throw (ex-info "No server running. Call (start! path) first." {})))
   (let [folder (.getCanonicalPath (io/file test-data-dir "tests"))
