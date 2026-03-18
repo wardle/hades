@@ -33,7 +33,8 @@
                               "display" (:display match)
                               "code"    (keyword code)
                               "system"  (:system match)}
-                       (:version match) (assoc "version" (:version match)))]
+                       (:inactive match) (assoc "inactive" true
+                                                "inactive-status" (:inactive-status match)))]
           (if (and display (not (str/blank? display))
                    (:display match)
                    (not= (str/lower-case display) (str/lower-case (:display match))))

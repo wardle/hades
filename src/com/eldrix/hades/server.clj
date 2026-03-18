@@ -409,15 +409,18 @@
                                                        :displayLanguage display-lang})]
         (let [vs-impl (registry/valueset ctx url')
               vs-meta (when vs-impl (protos/vs-resource vs-impl {}))
-              used-systems (into #{} (keep :system results))
-              cs-infos (map (fn [sys]
-                              (if-let [cs (registry/codesystem ctx sys)]
-                                (let [meta (protos/cs-resource cs {})
-                                      ver (get meta "version")
-                                      uri (if ver (str sys "|" ver) sys)]
-                                  {:uri uri :meta meta})
-                                {:uri sys :meta nil}))
-                            used-systems)
+              system-versions (reduce (fn [m c]
+                                        (if (:system c)
+                                          (update m (:system c) #(or % (:version c)))
+                                          m))
+                                      {} results)
+              cs-infos (map (fn [[sys ver-from-results]]
+                              (let [cs (registry/codesystem ctx sys)
+                                    meta (when cs (protos/cs-resource cs {}))
+                                    ver (or ver-from-results (get meta "version"))
+                                    uri (if ver (str sys "|" ver) sys)]
+                                {:uri uri :meta meta}))
+                            system-versions)
               vs-version-uri (let [v (get vs-meta "version")]
                                (if v (str url' "|" v) url'))
               cs-warning-params (mapcat (fn [{:keys [uri meta]}]

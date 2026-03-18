@@ -3,7 +3,7 @@
   (:import
     (ca.uhn.fhir.context FhirContext)
     (org.hl7.fhir.instance.model.api IBaseResource)
-    (org.hl7.fhir.r4.model CodeType CodeableConcept Coding
+    (org.hl7.fhir.r4.model CanonicalType CodeType CodeableConcept Coding
                             OperationOutcome OperationOutcome$IssueSeverity OperationOutcome$IssueType
                             OperationOutcome$OperationOutcomeIssueComponent
                             Parameters Parameters$ParametersParameterComponent
@@ -96,6 +96,9 @@
 (def ^:private uri-parameter-names
   #{"system" "url" "source" "target" "targetSystem"})
 
+(def ^:private canonical-parameter-names
+  #{"x-caused-by-unknown-system"})
+
 (defn- make-parameter-component
   [k v]
   (let [pc (Parameters$ParametersParameterComponent. (StringType. (name k)))]
@@ -104,6 +107,8 @@
       (.setResource pc v)
       (instance? org.hl7.fhir.r4.model.Type v)
       (.setValue pc v)
+      (and (string? v) (contains? canonical-parameter-names (name k)))
+      (.setValue pc (CanonicalType. ^String v))
       (and (string? v) (contains? uri-parameter-names (name k)))
       (.setValue pc (UriType. v))
       (string? v)
@@ -149,7 +154,7 @@
   "Create a FHIR ValueSetExpansion Component from a plain map.
   Options:
     :include-designations — when true, include designation list"
-  ^ValueSet$ValueSetExpansionContainsComponent [{:keys [system code display designations abstract inactive version]}
+  ^ValueSet$ValueSetExpansionContainsComponent [{:keys [system code display designations abstract inactive]}
                                                 & {:keys [include-designations]}]
   (let [comp (doto (ValueSet$ValueSetExpansionContainsComponent.)
                (.setCode code)

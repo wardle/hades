@@ -185,6 +185,16 @@
         (and (not= status-prop ::not-found)
              (contains? #{"retired" "inactive" "deprecated"} status-prop)))))
 
+(defn- concept-inactive-status
+  "Return the specific inactive status label for a concept.
+  Returns 'retired', 'deprecated', or 'inactive' depending on the concept's properties."
+  [concept]
+  (let [status-prop (get-concept-property concept "status")]
+    (if (and (not= status-prop ::not-found)
+             (contains? #{"retired" "inactive" "deprecated"} status-prop))
+      status-prop
+      "inactive")))
+
 (defn- concept-abstract?
   "Check whether a concept has the notSelectable/abstract property."
   [concept]
@@ -246,11 +256,14 @@
 
   (cs-validate-code [_ {:keys [code display]}]
     (if-let [concept (get code-index code)]
-      (let [result {"result"  true
-                    "display" (:display concept)
-                    "code"    (keyword code)
-                    "system"  url
-                    "version" version}]
+      (let [inactive? (concept-inactive? concept)
+            result (cond-> {"result"  true
+                            "display" (:display concept)
+                            "code"    (keyword code)
+                            "system"  url
+                            "version" version}
+                     inactive? (assoc "inactive" true
+                                      "inactive-status" (concept-inactive-status concept)))]
         (if (and display (not (display-matches? concept display)))
           (let [msg (str "Display '" display "' not found for code '" code "'")]
             (assoc result "result" false
@@ -300,9 +313,11 @@
                                (:display c))]
                (cond-> {:code    (:code c)
                         :system  url
+                        :version version
                         :display display
                         :designations (:designations c)}
-                 (concept-inactive? c) (assoc :inactive true)
+                 (concept-inactive? c) (assoc :inactive true
+                                              :inactive-status (concept-inactive-status c))
                  (concept-abstract? c) (assoc :abstract true))))
            matching)))
 
@@ -341,20 +356,25 @@
                                (:display c))]
                (cond-> {:code    (:code c)
                         :system  url
+                        :version version
                         :display display
                         :designations (:designations c)}
-                 (concept-inactive? c) (assoc :inactive true)
+                 (concept-inactive? c) (assoc :inactive true
+                                              :inactive-status (concept-inactive-status c))
                  (concept-abstract? c) (assoc :abstract true))))
            paged)))
 
   (vs-validate-code [_ {:keys [code system display ctx]}]
     (when (or (nil? system) (= system url))
       (if-let [concept (get code-index code)]
-        (let [result {"result"  true
-                      "display" (:display concept)
-                      "code"    (keyword code)
-                      "system"  url
-                      "version" version}]
+        (let [inactive? (concept-inactive? concept)
+              result (cond-> {"result"  true
+                              "display" (:display concept)
+                              "code"    (keyword code)
+                              "system"  url
+                              "version" version}
+                       inactive? (assoc "inactive" true
+                                        "inactive-status" (concept-inactive-status concept)))]
           (if (and display (not (display-matches? concept display)))
             (let [lenient? (get ctx :lenient-display-validation true)
                   msg (str "Display '" display "' differs from preferred '" (:display concept) "'")]

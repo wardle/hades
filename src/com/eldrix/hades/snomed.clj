@@ -143,11 +143,13 @@
   (cs-validate-code [_ {:keys [code display displayLanguage]}]
     (when-let [code' (parse-long code)]
       (let [ver (version-uri svc)]
-        (if (hermes/concept svc code')
+        (if-let [concept (hermes/concept svc code')]
           (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
                 preferred (:term (hermes/preferred-synonym* svc code' lang-refset-ids))
-                result {"result" true "display" preferred "code" (keyword code)
-                        "system" snomed-system-uri "version" ver}]
+                inactive? (not (:active concept))
+                result (cond-> {"result" true "display" preferred "code" (keyword code)
+                                "system" snomed-system-uri "version" ver}
+                         inactive? (assoc "inactive" true))]
             (if (and display (not= display preferred))
               (let [msg (str "Display '" display "' not found for code '" code "'")]
                 (assoc result "result" false
@@ -184,7 +186,8 @@
          (and (= systemA systemB) ((hermes/with-historical svc codeA') codeB')) "equivalent"
          :else "not-subsumed")}))
   (cs-find-matches [_ {:keys [filters]}]
-    (let [ecl (if (seq filters)
+    (let [ver (version-uri svc)
+          ecl (if (seq filters)
                 (->> filters
                      (keep (fn [{:keys [property op value]}]
                              (when (= property "concept")
@@ -201,19 +204,22 @@
              (map (fn [{:keys [conceptId preferredTerm]}]
                     {:code    (str conceptId)
                      :system  snomed-system-uri
+                     :version ver
                      :display preferredTerm}))))))
   protos/ValueSet
   (vs-resource [this params])
   (vs-expand [this {:keys [url filter activeOnly]}]
     (when-let [{ecl :ecl} (parse-implicit-value-set url)]
-      (->> (hermes/search svc (cond-> {:constraint         ecl
-                                       :inactive-concepts? (if (false? activeOnly) true false)}
-                                filter (assoc :s filter)))
-           (map (fn [{:keys [conceptId term preferredTerm]}]
-                  (hash-map :code (str conceptId)
-                            :system snomed-system-uri
-                            :display preferredTerm
-                            :designations [term]))))))
+      (let [ver (version-uri svc)]
+        (->> (hermes/search svc (cond-> {:constraint         ecl
+                                         :inactive-concepts? (if (false? activeOnly) true false)}
+                                  filter (assoc :s filter)))
+             (map (fn [{:keys [conceptId term preferredTerm]}]
+                    (hash-map :code (str conceptId)
+                              :system snomed-system-uri
+                              :version ver
+                              :display preferredTerm
+                              :designations [term])))))))
   (vs-validate-code [_ {:keys [url code system display displayLanguage]}]
     (when (= system snomed-system-uri)
       (when-let [code' (parse-long code)]

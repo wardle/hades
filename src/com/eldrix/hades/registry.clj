@@ -162,12 +162,44 @@
      (when-let [cs (codesystem ctx lookup-key)]
        (protos/cs-lookup cs params)))))
 
+(defn- inactive-expression
+  "Return the FHIRPath expression for inactive concept warnings."
+  ([input-mode] (inactive-expression input-mode 0))
+  ([input-mode coding-index]
+   (case input-mode
+     :coding "Coding"
+     :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "]")
+     "code")))
+
+(defn- add-inactive-warning
+  "Add inactive concept warning to a validate-code result when the concept is inactive."
+  [result input-mode coding-index]
+  (if (get result "inactive")
+    (let [code (name (get result "code"))
+          status (or (get result "inactive-status") "inactive")
+          msg (str "The concept '" code "' has a status of " status " and its use should be reviewed")
+          expression (inactive-expression input-mode coding-index)
+          issue {:severity     "warning"
+                 :type         "business-rule"
+                 :details-code "code-comment"
+                 :text         msg
+                 :expression   [expression]}]
+      (-> result
+          (dissoc "inactive-status")
+          (update "issues" (fnil conj []) issue)
+          (update "message" (fn [existing]
+                              (if existing
+                                (str existing "; " msg)
+                                msg)))))
+    result))
+
 (defn codesystem-validate-code
   ([params] (codesystem-validate-code nil params))
-  ([ctx {:keys [system code version] :as params}]
+  ([ctx {:keys [system code version input-mode] :as params}]
    (let [lookup-key (if version (versioned-uri system version) system)]
    (if-let [cs (codesystem ctx lookup-key)]
-     (protos/cs-validate-code cs params)
+     (-> (protos/cs-validate-code cs params)
+         (add-inactive-warning input-mode nil))
      (let [msg (str "A definition for CodeSystem '" system "' could not be found, so the code cannot be validated")]
        {"result"  false
         "code"    (when code (keyword code))
@@ -228,9 +260,59 @@
      :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "].display")
      "display")))
 
+(defn- add-cs-status-warnings
+  "Add informational issues for CodeSystem publication status (draft/retired/experimental)."
+  [ctx result system]
+  (if-let [cs (codesystem ctx system)]
+    (let [meta (protos/cs-resource cs {})
+          status (get meta "status")
+          experimental? (get meta "experimental")
+          version (get meta "version")
+          cs-ref (if version (str system "|" version) system)
+          issues (cond-> []
+                   (= "draft" status)
+                   (conj {:severity "information" :type "business-rule"
+                          :details-code "status-check"
+                          :text (str "Reference to draft CodeSystem " cs-ref)})
+                   (= "retired" status)
+                   (conj {:severity "information" :type "business-rule"
+                          :details-code "status-check"
+                          :text (str "Reference to deprecated CodeSystem " cs-ref)})
+                   experimental?
+                   (conj {:severity "information" :type "business-rule"
+                          :details-code "status-check"
+                          :text (str "Reference to experimental CodeSystem " cs-ref)}))]
+      (if (seq issues)
+        (update result "issues" (fn [existing] (vec (concat issues (or existing [])))))
+        result))
+    result))
+
+(defn- add-vs-status-warnings
+  "Add informational issues for ValueSet publication status (retired = withdrawn)."
+  [ctx result url]
+  (if-let [vs (when url (valueset ctx url))]
+    (let [meta (protos/vs-resource vs {})
+          status (get meta "status")
+          version (get meta "version")
+          vs-ref (if version (str url "|" version) url)
+          issues (cond-> []
+                   (= "retired" status)
+                   (conj {:severity "information" :type "business-rule"
+                          :details-code "status-check"
+                          :text (str "Reference to withdrawn ValueSet " vs-ref)})
+                   (= "draft" status)
+                   (conj {:severity "information" :type "business-rule"
+                          :details-code "status-check"
+                          :text (str "Reference to draft ValueSet " vs-ref)}))]
+      (if (seq issues)
+        (update result "issues" (fn [existing] (vec (concat (or existing []) issues))))
+        result))
+    result))
+
 (defn- enrich-vs-validate-result
   "When a VS validate-code returns result=false, add a not-in-vs issue and
-  check whether the code exists in the CodeSystem to add an invalid-code issue."
+  check whether the code exists in the CodeSystem to add an invalid-code issue.
+  When result=true and inactive, add inactive warning."
   [ctx result {:keys [url system code display input-mode coding-index]}]
   (let [disp-expr (display-expression input-mode coding-index)
         result (if-let [issues (seq (get result "issues"))]
@@ -241,7 +323,10 @@
                              (assoc i :expression [disp-expr])
                              i))
                          issues))
-                 result)]
+                 result)
+        result (add-inactive-warning result input-mode coding-index)
+        result (add-cs-status-warnings ctx result system)
+        result (add-vs-status-warnings ctx result url)]
   (if (get result "result")
     result
     (let [code-expr (code-expression input-mode coding-index)
