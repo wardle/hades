@@ -213,16 +213,27 @@
                   true)))
             codes))))
 
-(deftype FhirCodeSystem [url version metadata code-index hierarchy property-uri-map]
+(defn- ci-lookup
+  "Case-insensitive code lookup. Returns [actual-concept input-code-differs?]."
+  [code-index ci-index code]
+  (if-let [concept (get code-index code)]
+    [concept false]
+    (when-let [actual-code (get ci-index (str/lower-case code))]
+      [(get code-index actual-code) true])))
+
+(deftype FhirCodeSystem [url version metadata code-index hierarchy property-uri-map case-sensitive? ci-index]
   protos/CodeSystem
   (cs-resource [_ _params]
     (assoc metadata "url" url "version" version))
 
   (cs-lookup [_ {:keys [code]}]
-    (when-let [concept (get code-index code)]
+    (when-let [[concept _] (if case-sensitive?
+                              (when-let [c (get code-index code)] [c false])
+                              (ci-lookup code-index ci-index code))]
       (let [cs-name (get metadata "name")
-            parents (get (:parents hierarchy) code)
-            children (get (:children hierarchy) code)
+            actual-code (:code concept)
+            parents (get (:parents hierarchy) actual-code)
+            children (get (:children hierarchy) actual-code)
             props (:properties concept)
             inactive? (concept-inactive? concept)
             abstract? (concept-abstract? property-uri-map concept)]
@@ -230,7 +241,7 @@
          "version"     version
          "display"     (:display concept)
          "system"      url
-         "code"        (keyword code)
+         "code"        (keyword actual-code)
          "definition"  (:definition concept)
          "abstract"    abstract?
          "property"    (concat
@@ -261,36 +272,50 @@
                              (:designations concept))})))
 
   (cs-validate-code [_ {:keys [code display]}]
-    (if-let [concept (get code-index code)]
-      (let [inactive? (concept-inactive? concept)
-            result (cond-> {"result"  true
-                            "display" (:display concept)
-                            "code"    (keyword code)
-                            "system"  url
-                            "version" version}
-                     inactive? (assoc "inactive" true
-                                      "inactive-status" (concept-inactive-status concept)))]
-        (if (and display (not (display-matches? concept display)))
-          (let [msg (str "Display '" display "' not found for code '" code "'")]
-            (assoc result "result" false
-                          "message" msg
-                          "issues" [{:severity     "error"
-                                     :type         "invalid"
-                                     :details-code "invalid-display"
-                                     :text         msg
-                                     :expression   ["display"]}]))
-          result))
-      (let [msg (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'")]
-        {"result"  false
-         "code"    (keyword code)
-         "system"  url
-         "version" version
-         "message" msg
-         "issues"  [{:severity     "error"
-                     :type         "code-invalid"
-                     :details-code "invalid-code"
-                     :text         msg
-                     :expression   ["code"]}]})))
+    (let [[concept case-differs?] (if case-sensitive?
+                                     (when-let [c (get code-index code)] [c false])
+                                     (ci-lookup code-index ci-index code))]
+      (if concept
+        (let [inactive? (concept-inactive? concept)
+              actual-code (:code concept)
+              result (cond-> {"result"  true
+                              "display" (:display concept)
+                              "code"    (keyword code)
+                              "system"  url
+                              "version" version}
+                       inactive? (assoc "inactive" true
+                                        "inactive-status" (concept-inactive-status concept))
+                       case-differs? (assoc "normalized-code" (keyword actual-code)))]
+          (let [case-issue (when case-differs?
+                             {:severity     "information"
+                              :type         "business-rule"
+                              :details-code "code-rule"
+                              :text         (str "The code '" code "' differs from the correct code '"
+                                                 actual-code "' by case. Although the code system '"
+                                                 url "|" version "' is case insensitive, implementers "
+                                                 "are strongly encouraged to use the correct case anyway")
+                              :expression   ["Coding.code"]})
+                display-issue (when (and display (not (display-matches? concept display)))
+                                {:severity     "error"
+                                 :type         "invalid"
+                                 :details-code "invalid-display"
+                                 :text         (str "Display '" display "' not found for code '" code "'")
+                                 :expression   ["display"]})
+                issues (filterv some? [case-issue display-issue])]
+            (cond-> result
+              display-issue (assoc "result" false "message" (:text display-issue))
+              (seq issues) (assoc "issues" issues))))
+        (let [msg (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'")]
+          {"result"  false
+           "code"    (keyword code)
+           "system"  url
+           "version" version
+           "message" msg
+           "issues"  [{:severity     "error"
+                       :type         "code-invalid"
+                       :details-code "invalid-code"
+                       :text         msg
+                       :expression   ["code"]}]}))))
 
   (cs-subsumes [_ {:keys [codeA codeB]}]
     {:outcome
@@ -431,8 +456,12 @@
                                       "description" "experimental" "hierarchyMeaning"
                                       "content" "caseSensitive" "compositional" "versionNeeded"
                                       "count"])
-        prop-uri-map (build-property-uri-map cs-map)]
-    (->FhirCodeSystem url version metadata code-idx hier prop-uri-map)))
+        prop-uri-map (build-property-uri-map cs-map)
+        cs? (get cs-map "caseSensitive" true)
+        ci-idx (when-not cs?
+                 (reduce (fn [m code] (assoc m (str/lower-case code) code))
+                         {} (keys code-idx)))]
+    (->FhirCodeSystem url version metadata code-idx hier prop-uri-map cs? ci-idx)))
 
 (defn register!
   "Register a FhirCodeSystem with the global registry under its canonical URL."

@@ -78,40 +78,62 @@
           expanded (compose/expand-compose ctx compose-def {:expanding expanding})
           {:keys [code system display]} params
           caller-version (:version params)
-          match (some (fn [c]
-                        (and (= code (:code c))
-                             (or (nil? system) (= system (:system c)))
-                             c))
-                      expanded)
+          match (or (some (fn [c]
+                          (and (= code (:code c))
+                               (or (nil? system) (= system (:system c)))
+                               c))
+                        expanded)
+                    (some (fn [c]
+                            (and (not= code (:code c))
+                                 (= (str/lower-case code) (str/lower-case (:code c)))
+                                 (or (nil? system) (= system (:system c)))
+                                 (assoc c :case-differs true)))
+                          expanded))
           include-ver (compose-version-for-system compose-def system)
           match-ver (or (:version match) include-ver)
           override-pattern (or (get (:force-system-version ctx) system)
                                (get (:system-version ctx) system)
                                (get (:check-system-version ctx) system))]
       (if match
-        (let [result (cond-> {"result"  true
+        (let [case-differs? (:case-differs match)
+              actual-code (:code match)
+              sys-ver (when (:system match)
+                        (str (:system match) (when (:version match) (str "|" (:version match)))))
+              result (cond-> {"result"  true
                               "display" (:display match)
                               "code"    (keyword code)
                               "system"  (:system match)}
                        (:version match) (assoc "version" (:version match))
                        (:inactive match) (assoc "inactive" true
-                                                "inactive-status" (:inactive-status match)))]
+                                                "inactive-status" (:inactive-status match))
+                       case-differs? (assoc "normalized-code" (keyword actual-code)))
+              case-issue (when case-differs?
+                           {:severity     "information"
+                            :type         "business-rule"
+                            :details-code "code-rule"
+                            :text         (str "The code '" code "' differs from the correct code '"
+                                               actual-code "' by case. Although the code system '"
+                                               sys-ver "' is case insensitive, implementers "
+                                               "are strongly encouraged to use the correct case anyway")
+                            :expression   ["Coding.code"]})]
           (if (and display (not (str/blank? display))
                    (:display match)
                    (not= (str/lower-case display) (str/lower-case (:display match))))
             (let [lenient? (get ctx :lenient-display-validation true)
-                  msg (str "Display '" display "' differs from preferred '" (:display match) "'")]
+                  msg (str "Display '" display "' differs from preferred '" (:display match) "'")
+                  display-issue {:severity     (if lenient? "warning" "error")
+                                 :type         "invalid"
+                                 :details-code "invalid-display"
+                                 :text         msg
+                                 :expression   ["display"]}]
               (-> (assoc result "result" (boolean lenient?)
                                 "message" msg
-                                "issues" [{:severity     (if lenient? "warning" "error")
-                                           :type         "invalid"
-                                           :details-code "invalid-display"
-                                           :text         msg
-                                           :expression   ["display"]}])
+                                "issues" (filterv some? [case-issue display-issue]))
                   (add-version-mismatch caller-version match-ver system override-pattern include-ver)
                   (add-unknown-version-issue ctx system caller-version)
                   (add-check-system-version-issue ctx system match-ver)))
-            (-> result
+            (-> (cond-> result
+                  case-issue (assoc "issues" [case-issue]))
                 (add-version-mismatch caller-version match-ver system override-pattern include-ver)
                 (add-unknown-version-issue ctx system caller-version)
                 (add-check-system-version-issue ctx system match-ver))))
