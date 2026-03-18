@@ -85,6 +85,55 @@
   [url version]
   (if version (str url "|" version) url))
 
+(defn parse-version-param
+  "Parse a seq of 'url|version' canonical strings into {url version} map."
+  [params]
+  (into {} (keep (fn [s] (let [[url ver] (parse-versioned-uri s)]
+                            (when ver [url ver]))))
+        params))
+
+(defn version-matches?
+  "Check if concrete version matches a pattern. 'x' segments are wildcards.
+   '1.0.x' matches '1.0.0', '1.x.x' matches '1.2.0'.
+   A shorter pattern is padded with 'x': '1.x' matches '1.0.0'."
+  [pattern concrete]
+  (when (and pattern concrete)
+    (if (= pattern concrete)
+      true
+      (let [p-parts (clojure.string/split pattern #"\.")
+            c-parts (clojure.string/split concrete #"\.")
+            p-padded (if (< (count p-parts) (count c-parts))
+                       (into (vec p-parts) (repeat (- (count c-parts) (count p-parts)) "x"))
+                       p-parts)]
+        (and (= (count p-padded) (count c-parts))
+             (every? true? (map (fn [p c] (or (= "x" p) (= p c)))
+                                p-padded c-parts)))))))
+
+(defn available-versions
+  "List all registered versions for a system URL."
+  [ctx system]
+  (let [prefix (str system "|")
+        extract (fn [m]
+                  (keep (fn [k]
+                          (when (and (string? k) (.startsWith ^String k prefix))
+                            (.substring ^String k (count prefix))))
+                        (keys m)))]
+    (distinct (concat (extract (:codesystems ctx))
+                      (extract @codesystems)))))
+
+(defn find-matching-version
+  "Resolve a version pattern against available versions. If the pattern contains
+   'x' wildcard segments, finds the latest matching registered version. Otherwise
+   returns the pattern as-is."
+  [ctx system pattern]
+  (when pattern
+    (if (some #(= "x" %) (clojure.string/split pattern #"\."))
+      (reduce (fn [best v] (if (and (version-matches? pattern v)
+                                    (or (nil? best) (pos? (compare v best))))
+                               v best))
+              nil (available-versions ctx system))
+      pattern)))
+
 (defn register-codesystem
   "Register a codesystem implementation by virtue of URI and identifiers within
   the definition itself, and optionally, via a local, logical identifier."
@@ -221,9 +270,51 @@
 
 (defn codesystem-find-matches
   ([params] (codesystem-find-matches nil params))
-  ([ctx {:keys [system] :as params}]
+  ([ctx {:keys [system version] :as params}]
+   (let [lookup-key (if version (versioned-uri system version) system)]
+     (when-let [cs (codesystem ctx lookup-key)]
+       (protos/cs-find-matches cs params)))))
+
+(defn codesystem-version
+  "Get the version of a registered CodeSystem."
+  ([system] (codesystem-version nil system))
+  ([ctx system]
    (when-let [cs (codesystem ctx system)]
-     (protos/cs-find-matches cs params))))
+     (get (protos/cs-resource cs {}) "version"))))
+
+(defn unknown-version-issue
+  "Return an UNKNOWN_CODESYSTEM_VERSION issue if the caller's version doesn't
+   correspond to a registered CS, or nil if the version exists."
+  [ctx system version]
+  (when (and version system)
+    (let [versioned-key (versioned-uri system version)]
+      (when-not (codesystem ctx versioned-key)
+        (let [valid (sort (available-versions ctx system))
+              valid-str (if (seq valid)
+                          (str ". Valid versions: " (clojure.string/join " or " valid))
+                          "")]
+          {:severity     "error"
+           :type         "not-found"
+           :details-code "not-found"
+           :text         (str "A definition for CodeSystem '" system "' version '" version
+                              "' could not be found, so the code cannot be validated" valid-str)
+           :expression   ["Coding.system"]})))))
+
+(defn check-system-version-issue
+  "Return a check-system-version error issue if the resolved version doesn't
+   match the check pattern, or nil if the check passes."
+  [ctx system resolved-version]
+  (when-let [check-versions (:check-system-version ctx)]
+    (when-let [check-pattern (get check-versions system)]
+      (let [actual (or resolved-version (codesystem-version ctx system))]
+        (when (and actual (not (version-matches? check-pattern actual)))
+          {:severity     "error"
+           :type         "exception"
+           :details-code "version-error"
+           :text         (str "The version '" actual "' is not allowed for system '"
+                              system "': required to be '" check-pattern
+                              "' by a version-check parameter")
+           :expression   ["Coding.version"]})))))
 
 (defn valueset-resource
   ([params] (valueset-resource nil params))
@@ -344,7 +435,9 @@
           has-not-in-vs? (some #(contains? #{"not-in-vs" "this-code-not-in-vs"} (:details-code %))
                                existing-issues)
           has-display-issue? (some #(= "invalid-display" (:details-code %)) existing-issues)
-          not-in-vs-msg (when (and url (not has-not-in-vs?) (not has-display-issue?))
+          has-version-issue? (some #(contains? #{"vs-invalid" "version-error" "not-found"} (:details-code %))
+                                   existing-issues)
+          not-in-vs-msg (when (and url (not has-not-in-vs?) (not has-display-issue?) (not has-version-issue?))
                           (let [code-ref (format-code-ref system code display)
                                 vs-version (get result "version")
                                 vs-ref (if vs-version (str url "|" vs-version) url)]
@@ -365,9 +458,11 @@
                        (if (= "not-found" (:details-code orig-issue))
                          orig-issue
                          (assoc orig-issue :expression [code-expr]))))
+          version-issue-codes #{"vs-invalid" "version-error" "version-mismatch"}
           updated-existing (mapv (fn [i]
                                    (cond
                                      (= "not-found" (:details-code i)) i
+                                     (contains? version-issue-codes (:details-code i)) i
                                      (= "invalid-display" (:details-code i))
                                      (assoc i :expression [disp-expr])
                                      :else (assoc i :expression [code-expr])))

@@ -14,6 +14,16 @@
 (s/def ::expanding (s/nilable set?))
 (s/def ::expand-params (s/keys :opt-un [::filter ::activeOnly ::offset ::count ::expanding]))
 
+(defn- resolve-effective-version
+  "Determine the effective version for a system in compose expansion.
+   Priority: force-system-version > include version > system-version > check-system-version > nil"
+  [ctx system include-version]
+  (or (get (:force-system-version ctx) system)
+      include-version
+      (get (:system-version ctx) system)
+      (when-let [check-pattern (get (:check-system-version ctx) system)]
+        (registry/find-matching-version ctx system check-pattern))))
+
 (defn- parse-filters
   "Parse a FHIR compose include/exclude filter array into internal format."
   [filter-array]
@@ -26,29 +36,32 @@
 (defn- expand-include-concepts
   "Expand an include element that has an explicit concept list.
   Enriches each concept with display from CodeSystem lookup when available."
-  [ctx system concepts]
+  [ctx system version concepts]
   (map (fn [c]
          (let [code (get c "code")
                provided-display (get c "display")
                looked-up (when system
-                           (registry/codesystem-lookup ctx {:system system :code code}))
-               display (or provided-display (get looked-up "display"))]
-           {:code    code
-            :system  system
-            :display display}))
+                           (registry/codesystem-lookup ctx {:system system :code code :version version}))
+               display (or provided-display (get looked-up "display"))
+               result-version (or (get looked-up "version") version)]
+           (cond-> {:code    code
+                    :system  system
+                    :display display}
+             result-version (assoc :version result-version))))
        concepts))
 
 (defn- expand-include-filters
   "Expand an include element that has filters, delegating to cs-find-matches."
-  [ctx system filters params]
-  (registry/codesystem-find-matches ctx {:system system :filters (parse-filters filters)
+  [ctx system version filters params]
+  (registry/codesystem-find-matches ctx {:system system :version version
+                                          :filters (parse-filters filters)
                                           :displayLanguage (:displayLanguage params)}))
 
 (defn- expand-include-all
   "Expand an include element with just a system (no concept list, no filters).
   Returns all concepts from the CodeSystem."
-  [ctx system params]
-  (registry/codesystem-find-matches ctx {:system system :filters nil
+  [ctx system version params]
+  (registry/codesystem-find-matches ctx {:system system :version version :filters nil
                                           :displayLanguage (:displayLanguage params)}))
 
 (defn- expand-valueset-refs
@@ -65,14 +78,17 @@
   "Expand a single include element from a compose definition."
   [ctx include params]
   (let [system (get include "system")
+        include-version (get include "version")
+        raw-version (resolve-effective-version ctx system include-version)
+        version (or (registry/find-matching-version ctx system raw-version) raw-version)
         concepts (get include "concept")
         filters (get include "filter")
         vs-urls (get include "valueSet")
         expanding (or (:expanding params) #{})
         system-results (cond
-                         concepts (expand-include-concepts ctx system concepts)
-                         filters (expand-include-filters ctx system filters params)
-                         system (expand-include-all ctx system params)
+                         concepts (expand-include-concepts ctx system version concepts)
+                         filters (expand-include-filters ctx system version filters params)
+                         system (expand-include-all ctx system version params)
                          :else nil)
         vs-results (when (seq vs-urls)
                      (expand-valueset-refs ctx vs-urls expanding))]

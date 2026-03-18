@@ -62,6 +62,7 @@
     "not-found"     OperationOutcome$IssueType/NOTFOUND
     "not-supported" OperationOutcome$IssueType/NOTSUPPORTED
     "business-rule" OperationOutcome$IssueType/BUSINESSRULE
+    "exception"     OperationOutcome$IssueType/EXCEPTION
     OperationOutcome$IssueType/PROCESSING))
 
 (defn- build-issue-component

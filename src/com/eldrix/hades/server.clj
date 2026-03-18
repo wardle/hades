@@ -16,7 +16,7 @@
            (ca.uhn.fhir.rest.api EncodingEnum)
            (ca.uhn.fhir.rest.api.server RequestDetails)
            (ca.uhn.fhir.rest.server RestfulServer IResourceProvider IServerConformanceProvider)
-           (ca.uhn.fhir.rest.server.exceptions ResourceNotFoundException)
+           (ca.uhn.fhir.rest.server.exceptions ResourceNotFoundException UnprocessableEntityException)
            (ca.uhn.fhir.rest.server.provider ServerCapabilityStatementProvider)
            (jakarta.servlet Servlet)
            (jakarta.servlet.http HttpServletRequest HttpServletResponse)
@@ -67,8 +67,20 @@
           vs-version (some (fn [p] (when (= "valueSetVersion" (get p "name"))
                                      (get p "valueString")))
                            params)
+          system-versions (keep (fn [p] (when (= "system-version" (get p "name"))
+                                          (or (get p "valueCanonical") (get p "valueUri"))))
+                                params)
+          force-system-versions (keep (fn [p] (when (= "force-system-version" (get p "name"))
+                                                (or (get p "valueCanonical") (get p "valueUri"))))
+                                      params)
+          check-system-versions (keep (fn [p] (when (= "check-system-version" (get p "name"))
+                                                (or (get p "valueCanonical") (get p "valueUri"))))
+                                      params)
           extra (cond-> {:lenient-display-validation (boolean lenient-val)}
-                  vs-version (assoc :valueSetVersion vs-version))]
+                  vs-version (assoc :valueSetVersion vs-version)
+                  (seq system-versions) (assoc :system-version (registry/parse-version-param system-versions))
+                  (seq force-system-versions) (assoc :force-system-version (registry/parse-version-param force-system-versions))
+                  (seq check-system-versions) (assoc :check-system-version (registry/parse-version-param check-system-versions)))]
       {:tx-resources tx-resources :extra extra})
     (catch Exception _ {:tx-resources nil :extra {}})))
 
@@ -312,7 +324,8 @@
                                     :system          (.getSystem c)
                                     :code            (.getCode c)
                                     :display         (.getDisplay c)
-                                    :version         (some-> systemVersion .getValue)
+                                    :version         (or (some-> systemVersion .getValue)
+                                                         (.getVersion c))
                                     :valueSetVersion (:valueSetVersion ctx)
                                     :displayLanguage display-lang
                                     :input-mode      :codeableConcept
@@ -363,7 +376,8 @@
                  :code            code'
                  :display         (or (some-> display .getValue)
                                       (when coding? (.getDisplay coding)))
-                 :version         (some-> systemVersion .getValue)
+                 :version         (or (some-> systemVersion .getValue)
+                                      (when coding? (.getVersion coding)))
                  :valueSetVersion (:valueSetVersion ctx)
                  :displayLanguage display-lang
                  :input-mode      input-mode})))
@@ -443,27 +457,65 @@
                                   (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                           (.setName "warning-withdrawn")
                                           (.setValue (UriType. ^String vs-version-uri)))))
-              expansion-params (-> (cond-> []
-                                     (some? display-lang)
-                                     (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                             (.setName "displayLanguage")
-                                             (.setValue (CodeType. ^String display-lang))))
-                                     excludeNested
-                                     (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                             (.setName "excludeNested")
-                                             (.setValue (BooleanType. (boolean exclude-nested?)))))
-                                     (some? include-desig?)
-                                     (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                             (.setName "includeDesignations")
-                                             (.setValue (BooleanType. (boolean include-desig?)))))
-                                     (some? active-only?)
-                                     (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                             (.setName "activeOnly")
-                                             (.setValue (BooleanType. (boolean active-only?)))))
-                                     (some-> param-filter .getValue)
-                                     (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                             (.setName "filter")
-                                             (.setValue (StringType. ^String (.getValue param-filter))))))
+              ;; check-system-version validation: throw 4xx if check fails
+              _ (when-let [check-versions (:check-system-version ctx)]
+                  (doseq [[sys ver] system-versions]
+                    (let [resolved (or ver (when-let [cs (registry/codesystem ctx sys)]
+                                             (get (protos/cs-resource cs {}) "version")))]
+                      (when-let [check-pattern (get check-versions sys)]
+                        (when (and resolved (not (registry/version-matches? check-pattern resolved)))
+                          (let [issue {:severity "error" :type "exception"
+                                       :details-code "version-error"
+                                       :text (str "The version '" resolved "' is not allowed for system '"
+                                                  sys "': required to be '" check-pattern
+                                                  "' by a version-check parameter")}]
+                            (throw (ca.uhn.fhir.rest.server.exceptions.UnprocessableEntityException.
+                                     ^String (:text issue)
+                                     (fhir/build-operation-outcome [issue])))))))))
+              ;; Echo version parameters
+              version-echo-params (cond-> []
+                                    (:check-system-version ctx)
+                                    (into (map (fn [[sys ver]]
+                                                 (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                                   (.setName "check-system-version")
+                                                   (.setValue (UriType. ^String (str sys "|" ver)))))
+                                               (:check-system-version ctx)))
+                                    (:force-system-version ctx)
+                                    (into (map (fn [[sys ver]]
+                                                 (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                                   (.setName "force-system-version")
+                                                   (.setValue (UriType. ^String (str sys "|" ver)))))
+                                               (:force-system-version ctx)))
+                                    (:system-version ctx)
+                                    (into (map (fn [[sys ver]]
+                                                 (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                                   (.setName "system-version")
+                                                   (.setValue (UriType. ^String (str sys "|" ver)))))
+                                               (:system-version ctx)))
+                                    (not (or (:check-system-version ctx) (:force-system-version ctx) (:system-version ctx)))
+                                    identity)
+              expansion-params (-> (into version-echo-params
+                                     (cond-> []
+                                       (some? display-lang)
+                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                               (.setName "displayLanguage")
+                                               (.setValue (CodeType. ^String display-lang))))
+                                       excludeNested
+                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                               (.setName "excludeNested")
+                                               (.setValue (BooleanType. (boolean exclude-nested?)))))
+                                       (some? include-desig?)
+                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                               (.setName "includeDesignations")
+                                               (.setValue (BooleanType. (boolean include-desig?)))))
+                                       (some? active-only?)
+                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                               (.setName "activeOnly")
+                                               (.setValue (BooleanType. (boolean active-only?)))))
+                                       (some-> param-filter .getValue)
+                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                               (.setName "filter")
+                                               (.setValue (StringType. ^String (.getValue param-filter)))))))
                                    (into (map (fn [{:keys [uri]}]
                                                 (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                                   (.setName "used-codesystem")
@@ -600,7 +652,16 @@
               wrapped (wrap-request request body)]
           (binding [*tx-ctx* ctx]
             (proxy-super service wrapped response)))
-        (proxy-super service request response)))))
+        (let [sys-vers (seq (.getParameterValues request "system-version"))
+              force-vers (seq (.getParameterValues request "force-system-version"))
+              check-vers (seq (.getParameterValues request "check-system-version"))
+              ctx (when (or sys-vers force-vers check-vers)
+                    (cond-> {}
+                      sys-vers (assoc :system-version (registry/parse-version-param sys-vers))
+                      force-vers (assoc :force-system-version (registry/parse-version-param force-vers))
+                      check-vers (assoc :check-system-version (registry/parse-version-param check-vers))))]
+          (binding [*tx-ctx* ctx]
+            (proxy-super service request response)))))))
 
 (defn make-server ^Server [svc {:keys [port]}]
   (let [servlet-holder (ServletHolder. ^Servlet (make-r4-servlet svc))
