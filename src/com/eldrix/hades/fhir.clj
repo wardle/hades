@@ -171,6 +171,15 @@
                     (do (.setValue dc (str (get d "value")))
                         (when-let [lang (get d "language")]
                           (.setLanguage dc (str lang)))
+                        (when-let [use-map (get d "use")]
+                          (let [coding (Coding.)]
+                            (when-let [s (or (get use-map "system") (:system use-map))]
+                              (.setSystem coding (str s)))
+                            (when-let [c (or (get use-map "code") (:code use-map))]
+                              (.setCode coding (str c)))
+                            (when-let [disp (or (get use-map "display") (:display use-map))]
+                              (.setDisplay coding (str disp)))
+                            (.setUse dc coding)))
                         dc)
                     (doto dc (.setValue (str d))))))
               designations)))
