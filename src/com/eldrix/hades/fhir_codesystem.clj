@@ -399,6 +399,7 @@
     (when (or (nil? system) (= system url))
       (if-let [concept (get code-index code)]
         (let [inactive? (concept-inactive? concept)
+              {:keys [lenient-display-validation]} (merge registry/default-request (:request ctx))
               result (cond-> {"result"  true
                               "display" (:display concept)
                               "code"    (keyword code)
@@ -407,7 +408,7 @@
                        inactive? (assoc "inactive" true
                                         "inactive-status" (concept-inactive-status concept)))]
           (if (and display (not (display-matches? concept display)))
-            (let [lenient? (get ctx :lenient-display-validation true)
+            (let [lenient? lenient-display-validation
                   msg (str "Display '" display "' differs from preferred '" (:display concept) "'")]
               (assoc result "result" (boolean lenient?)
                             "message" msg

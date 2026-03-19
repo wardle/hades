@@ -130,14 +130,14 @@
 
 (deftest expand-compose-force-system-version-test
   (testing "force-system-version overrides include version"
-    (let [ctx {:force-system-version {"http://example.com/cs" "2.0"}}
+    (let [ctx {:request {:force-system-version {"http://example.com/cs" "2.0"}}}
           compose {"include" [{"system" "http://example.com/cs" "version" "1.0"}]}
           result (compose/expand-compose ctx compose {})]
       (is (= 2 (count result)))
       (is (some #(= "D" (:code %)) result))
       (is (not (some #(= "B" (:code %)) result)))))
   (testing "force-system-version applies when no include version"
-    (let [ctx {:force-system-version {"http://example.com/cs" "2.0"}}
+    (let [ctx {:request {:force-system-version {"http://example.com/cs" "2.0"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
           result (compose/expand-compose ctx compose {})]
       (is (= 2 (count result)))
@@ -145,7 +145,7 @@
 
 (deftest expand-compose-system-version-default-test
   (testing "system-version provides default when no include version"
-    (let [ctx {:system-version {"http://example.com/cs" "2.0"}}
+    (let [ctx {:request {:system-version {"http://example.com/cs" "2.0"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
           result (compose/expand-compose ctx compose {})]
       (is (= 2 (count result)))
@@ -153,7 +153,7 @@
 
 (deftest expand-compose-system-version-no-override-test
   (testing "system-version does NOT override include version"
-    (let [ctx {:system-version {"http://example.com/cs" "2.0"}}
+    (let [ctx {:request {:system-version {"http://example.com/cs" "2.0"}}}
           compose {"include" [{"system" "http://example.com/cs" "version" "1.0"}]}
           result (compose/expand-compose ctx compose {})]
       (is (= 5 (count result)))
@@ -161,17 +161,17 @@
 
 (deftest expand-compose-check-system-version-test
   (testing "check-system-version passes when version matches"
-    (let [ctx {:check-system-version {"http://example.com/cs" "1.0"}}
+    (let [ctx {:request {:check-system-version {"http://example.com/cs" "1.0"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
           result (compose/expand-compose ctx compose {})]
       (is (= 5 (count result)))))
   (testing "check-system-version passes with wildcard"
-    (let [ctx {:check-system-version {"http://example.com/cs" "1.x"}}
+    (let [ctx {:request {:check-system-version {"http://example.com/cs" "1.x"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
           result (compose/expand-compose ctx compose {})]
       (is (= 5 (count result)))))
   (testing "check-system-version with non-existent version returns no results"
-    (let [ctx {:check-system-version {"http://example.com/cs" "3.0"}}
+    (let [ctx {:request {:check-system-version {"http://example.com/cs" "3.0"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
           result (compose/expand-compose ctx compose {})]
       (is (zero? (count result))))))
