@@ -63,7 +63,22 @@
 (s/def ::codesystems (s/map-of ::uri #(satisfies? protos/CodeSystem %)))
 (s/def ::valuesets (s/map-of ::uri #(satisfies? protos/ValueSet %)))
 (s/def ::conceptmaps (s/map-of ::uri #(satisfies? protos/ConceptMap %)))
-(s/def ::ctx (s/nilable (s/keys :opt-un [::codesystems ::valuesets ::conceptmaps])))
+
+;; Request-scoped parameters from the FHIR operation invocation.
+(s/def ::lenient-display-validation boolean?)
+(s/def ::system-version (s/map-of ::uri ::uri))
+(s/def ::force-system-version (s/map-of ::uri ::uri))
+(s/def ::check-system-version (s/map-of ::uri ::uri))
+(s/def ::request (s/keys :opt-un [::lenient-display-validation
+                                  ::system-version
+                                  ::force-system-version
+                                  ::check-system-version]))
+
+(def default-request
+  "Default request parameters. Merged with actual request params at construction."
+  {:lenient-display-validation true})
+
+(s/def ::ctx (s/nilable (s/keys :opt-un [::codesystems ::valuesets ::conceptmaps ::request])))
 
 (defn uri-without-query
   [s]
@@ -304,7 +319,7 @@
   "Return a check-system-version error issue if the resolved version doesn't
    match the check pattern, or nil if the check passes."
   [ctx system resolved-version]
-  (when-let [check-versions (:check-system-version ctx)]
+  (when-let [check-versions (get-in ctx [:request :check-system-version])]
     (when-let [check-pattern (get check-versions system)]
       (let [actual (or resolved-version (codesystem-version ctx system))]
         (when (and actual (not (version-matches? check-pattern actual)))
@@ -495,8 +510,8 @@
      (enrich-vs-validate-result ctx
        (protos/vs-validate-code vs (assoc params :ctx ctx))
        params)
-     (let [target (or url system)
-           msg (str "A definition for ValueSet '" target "' could not be found, so the code cannot be validated")]
+     (let [target (or vs-lookup url system)
+           msg (str "A definition for the value Set '" target "' could not be found")]
        {"result"  false
         "code"    (when code (keyword code))
         "system"  system
