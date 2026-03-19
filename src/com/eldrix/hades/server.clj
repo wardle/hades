@@ -23,7 +23,7 @@
            (org.eclipse.jetty.server Server ServerConnector)
            (org.eclipse.jetty.servlet ServletContextHandler ServletHolder)
            (org.hl7.fhir.instance.model.api IBaseConformance)
-           (org.hl7.fhir.r4.model BooleanType CapabilityStatement CapabilityStatement$CapabilityStatementSoftwareComponent
+           (org.hl7.fhir.r4.model BooleanType CapabilityStatement CapabilityStatement$CapabilityStatementSoftwareComponent IntegerType
                                    CodeSystem CodeType Coding ConceptMap
                                    Enumerations$PublicationStatus StringType
                                    TerminologyCapabilities TerminologyCapabilities$TerminologyCapabilitiesCodeSystemComponent
@@ -76,12 +76,11 @@
           check-system-versions (keep (fn [p] (when (= "check-system-version" (get p "name"))
                                                 (or (get p "valueCanonical") (get p "valueUri"))))
                                       params)
-          extra (cond-> {:lenient-display-validation (boolean lenient-val)}
-                  vs-version (assoc :valueSetVersion vs-version)
-                  (seq system-versions) (assoc :system-version (registry/parse-version-param system-versions))
-                  (seq force-system-versions) (assoc :force-system-version (registry/parse-version-param force-system-versions))
-                  (seq check-system-versions) (assoc :check-system-version (registry/parse-version-param check-system-versions)))]
-      {:tx-resources tx-resources :extra extra})
+          request (cond-> {:lenient-display-validation (boolean lenient-val)}
+                    (seq system-versions) (assoc :system-version (registry/parse-version-param system-versions))
+                    (seq force-system-versions) (assoc :force-system-version (registry/parse-version-param force-system-versions))
+                    (seq check-system-versions) (assoc :check-system-version (registry/parse-version-param check-system-versions)))]
+      {:tx-resources tx-resources :request request :value-set-version vs-version})
     (catch Exception _ {:tx-resources nil :extra {}})))
 
 (defn- build-tx-ctx
@@ -309,6 +308,7 @@
                   ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "valueset/$validate-code:" {:url url :code code :system system :coding coding :cc codeableConcept})
     (let [ctx *tx-ctx*
+          {:keys [value-set-version]} ctx
           display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
           url' (some-> url .getValue)
           cc? (and codeableConcept (seq (.getCoding codeableConcept)))
@@ -326,7 +326,7 @@
                                     :display         (.getDisplay c)
                                     :version         (or (some-> systemVersion .getValue)
                                                          (.getVersion c))
-                                    :valueSetVersion (:valueSetVersion ctx)
+                                    :valueSetVersion value-set-version
                                     :displayLanguage display-lang
                                     :input-mode      :codeableConcept
                                     :coding-index    idx}))
@@ -378,7 +378,7 @@
                                       (when coding? (.getDisplay coding)))
                  :version         (or (some-> systemVersion .getValue)
                                       (when coding? (.getVersion coding)))
-                 :valueSetVersion (:valueSetVersion ctx)
+                 :valueSetVersion value-set-version
                  :displayLanguage display-lang
                  :input-mode      input-mode})))
           vs-not-found? (some #(and (= "not-found" (:details-code %))
@@ -417,6 +417,8 @@
           active-only? (some-> activeOnly .getValue)
           exclude-nested? (if excludeNested (.getValue excludeNested) true)
           display-lang (resolve-display-language (some-> displayLanguage .getValue) request)]
+      (let [count' (some-> param-count .getValue)
+            offset' (some-> offset .getValue)]
       (if-let [results (registry/valueset-expand ctx {:url             url'
                                                        :activeOnly      active-only?
                                                        :filter          (some-> param-filter .getValue)
@@ -458,11 +460,12 @@
                                           (.setName "warning-withdrawn")
                                           (.setValue (UriType. ^String vs-version-uri)))))
               ;; check-system-version validation: throw 4xx if check fails
-              _ (when-let [check-versions (:check-system-version ctx)]
+              {:keys [check-system-version force-system-version system-version]} (:request ctx)
+              _ (when check-system-version
                   (doseq [[sys ver] system-versions]
                     (let [resolved (or ver (when-let [cs (registry/codesystem ctx sys)]
                                              (get (protos/cs-resource cs {}) "version")))]
-                      (when-let [check-pattern (get check-versions sys)]
+                      (when-let [check-pattern (get check-system-version sys)]
                         (when (and resolved (not (registry/version-matches? check-pattern resolved)))
                           (let [issue {:severity "error" :type "exception"
                                        :details-code "version-error"
@@ -474,25 +477,25 @@
                                      (fhir/build-operation-outcome [issue])))))))))
               ;; Echo version parameters
               version-echo-params (cond-> []
-                                    (:check-system-version ctx)
+                                    check-system-version
                                     (into (map (fn [[sys ver]]
                                                  (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                                    (.setName "check-system-version")
                                                    (.setValue (UriType. ^String (str sys "|" ver)))))
-                                               (:check-system-version ctx)))
-                                    (:force-system-version ctx)
+                                               check-system-version))
+                                    force-system-version
                                     (into (map (fn [[sys ver]]
                                                  (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                                    (.setName "force-system-version")
                                                    (.setValue (UriType. ^String (str sys "|" ver)))))
-                                               (:force-system-version ctx)))
-                                    (:system-version ctx)
+                                               force-system-version))
+                                    system-version
                                     (into (map (fn [[sys ver]]
                                                  (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                                    (.setName "system-version")
                                                    (.setValue (UriType. ^String (str sys "|" ver)))))
-                                               (:system-version ctx)))
-                                    (not (or (:check-system-version ctx) (:force-system-version ctx) (:system-version ctx)))
+                                               system-version))
+                                    (not (or check-system-version force-system-version system-version))
                                     identity)
               expansion-params (-> (into version-echo-params
                                      (cond-> []
@@ -515,7 +518,15 @@
                                        (some-> param-filter .getValue)
                                        (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                                (.setName "filter")
-                                               (.setValue (StringType. ^String (.getValue param-filter)))))))
+                                               (.setValue (StringType. ^String (.getValue param-filter)))))
+                                       param-count
+                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                               (.setName "count")
+                                               (.setValue (IntegerType. (.getValue param-count)))))
+                                       offset
+                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
+                                               (.setName "offset")
+                                               (.setValue (IntegerType. (.getValue offset)))))))
                                    (into (map (fn [{:keys [uri]}]
                                                 (doto (ValueSet$ValueSetExpansionParameterComponent.)
                                                   (.setName "used-codesystem")
@@ -538,10 +549,13 @@
                              (.setTimestamp (Date.))
                              (.setParameter expansion-params)
                              (.setTotal (count results))
-                             (.setContains (map #(fhir/map->vs-expansion % :include-designations include-desig?) results)))))]
+                             (.setContains (let [paged (cond->> results
+                                                         offset' (drop offset')
+                                                         count' (take count'))]
+                                             (map #(fhir/map->vs-expansion % :include-designations include-desig?) paged))))))]
             (when (some? (get vs-meta "experimental"))
               (.setExperimental vs (boolean (get vs-meta "experimental"))))
-            vs))))))
+            vs)))))))
 
 (deftype ConceptMapResourceProvider [svc]
   IResourceProvider
@@ -647,19 +661,24 @@
     (service [^HttpServletRequest request ^HttpServletResponse response]
       (if (= "POST" (.getMethod request))
         (let [body (.readAllBytes (.getInputStream request))
-              {:keys [tx-resources extra]} (parse-post-params body)
-              ctx (merge (build-tx-ctx tx-resources) extra)
+              {:keys [tx-resources value-set-version]
+               parsed-request :request} (parse-post-params body)
+              overlay (build-tx-ctx tx-resources)
+              ctx (assoc overlay
+                    :request (merge registry/default-request parsed-request)
+                    :value-set-version value-set-version)
               wrapped (wrap-request request body)]
           (binding [*tx-ctx* ctx]
             (proxy-super service wrapped response)))
         (let [sys-vers (seq (.getParameterValues request "system-version"))
               force-vers (seq (.getParameterValues request "force-system-version"))
               check-vers (seq (.getParameterValues request "check-system-version"))
+              request-params (cond-> {}
+                               sys-vers (assoc :system-version (registry/parse-version-param sys-vers))
+                               force-vers (assoc :force-system-version (registry/parse-version-param force-vers))
+                               check-vers (assoc :check-system-version (registry/parse-version-param check-vers)))
               ctx (when (or sys-vers force-vers check-vers)
-                    (cond-> {}
-                      sys-vers (assoc :system-version (registry/parse-version-param sys-vers))
-                      force-vers (assoc :force-system-version (registry/parse-version-param force-vers))
-                      check-vers (assoc :check-system-version (registry/parse-version-param check-vers))))]
+                    {:request (merge registry/default-request request-params)})]
           (binding [*tx-ctx* ctx]
             (proxy-super service request response)))))))
 
