@@ -18,11 +18,12 @@
   "Determine the effective version for a system in compose expansion.
    Priority: force-system-version > include version > system-version > check-system-version > nil"
   [ctx system include-version]
-  (or (get (:force-system-version ctx) system)
-      include-version
-      (get (:system-version ctx) system)
-      (when-let [check-pattern (get (:check-system-version ctx) system)]
-        (registry/find-matching-version ctx system check-pattern))))
+  (let [request (:request ctx)]
+    (or (get (:force-system-version request) system)
+        include-version
+        (get (:system-version request) system)
+        (when-let [check-pattern (get (:check-system-version request) system)]
+          (registry/find-matching-version ctx system check-pattern)))))
 
 (defn- parse-filters
   "Parse a FHIR compose include/exclude filter array into internal format."
@@ -35,28 +36,30 @@
 
 (defn- expand-include-concepts
   "Expand an include element that has an explicit concept list.
-  Enriches each concept with display from CodeSystem lookup when available."
+  Enriches each concept with display from CodeSystem lookup when available.
+  Concepts that don't exist in the CodeSystem are excluded."
   [ctx system version concepts]
-  (map (fn [c]
-         (let [code (get c "code")
-               provided-display (get c "display")
-               looked-up (when system
-                           (registry/codesystem-lookup ctx {:system system :code code :version version}))
-               display (or provided-display (get looked-up "display"))
-               result-version (or (get looked-up "version") version)
-               inactive? (when looked-up
-                           (some (fn [p] (and (= :inactive (:code p)) (:value p)))
-                                 (get looked-up "property")))
-               abstract? (get looked-up "abstract")
-               designations (get looked-up "designation")]
-           (cond-> {:code    code
-                    :system  system
-                    :display display}
-             result-version (assoc :version result-version)
-             (seq designations) (assoc :designations designations)
-             abstract? (assoc :abstract true)
-             inactive? (assoc :inactive true))))
-       concepts))
+  (keep (fn [c]
+          (let [code (get c "code")
+                provided-display (get c "display")
+                looked-up (when system
+                            (registry/codesystem-lookup ctx {:system system :code code :version version}))]
+            (when (or looked-up (nil? system))
+              (let [display (or provided-display (get looked-up "display"))
+                    result-version (or (get looked-up "version") version)
+                    inactive? (when looked-up
+                                (some (fn [p] (and (= :inactive (:code p)) (:value p)))
+                                      (get looked-up "property")))
+                    abstract? (get looked-up "abstract")
+                    designations (get looked-up "designation")]
+                (cond-> {:code    code
+                         :system  system
+                         :display display}
+                  result-version (assoc :version result-version)
+                  (seq designations) (assoc :designations designations)
+                  abstract? (assoc :abstract true)
+                  inactive? (assoc :inactive true))))))
+        concepts))
 
 (defn- expand-include-filters
   "Expand an include element that has filters, delegating to cs-find-matches."
