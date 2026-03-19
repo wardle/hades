@@ -351,19 +351,31 @@
                         (seq all-issues) (update "issues" (fnil into []) all-issues)
                         error-msg (assoc "message" error-msg)
                         true (assoc "codeableConcept" codeableConcept))
-                      (let [vs-impl (registry/valueset ctx url')
-                            vs-ver (when vs-impl (get (protos/vs-resource vs-impl {}) "version"))
-                            vs-url-ver (if vs-ver (str url' "|" vs-ver) url')
-                            no-valid-msg (str "No valid coding was found for the value set '" vs-url-ver "'")
-                            combined-msg (if (seq cs-error-msgs)
-                                           (str no-valid-msg "; " (str/join "; " cs-error-msgs))
-                                           no-valid-msg)
-                            no-valid-issue {:severity "error" :type "code-invalid"
-                                            :details-code "not-in-vs" :text no-valid-msg}]
-                        {"result" false
-                         "codeableConcept" codeableConcept
-                         "message" combined-msg
-                         "issues" (into [no-valid-issue] all-issues)}))))))
+                      ;; No valid coding — check if code was found but failed due to
+                      ;; version issues. If so, use that result with its fields.
+                      (let [version-issue-codes #{"vs-invalid" "version-error" "version-mismatch"}
+                            best-invalid (last (filter (fn [r]
+                                                         (and (get r "display") (get r "system")
+                                                              (some #(contains? version-issue-codes (:details-code %))
+                                                                    (get r "issues"))
+                                                              (not (some #(= "not-in-vs" (:details-code %))
+                                                                         (get r "issues")))))
+                                                       per-coding))]
+                        (if best-invalid
+                          (assoc best-invalid "codeableConcept" codeableConcept "result" false)
+                          (let [vs-impl (registry/valueset ctx url')
+                                vs-ver (when vs-impl (get (protos/vs-resource vs-impl {}) "version"))
+                                vs-url-ver (if vs-ver (str url' "|" vs-ver) url')
+                                no-valid-msg (str "No valid coding was found for the value set '" vs-url-ver "'")
+                                combined-msg (if (seq cs-error-msgs)
+                                               (str no-valid-msg "; " (str/join "; " cs-error-msgs))
+                                               no-valid-msg)
+                                no-valid-issue {:severity "error" :type "code-invalid"
+                                                :details-code "not-in-vs" :text no-valid-msg}]
+                            {"result" false
+                             "codeableConcept" codeableConcept
+                             "message" combined-msg
+                             "issues" (into [no-valid-issue] all-issues)}))))))))
             ;; Single code or Coding
             (let [system' (or (some-> system .getValue)
                               (when coding? (.getSystem coding)))

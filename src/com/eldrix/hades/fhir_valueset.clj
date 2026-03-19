@@ -17,17 +17,27 @@
             (get inc "version")))
         (get compose-def "include")))
 
+(defn- version-expression
+  [input-mode coding-index]
+  (case input-mode
+    :code "version"
+    :coding "Coding.version"
+    :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "].version")
+    "version"))
+
 (defn- add-version-mismatch
   "Add a version mismatch error when the VS include version differs from the coding's."
-  [result caller-version match-ver system override-pattern include-ver input-mode]
+  [result caller-version match-ver system override-pattern include-ver force? input-mode coding-index]
   (if (and caller-version match-ver (not= caller-version match-ver))
-    (let [ver-desc (if override-pattern
+    (let [use-resulting-from? (and override-pattern
+                                   (or force? (nil? include-ver) (= "" include-ver)))
+          ver-desc (if use-resulting-from?
                      (str "version '" override-pattern "' resulting from the version '"
                           (or include-ver "") "'")
-                     (str "version '" match-ver "'"))
+                     (str "version '" (or include-ver match-ver) "'"))
           msg (str "The code system '" system "' " ver-desc
                    " in the ValueSet include is different to the one in the value ('" caller-version "')")
-          expr (if (= input-mode :code) "version" "Coding.version")
+          expr (version-expression input-mode coding-index)
           issue {:severity     "error"
                  :type         "invalid"
                  :details-code "vs-invalid"
@@ -42,19 +52,27 @@
 
 (defn- fix-expression-for-input-mode
   "Adjust issue expression paths based on input mode.
-  Code-mode uses bare property names; coding-mode uses Coding.* paths."
-  [issue input-mode]
-  (if (= input-mode :code)
-    (update issue :expression
-            (fn [exprs]
-              (mapv #(clojure.string/replace % #"^Coding\." "") exprs)))
-    issue))
+  Code-mode uses bare property names; coding-mode uses Coding.* paths;
+  codeableConcept mode uses CodeableConcept.coding[n].* paths."
+  ([issue input-mode] (fix-expression-for-input-mode issue input-mode 0))
+  ([issue input-mode coding-index]
+   (case input-mode
+     :code (update issue :expression
+                   (fn [exprs]
+                     (mapv #(clojure.string/replace % #"^Coding\." "") exprs)))
+     :codeableConcept (update issue :expression
+                              (fn [exprs]
+                                (mapv #(clojure.string/replace
+                                         % #"^Coding\."
+                                         (str "CodeableConcept.coding[" (or coding-index 0) "]."))
+                                      exprs)))
+     issue)))
 
 (defn- add-check-system-version-issue
   "Add check-system-version error when the resolved version doesn't match."
-  [result ctx system resolved-version input-mode]
+  [result ctx system resolved-version input-mode coding-index]
   (if-let [issue (some-> (registry/check-system-version-issue ctx system resolved-version)
-                         (fix-expression-for-input-mode input-mode))]
+                         (fix-expression-for-input-mode input-mode coding-index))]
     (let [cur-msg (get result "message")]
       (assoc result
              "result" false
@@ -64,9 +82,9 @@
 
 (defn- add-unknown-version-issue
   "Add UNKNOWN_CODESYSTEM_VERSION error when the caller's version doesn't exist."
-  [result ctx system caller-version input-mode]
+  [result ctx system caller-version input-mode coding-index]
   (if-let [issue (some-> (registry/unknown-version-issue ctx system caller-version)
-                         (fix-expression-for-input-mode input-mode))]
+                         (fix-expression-for-input-mode input-mode coding-index))]
     (let [cur-msg (get result "message")]
       (assoc result
              "result" false
@@ -103,9 +121,28 @@
                                  (assoc c :case-differs true)))
                           expanded))
           include-ver (compose-version-for-system compose-def system)
+          ;; When the include has a wildcard version and the caller's version
+          ;; matches the pattern, re-lookup in the caller's CS version to get
+          ;; the correct display/version for the response.
+          include-is-wildcard? (and include-ver
+                                    (some #(= "x" %) (str/split include-ver #"\.")))
+          caller-matches-include? (and include-is-wildcard?
+                                       caller-version
+                                       (registry/version-matches? include-ver caller-version))
+          match (if (and match caller-matches-include?
+                         (not= caller-version (:version match)))
+                  (let [cs-lookup (registry/codesystem-lookup ctx
+                                    {:system system :code code :version caller-version})]
+                    (if cs-lookup
+                      (assoc match
+                             :version caller-version
+                             :display (get cs-lookup "display"))
+                      match))
+                  match)
           match-ver (or (:version match) include-ver)
           {:keys [force-system-version system-version check-system-version]
            :as request} (merge registry/default-request (:request ctx))
+          force? (some? (get force-system-version system))
           override-pattern (or (get force-system-version system)
                                (get system-version system)
                                (get check-system-version system))]
@@ -144,14 +181,14 @@
               (-> (assoc result "result" (boolean lenient?)
                                 "message" msg
                                 "issues" (filterv some? [case-issue display-issue]))
-                  (add-version-mismatch caller-version match-ver system override-pattern include-ver (:input-mode params))
-                  (add-unknown-version-issue ctx system caller-version (:input-mode params))
-                  (add-check-system-version-issue ctx system match-ver (:input-mode params))))
+                  (add-version-mismatch caller-version match-ver system override-pattern include-ver force? (:input-mode params) (:coding-index params))
+                  (add-unknown-version-issue ctx system caller-version (:input-mode params) (:coding-index params))
+                  (add-check-system-version-issue ctx system match-ver (:input-mode params) (:coding-index params))))
             (-> (cond-> result
                   case-issue (assoc "issues" [case-issue]))
-                (add-version-mismatch caller-version match-ver system override-pattern include-ver (:input-mode params))
-                (add-unknown-version-issue ctx system caller-version (:input-mode params))
-                (add-check-system-version-issue ctx system match-ver (:input-mode params)))))
+                (add-version-mismatch caller-version match-ver system override-pattern include-ver force? (:input-mode params) (:coding-index params))
+                (add-unknown-version-issue ctx system caller-version (:input-mode params) (:coding-index params))
+                (add-check-system-version-issue ctx system match-ver (:input-mode params) (:coding-index params)))))
         (let [code-ref (cond-> (str system "#" code)
                         display (str " ('" display "')"))
               vs-ref (if version (str url "|" version) url)
@@ -165,9 +202,9 @@
                            :details-code "not-in-vs"
                            :text         not-in-vs-msg
                            :expression   ["code"]}]}
-              (add-version-mismatch caller-version match-ver system override-pattern include-ver (:input-mode params))
-              (add-unknown-version-issue ctx system caller-version (:input-mode params))
-              (add-check-system-version-issue ctx system match-ver (:input-mode params))))))))
+              (add-version-mismatch caller-version match-ver system override-pattern include-ver force? (:input-mode params) (:coding-index params))
+              (add-unknown-version-issue ctx system caller-version (:input-mode params) (:coding-index params))
+              (add-check-system-version-issue ctx system match-ver (:input-mode params) (:coding-index params))))))))
 
 (s/fdef make-fhir-value-set
   :args (s/cat :vs-map map?))
