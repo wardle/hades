@@ -136,6 +136,18 @@
     (distinct (concat (extract (:codesystems ctx))
                       (extract @codesystems)))))
 
+(defn- semver-compare
+  "Compare two version strings numerically by segment.
+  '1.10.0' > '1.9.0' (unlike lexicographic compare)."
+  [a b]
+  (let [parse (fn [s] (mapv #(try (Integer/parseInt %) (catch Exception _ 0))
+                             (clojure.string/split s #"\.")))
+        pa (parse a)
+        pb (parse b)
+        max-len (max (count pa) (count pb))
+        pad (fn [v] (into (vec v) (repeat (- max-len (count v)) 0)))]
+    (compare (pad pa) (pad pb))))
+
 (defn find-matching-version
   "Resolve a version pattern against available versions. If the pattern contains
    'x' wildcard segments, finds the latest matching registered version. Otherwise
@@ -144,7 +156,7 @@
   (when pattern
     (if (some #(= "x" %) (clojure.string/split pattern #"\."))
       (reduce (fn [best v] (if (and (version-matches? pattern v)
-                                    (or (nil? best) (pos? (compare v best))))
+                                    (or (nil? best) (pos? (semver-compare v best))))
                                v best))
               nil (available-versions ctx system))
       pattern)))

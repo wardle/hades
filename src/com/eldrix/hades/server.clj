@@ -16,7 +16,7 @@
            (ca.uhn.fhir.rest.api EncodingEnum)
            (ca.uhn.fhir.rest.api.server RequestDetails)
            (ca.uhn.fhir.rest.server RestfulServer IResourceProvider IServerConformanceProvider)
-           (ca.uhn.fhir.rest.server.exceptions ResourceNotFoundException UnprocessableEntityException)
+           (ca.uhn.fhir.rest.server.exceptions InternalErrorException ResourceNotFoundException UnprocessableEntityException)
            (ca.uhn.fhir.rest.server.provider ServerCapabilityStatementProvider)
            (jakarta.servlet Servlet)
            (jakarta.servlet.http HttpServletRequest HttpServletResponse)
@@ -45,6 +45,28 @@
   [^String display-language-param ^HttpServletRequest request]
   (or display-language-param
       (some-> request (.getHeader "Accept-Language"))))
+
+(defn- operation-exception
+  "Convert an exception to a HAPI server exception with OperationOutcome."
+  ^Exception [^Throwable e]
+  (if (instance? clojure.lang.ExceptionInfo e)
+    (let [{:keys [type]} (ex-data e)
+          msg (ex-message e)
+          issue-type (case type :invalid "invalid" :not-found "not-found"
+                                :not-supported "not-supported" :processing "processing"
+                                "exception")
+          oo (fhir/build-operation-outcome [{:severity "error" :type issue-type
+                                              :details-code (name (or type :exception))
+                                              :text msg}])]
+      (case type
+        :invalid (UnprocessableEntityException. ^String msg oo)
+        :not-found (ResourceNotFoundException. ^String msg oo)
+        :processing (UnprocessableEntityException. ^String msg oo)
+        (doto (InternalErrorException. ^String msg) (.setOperationOutcome oo))))
+    (let [msg (or (ex-message e) "Internal server error")
+          oo (fhir/build-operation-outcome [{:severity "error" :type "exception"
+                                              :details-code "exception" :text msg}])]
+      (doto (InternalErrorException. ^String msg ^Throwable e) (.setOperationOutcome oo)))))
 
 (defn- parse-post-params
   "Parse a POST body (bytes) as FHIR Parameters JSON. Returns a map with:
@@ -84,8 +106,7 @@
 
 (defn build-tx-ctx
   "Build an overlay ctx from a seq of resource maps (plain Clojure maps).
-  Two-pass: CodeSystems first, then ValueSets, since a ValueSet may reference
-  a CodeSystem from the same tx-resource batch.
+  Three-pass: regular CodeSystems first, then supplements, then ValueSets.
 
   Use from the REPL for direct testing with overlays:
     (def ctx (server/build-tx-ctx [cs-map vs-map ...]))
@@ -95,6 +116,9 @@
   (when (seq resource-maps)
     (let [code-systems (filter #(= "CodeSystem" (get % "resourceType")) resource-maps)
           value-sets (filter #(= "ValueSet" (get % "resourceType")) resource-maps)
+          supplements (filter #(= "supplement" (get % "content")) code-systems)
+          regular-cs (remove #(= "supplement" (get % "content")) code-systems)
+          ;; Pass 1: regular CodeSystems
           ctx (reduce (fn [ctx m]
                         (let [url (get m "url")
                               version (get m "version")
@@ -104,7 +128,23 @@
                                       (assoc-in [:valuesets url] fcs))
                             version (-> (assoc-in [:codesystems (str url "|" version)] fcs)
                                         (assoc-in [:valuesets (str url "|" version)] fcs)))))
-                      {} code-systems)]
+                      {} regular-cs)
+          ;; Pass 2: apply supplements to base CodeSystems
+          ctx (reduce (fn [ctx supp]
+                        (let [base-url (get supp "supplements")]
+                          (if-let [base-cs (or (get-in ctx [:codesystems base-url])
+                                               (registry/codesystem base-url))]
+                            (let [merged (fhir-cs/apply-supplement base-cs supp)
+                                  url (get supp "supplements")
+                                  version (get supp "version")]
+                              (cond-> (-> ctx
+                                          (assoc-in [:codesystems url] merged)
+                                          (assoc-in [:valuesets url] merged))
+                                version (-> (assoc-in [:codesystems (str url "|" version)] merged)
+                                            (assoc-in [:valuesets (str url "|" version)] merged))))
+                            ctx)))
+                      ctx supplements)]
+      ;; Pass 3: ValueSets
       (reduce (fn [ctx m]
                 (let [url (get m "url")
                       version (get m "version")
@@ -318,54 +358,59 @@
                   ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "displayLanguage"}} displayLanguage
                   ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "valueset/$validate-code:" {:url url :code code :system system :coding coding :cc codeableConcept})
-    (let [ctx *tx-ctx*
-          {:keys [value-set-version]} ctx
-          display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
-          url' (some-> url .getValue)
-          cc? (and codeableConcept (seq (.getCoding codeableConcept)))
-          coding? (and coding (some-> coding .getCode))
-          ;; Extract HAPI params into plain maps and call registry
-          result
-          (if cc?
-            (let [codings (mapv (fn [^Coding c]
-                                 (let [sv (some-> systemVersion .getValue)]
-                                   (cond-> {:system (.getSystem c) :code (.getCode c)}
-                                     (.getDisplay c) (assoc :display (.getDisplay c))
-                                     (or sv (.getVersion c))
-                                     (assoc :version (or sv (.getVersion c))))))
-                               (.getCoding codeableConcept))
-                  result (registry/valueset-validate-codeableconcept ctx codings
-                           (cond-> {:url url'}
-                             value-set-version (assoc :valueSetVersion value-set-version)
-                             display-lang (assoc :displayLanguage display-lang)))]
-              (assoc result :codeableConcept codeableConcept))
-            (let [system' (or (some-> system .getValue)
-                              (when coding? (.getSystem coding)))
-                  code' (or (some-> code .getValue)
-                            (when coding? (.getCode coding)))
-                  display' (or (some-> display .getValue)
-                               (when coding? (.getDisplay coding)))
-                  version' (or (some-> systemVersion .getValue)
-                               (when coding? (.getVersion coding)))
-]
-              (registry/valueset-validate-code ctx
-                (cond-> {:url url' :system system' :code code'}
-                  display' (assoc :display display')
-                  version' (assoc :version version')
-                  value-set-version (assoc :valueSetVersion value-set-version)
-                  display-lang (assoc :displayLanguage display-lang)))))
-          ;; Adjust canonical Coding.* expressions for the input mode
-          input-mode (cond cc? :codeableConcept coding? :coding :else :code)
-          result (if (:issues result)
-                   (assoc result :issues (fhir/adjust-issue-expressions
-                                           (:issues result) input-mode nil))
-                   result)]
-      ;; VS not found → 4xx
-      (if (:not-found result)
-        (throw (ResourceNotFoundException.
-                 ^String (:message result)
-                 (fhir/build-operation-outcome (:issues result))))
-        (fhir/validate-result->parameters result))))
+    (try
+      (let [ctx *tx-ctx*
+            {:keys [value-set-version]} ctx
+            display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
+            url' (some-> url .getValue)
+            cc? (and codeableConcept (seq (.getCoding codeableConcept)))
+            coding? (and coding (some-> coding .getCode))
+            ;; Extract HAPI params into plain maps and call registry
+            result
+            (if cc?
+              (let [codings (mapv (fn [^Coding c]
+                                   (let [sv (some-> systemVersion .getValue)]
+                                     (cond-> {:system (.getSystem c) :code (.getCode c)}
+                                       (.getDisplay c) (assoc :display (.getDisplay c))
+                                       (or sv (.getVersion c))
+                                       (assoc :version (or sv (.getVersion c))))))
+                                 (.getCoding codeableConcept))
+                    result (registry/valueset-validate-codeableconcept ctx codings
+                             (cond-> {:url url'}
+                               value-set-version (assoc :valueSetVersion value-set-version)
+                               display-lang (assoc :displayLanguage display-lang)))]
+                (assoc result :codeableConcept codeableConcept))
+              (let [system' (or (some-> system .getValue)
+                                (when coding? (.getSystem coding)))
+                    code' (or (some-> code .getValue)
+                              (when coding? (.getCode coding)))
+                    display' (or (some-> display .getValue)
+                                 (when coding? (.getDisplay coding)))
+                    version' (or (some-> systemVersion .getValue)
+                                 (when coding? (.getVersion coding)))]
+                (registry/valueset-validate-code ctx
+                  (cond-> {:url url' :system system' :code code'}
+                    display' (assoc :display display')
+                    version' (assoc :version version')
+                    value-set-version (assoc :valueSetVersion value-set-version)
+                    display-lang (assoc :displayLanguage display-lang)))))
+            ;; Adjust canonical Coding.* expressions for the input mode
+            input-mode (cond cc? :codeableConcept coding? :coding :else :code)
+            result (if (:issues result)
+                     (assoc result :issues (fhir/adjust-issue-expressions
+                                             (:issues result) input-mode nil))
+                     result)]
+        ;; VS not found → 4xx
+        (if (:not-found result)
+          (throw (ResourceNotFoundException.
+                   ^String (:message result)
+                   (fhir/build-operation-outcome (:issues result))))
+          (fhir/validate-result->parameters result)))
+      (catch Exception e
+        (if (or (instance? ResourceNotFoundException e)
+                (instance? UnprocessableEntityException e))
+          (throw e)
+          (throw (operation-exception e))))))
   ;;;;;;;;;;;;;;;;;;;;;;;
   ExpandValueSetOperation
   (^{:tag                                  org.hl7.fhir.r4.model.ValueSet
@@ -388,18 +433,22 @@
             ^{:tag org.hl7.fhir.r4.model.StringType OperationParam {:name "displayLanguage"}} displayLanguage
             ^{:tag jakarta.servlet.http.HttpServletRequest} request]
     (log/debug "valueset/$expand:" {:url url :filter param-filter :activeOnly activeOnly :displayLanguage displayLanguage})
-    (let [ctx *tx-ctx*
-          include-desig? (some-> includeDesignations .getValue)
-          url' (some-> url .getValue)
-          active-only? (some-> activeOnly .getValue)
-          exclude-nested? (if excludeNested (.getValue excludeNested) true)
-          display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
-          count' (some-> param-count .getValue)
-          offset' (some-> offset .getValue)]
-      (if-let [result (registry/valueset-expand ctx {:url             url'
-                                                      :activeOnly      active-only?
-                                                      :filter          (some-> param-filter .getValue)
-                                                      :displayLanguage display-lang})]
+    (try
+      (let [ctx *tx-ctx*
+            include-desig? (some-> includeDesignations .getValue)
+            url' (some-> url .getValue)
+            active-only? (some-> activeOnly .getValue)
+            exclude-nested? (if excludeNested (.getValue excludeNested) true)
+            display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
+            count' (some-> param-count .getValue)
+            offset' (some-> offset .getValue)
+            result (registry/valueset-expand ctx {:url             url'
+                                                   :activeOnly      active-only?
+                                                   :filter          (some-> param-filter .getValue)
+                                                   :displayLanguage display-lang})]
+        (when-not result
+          (throw (ResourceNotFoundException.
+                   (str "A definition for the value Set '" url' "' could not be found"))))
         (let [vs-impl (registry/valueset ctx url')
               vs-meta (when vs-impl (protos/vs-resource vs-impl {}))
               used-cs (:used-codesystems result)
@@ -458,7 +507,12 @@
                                              (map #(fhir/map->vs-expansion % :include-designations include-desig?) paged))))))]
             (when (some? (:experimental vs-meta))
               (.setExperimental vs (boolean (:experimental vs-meta))))
-            vs))))))
+            vs)))
+      (catch Exception e
+        (if (or (instance? ResourceNotFoundException e)
+                (instance? UnprocessableEntityException e))
+          (throw e)
+          (throw (operation-exception e)))))))
 
 (deftype ConceptMapResourceProvider [svc]
   IResourceProvider

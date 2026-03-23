@@ -166,7 +166,8 @@
                (if exists?
                  (not= pv ::not-found)
                  (= pv ::not-found)))
-    false))
+    (throw (ex-info (str "The filter operation '" op "' is not supported")
+                    {:type :invalid}))))
 
 (defn- display-matches?
   "Check whether a display string matches the concept, checking against the
@@ -229,6 +230,56 @@
     (when-let [actual-code (get ci-index (str/lower-case code))]
       [(get code-index actual-code) true])))
 
+(defn- format-display-mismatch
+  "Build a display-mismatch message following the FHIR spec format.
+  Uses designations and the CS language to include language information."
+  [given-display system code primary-display designations display-language cs-language]
+  (let [prefix (str "Wrong Display Name '" given-display "' for " system "#" code ". ")
+        lang (or display-language "--")
+        ;; The primary display's language comes from CS language or an explicit designation
+        primary-lang (or (some (fn [d] (when (= (:value d) primary-display)
+                                         (when-let [l (:language d)] (name l))))
+                                designations)
+                         cs-language)
+        ;; Build all valid display choices with language tags
+        all-choices (cond-> []
+                      primary-display
+                      (conj {:display primary-display :lang primary-lang})
+                      (seq designations)
+                      (into (keep (fn [d]
+                                    (when (and (:value d) (not= (:value d) primary-display))
+                                      {:display (:value d)
+                                       :lang (when-let [l (:language d)] (name l))})))
+                            designations))
+        has-lang-info? (some :lang all-choices)
+        ;; Filter by display-language if specified
+        lang-filtered (if display-language
+                        (filter #(= (:lang %) display-language) all-choices)
+                        all-choices)
+        unique-choices (distinct lang-filtered)]
+    (cond
+      ;; displayLanguage specified, language info exists, but no matches
+      (and display-language (empty? unique-choices) has-lang-info?)
+      (str prefix "There are no valid display names found for language(s) '" lang
+           "'. Default display is '" primary-display "'")
+
+      ;; Multiple valid displays
+      (> (count unique-choices) 1)
+      (let [formatted (map (fn [{:keys [display lang]}]
+                             (if lang (str "'" display "' (" lang ")") (str "'" display "'")))
+                           unique-choices)]
+        (str prefix "Valid display is one of " (count unique-choices) " choices: "
+             (str/join " or " formatted) " (for the language(s) '" lang "')"))
+
+      ;; Single valid display with language tag
+      (and (= 1 (count unique-choices)) (:lang (first unique-choices)))
+      (let [{:keys [display lang]} (first unique-choices)]
+        (str prefix "Valid display is '" display "' (" lang ") (for the language(s) '" lang "')"))
+
+      ;; Default: simple format
+      :else
+      (str prefix "Valid display is '" primary-display "' (for the language(s) '" lang "')"))))
+
 (deftype FhirCodeSystem [url version metadata code-index hierarchy property-uri-map case-sensitive? ci-index]
   protos/CodeSystem
   (cs-resource [_ _params]
@@ -239,7 +290,8 @@
      :status       (get metadata "status")
      :experimental (get metadata "experimental")
      :description  (get metadata "description")
-     :content      (get metadata "content")})
+     :content      (get metadata "content")
+     :language     (get metadata "language")})
 
   (cs-lookup [_ {:keys [code]}]
     (when-let [[concept _] (if case-sensitive?
@@ -279,7 +331,7 @@
                               props))
          :designations (:designations concept)})))
 
-  (cs-validate-code [_ {:keys [code display]}]
+  (cs-validate-code [_ {:keys [code display displayLanguage]}]
     (let [[concept case-differs?] (if case-sensitive?
                                      (when-let [c (get code-index code)] [c false])
                                      (ci-lookup code-index ci-index code))]
@@ -304,26 +356,33 @@
                                                  "are strongly encouraged to use the correct case anyway")
                               :expression   ["Coding.code"]})
                 display-issue (when (and display (not (display-matches? concept display)))
-                                {:severity     "error"
-                                 :type         "invalid"
-                                 :details-code "invalid-display"
-                                 :text         (str "Display '" display "' not found for code '" code "'")
-                                 :expression   ["Coding.display"]})
+                                (let [msg (format-display-mismatch display url code
+                                            (:display concept) (:designations concept) displayLanguage
+                                            (get metadata "language"))]
+                                  {:severity     "error"
+                                   :type         "invalid"
+                                   :details-code "invalid-display"
+                                   :text         msg
+                                   :expression   ["Coding.display"]}))
                 issues (filterv some? [case-issue display-issue])]
             (cond-> result
               display-issue (assoc :result false :message (:text display-issue))
               (seq issues) (assoc :issues issues))))
-        (let [msg (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'")]
-          {:result  false
-           :code    (keyword code)
-           :system  url
-           :version version
-           :message msg
-           :issues  [{:severity     "error"
-                      :type         "code-invalid"
-                      :details-code "invalid-code"
-                      :text         msg
-                      :expression   ["Coding.code"]}]}))))
+        (let [fragment? (= "fragment" (get metadata "content"))
+              msg (if fragment?
+                    (str "Unknown Code '" code "' in the CodeSystem '" url "' version '" version
+                         "' - note that the code system is labeled as a fragment, so the code may be valid in some other fragment")
+                    (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'"))]
+          (cond-> {:result  (boolean fragment?)
+                   :code    (keyword code)
+                   :system  url
+                   :version version
+                   :issues  [{:severity     (if fragment? "warning" "error")
+                              :type         "code-invalid"
+                              :details-code "invalid-code"
+                              :text         msg
+                              :expression   ["Coding.code"]}]}
+            (not fragment?) (assoc :message msg))))))
 
   (cs-subsumes [_ {:keys [codeA codeB]}]
     {:outcome
@@ -346,7 +405,7 @@
       (map (fn [c]
              (let [display (or (when displayLanguage
                                  (some (fn [d]
-                                         (when (= (name (:language d)) displayLanguage)
+                                         (when (and (:language d) (= (name (:language d)) displayLanguage))
                                            (:value d)))
                                        (:designations c)))
                                (:display c))]
@@ -384,7 +443,7 @@
           all-concepts (mapv (fn [c]
                                (let [display (or (when displayLanguage
                                                    (some (fn [d]
-                                                           (when (= (name (:language d)) displayLanguage)
+                                                           (when (and (:language d) (= (name (:language d)) displayLanguage))
                                                              (:value d)))
                                                          (:designations c)))
                                                  (:display c))]
@@ -408,7 +467,7 @@
                            :status (get metadata "status")}]
        :compose-pins     []}))
 
-  (vs-validate-code [_ ctx {:keys [code system display]}]
+  (vs-validate-code [_ ctx {:keys [code system display displayLanguage]}]
     (when (or (nil? system) (= system url))
       (if-let [concept (get code-index code)]
         (let [inactive? (concept-inactive? concept)
@@ -422,7 +481,9 @@
                                         :inactive-status (concept-inactive-status concept)))]
           (if (and display (not (display-matches? concept display)))
             (let [lenient? lenient-display-validation
-                  msg (str "Display '" display "' differs from preferred '" (:display concept) "'")]
+                  msg (format-display-mismatch display url code
+                        (:display concept) (:designations concept) displayLanguage
+                        (get metadata "language"))]
               (assoc result :result (boolean lenient?)
                             :message msg
                             :issues [{:severity     (if lenient? "warning" "error")
@@ -431,17 +492,21 @@
                                       :text         msg
                                       :expression   ["display"]}]))
             result))
-        (let [msg (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'")]
-          {:result  false
-           :code    (keyword code)
-           :system  url
-           :version version
-           :message msg
-           :issues  [{:severity     "error"
-                      :type         "code-invalid"
-                      :details-code "invalid-code"
-                      :text         msg
-                      :expression   ["Coding.code"]}]})))))
+        (let [fragment? (= "fragment" (get metadata "content"))
+              msg (if fragment?
+                    (str "Unknown Code '" code "' in the CodeSystem '" url "' version '" version
+                         "' - note that the code system is labeled as a fragment, so the code may be valid in some other fragment")
+                    (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'"))]
+          (cond-> {:result  (boolean fragment?)
+                   :code    (keyword code)
+                   :system  url
+                   :version version
+                   :issues  [{:severity     (if fragment? "warning" "error")
+                              :type         "code-invalid"
+                              :details-code "invalid-code"
+                              :text         msg
+                              :expression   ["Coding.code"]}]}
+            (not fragment?) (assoc :message msg)))))))
 
 (defn- build-property-uri-map
   "Build a {uri → concept-property-code} map from the CodeSystem's property definitions.
@@ -469,13 +534,34 @@
         metadata (select-keys cs-map ["resourceType" "name" "title" "status"
                                       "description" "experimental" "hierarchyMeaning"
                                       "content" "caseSensitive" "compositional" "versionNeeded"
-                                      "count"])
+                                      "count" "language"])
         prop-uri-map (build-property-uri-map cs-map)
         cs? (get cs-map "caseSensitive" true)
         ci-idx (when-not cs?
                  (reduce (fn [m code] (assoc m (str/lower-case code) code))
                          {} (keys code-idx)))]
     (->FhirCodeSystem url version metadata code-idx hier prop-uri-map cs? ci-idx)))
+
+(defn apply-supplement
+  "Apply a supplement CodeSystem map to a base FhirCodeSystem.
+  Merges supplement designations and properties into existing concept entries."
+  [^FhirCodeSystem base supplement-map]
+  (let [supp-concepts (flatten-concepts (get supplement-map "concept"))
+        base-idx (.-code-index base)
+        merged-index (reduce
+                       (fn [idx sc]
+                         (if-let [existing (get idx (:code sc))]
+                           (assoc idx (:code sc)
+                             (cond-> existing
+                               (seq (:designations sc))
+                               (update :designations (fn [d] (into (or d []) (:designations sc))))
+                               (seq (:properties sc))
+                               (update :properties (fn [p] (into (or p []) (:properties sc))))))
+                           idx))
+                       base-idx supp-concepts)]
+    (->FhirCodeSystem (.-url base) (.-version base) (.-metadata base)
+                      merged-index (.-hierarchy base) (.-property-uri-map base)
+                      (.-case-sensitive? base) (.-ci-index base))))
 
 (defn register!
   "Register a FhirCodeSystem with the global registry under its canonical URL."

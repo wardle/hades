@@ -114,7 +114,7 @@
 (s/def ::expansion-concept
   (s/keys :req-un [::code ::system]
           :opt-un [::display ::version ::inactive ::inactive-status
-                   ::abstract ::designations]))
+                   ::abstract ::designations ::properties]))
 
 ;; Used codesystem — metadata about a CodeSystem consulted during expansion.
 (s/def ::uri string?)

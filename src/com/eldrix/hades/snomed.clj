@@ -152,7 +152,10 @@
                                 :system snomed-system-uri :version ver}
                          inactive? (assoc :inactive true))]
             (if (and display (not= display preferred))
-              (let [msg (str "Display '" display "' not found for code '" code "'")]
+              (let [lang (or displayLanguage "--")
+                    msg (str "Wrong Display Name '" display "' for " snomed-system-uri "#" code
+                             " - should be '" preferred "'"
+                             " (for the language(s) '" lang "')")]
                 (assoc result :result false
                               :message msg
                               :issues [{:severity     "error"
@@ -249,7 +252,10 @@
                 (let [result {:result true :display preferred :code (keyword code)
                               :system system :version ver}]
                   (if (and display (not= display preferred))
-                    (let [msg (str "Display '" display "' differs from preferred '" preferred "'")]
+                    (let [lang (or displayLanguage "--")
+                          msg (str "Wrong Display Name '" display "' for " system "#" code
+                                   " - should be '" preferred "'"
+                                   " (for the language(s) '" lang "')")]
                       (assoc result :message msg
                                     :issues [{:severity     "warning"
                                               :type         "invalid"

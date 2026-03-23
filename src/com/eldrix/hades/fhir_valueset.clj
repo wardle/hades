@@ -9,6 +9,47 @@
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.registry :as registry]))
 
+(defn- format-display-mismatch
+  "Build a display-mismatch message following the FHIR spec format."
+  [given-display system code primary-display designations display-language cs-language]
+  (let [prefix (str "Wrong Display Name '" given-display "' for " system "#" code ". ")
+        lang (or display-language "--")
+        primary-lang (or (some (fn [d] (when (= (:value d) primary-display)
+                                         (when-let [l (:language d)] (name l))))
+                               designations)
+                         cs-language)
+        all-choices (cond-> []
+                      primary-display
+                      (conj {:display primary-display :lang primary-lang})
+                      (seq designations)
+                      (into (keep (fn [d] (when (and (:value d) (not= (:value d) primary-display))
+                                            {:display (:value d)
+                                             :lang (when-let [l (:language d)] (name l))})))
+                            designations))
+        has-lang-info? (some :lang all-choices)
+        lang-filtered (if display-language
+                        (filter #(= (:lang %) display-language) all-choices)
+                        all-choices)
+        unique-choices (distinct lang-filtered)]
+    (cond
+      (and display-language (empty? unique-choices) has-lang-info?)
+      (str prefix "There are no valid display names found for language(s) '" lang
+           "'. Default display is '" primary-display "'")
+
+      (> (count unique-choices) 1)
+      (let [formatted (map (fn [{:keys [display lang]}]
+                             (if lang (str "'" display "' (" lang ")") (str "'" display "'")))
+                           unique-choices)]
+        (str prefix "Valid display is one of " (count unique-choices) " choices: "
+             (str/join " or " formatted) " (for the language(s) '" lang "')"))
+
+      (and (= 1 (count unique-choices)) (:lang (first unique-choices)))
+      (let [{:keys [display lang]} (first unique-choices)]
+        (str prefix "Valid display is '" display "' (" lang ") (for the language(s) '" lang "')"))
+
+      :else
+      (str prefix "Valid display is '" primary-display "' (for the language(s) '" lang "')"))))
+
 (defn- compose-version-for-system
   "Extract the version pinned for a system in the compose definition."
   [compose-def system]
@@ -178,7 +219,12 @@
                    (:display match)
                    (not= (str/lower-case display) (str/lower-case (:display match))))
             (let [lenient? (:lenient-display-validation request)
-                  msg (str "Display '" display "' differs from preferred '" (:display match) "'")
+                  cs-impl (when (:system match) (registry/codesystem ctx (:system match)))
+                  cs-lang (when cs-impl
+                            (let [m (protos/cs-resource cs-impl {})]
+                              (or (:language m) (get m "language"))))
+                  msg (format-display-mismatch display (:system match) code
+                        (:display match) (:designations match) (:displayLanguage params) cs-lang)
                   display-issue {:severity     (if lenient? "warning" "error")
                                  :type         "invalid"
                                  :details-code "invalid-display"
@@ -207,32 +253,42 @@
               not-in-vs-msg (str "The provided code '" code-ref "' was not found in the value set '" vs-ref "'")
               cs-result (when system
                           (registry/codesystem-validate-code ctx {:system system :code code}))
-              cs-invalid? (and cs-result (false? (:result cs-result)))
+              ;; Fragment CS: code is provisionally valid even if not in VS expansion
+              cs-impl (when system (registry/codesystem ctx system))
+              cs-meta (when cs-impl (protos/cs-resource cs-impl {}))
+              cs-fragment? (and cs-result (:result cs-result)
+                               (= "fragment" (:content cs-meta)))
+              cs-invalid? (and cs-result (not cs-fragment?) (false? (:result cs-result)))
               cs-issue (when cs-invalid?
-                         (first (:issues cs-result)))
-              base-issues [{:severity     "error"
-                            :type         "code-invalid"
-                            :details-code "not-in-vs"
-                            :text         not-in-vs-msg
-                            :expression   ["Coding.code"]}]
-              all-issues (if cs-issue (conj base-issues cs-issue) base-issues)
-              combined-msg (if cs-issue
-                             (str not-in-vs-msg "; " (:text cs-issue))
-                             not-in-vs-msg)
-              cs-display (when (and cs-result (:result cs-result)) (:display cs-result))
-              cs-version (when cs-result (:version cs-result))]
-          (-> (cond-> {:result  false
-                       :code    (keyword code)
-                       :system  system
-                       :message combined-msg
-                       :issues  all-issues}
-                cs-display (assoc :display cs-display)
-                cs-version (assoc :version cs-version))
+                         (first (:issues cs-result)))]
+          (if cs-fragment?
+            (-> cs-result
+                (assoc :code (keyword code))
+                (registry/add-cs-status-warnings ctx system)
+                (registry/add-vs-status-warnings ctx url))
+            (let [base-issues [{:severity     "error"
+                                :type         "code-invalid"
+                                :details-code "not-in-vs"
+                                :text         not-in-vs-msg
+                                :expression   ["Coding.code"]}]
+                  all-issues (if cs-issue (conj base-issues cs-issue) base-issues)
+                  combined-msg (if cs-issue
+                                 (str not-in-vs-msg "; " (:text cs-issue))
+                                 not-in-vs-msg)
+                  cs-display (when (and cs-result (:result cs-result)) (:display cs-result))
+                  cs-version (when cs-result (:version cs-result))]
+              (-> (cond-> {:result  false
+                           :code    (keyword code)
+                           :system  system
+                           :message combined-msg
+                           :issues  all-issues}
+                    cs-display (assoc :display cs-display)
+                    cs-version (assoc :version cs-version))
               (add-version-mismatch caller-version match-ver system override-pattern include-ver force? ctx)
               (add-unknown-version-issue ctx system caller-version)
               (add-check-system-version-issue ctx system match-ver)
               (registry/add-cs-status-warnings ctx system)
-              (registry/add-vs-status-warnings ctx url)))))))
+              (registry/add-vs-status-warnings ctx url)))))))))
 
 (s/fdef make-fhir-value-set
   :args (s/cat :vs-map map?))

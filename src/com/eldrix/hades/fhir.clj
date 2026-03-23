@@ -234,7 +234,7 @@
   "Create a FHIR ValueSetExpansion Component from a plain map.
   Options:
     :include-designations — when true, include designation list"
-  ^ValueSet$ValueSetExpansionContainsComponent [{:keys [system code display designations abstract inactive]}
+  ^ValueSet$ValueSetExpansionContainsComponent [{:keys [system code display designations abstract inactive properties]}
                                                 & {:keys [include-designations]}]
   (let [comp (doto (ValueSet$ValueSetExpansionContainsComponent.)
                (.setCode code)
@@ -247,11 +247,26 @@
         (mapv (fn [{:keys [value language use] :as d}]
                 (let [dc (ValueSet$ConceptReferenceDesignationComponent.)]
                   (.setValue dc (str (or value d)))
-                  (when language (.setLanguage dc (name language)))
+                  (when language (.setLanguage dc (if (keyword? language) (name language) (str language))))
                   (when use
                     (.setUse dc (Coding. (str (:system use)) (str (:code use)) (:display use))))
                   dc))
               designations)))
+    (when (seq properties)
+      (doseq [{:keys [code value]} properties]
+        (let [ext (org.hl7.fhir.r4.model.Extension.
+                    "http://hl7.org/fhir/5.0/StructureDefinition/extension-ValueSet.expansion.contains.property")
+              code-str (if (keyword? code) (name code) (str code))]
+          (.addExtension ext (doto (org.hl7.fhir.r4.model.Extension. "code")
+                               (.setValue (CodeType. ^String code-str))))
+          (let [val-ext (org.hl7.fhir.r4.model.Extension. "value")]
+            (cond
+              (boolean? value) (.setValue val-ext (BooleanType. ^Boolean value))
+              (keyword? value) (.setValue val-ext (CodeType. (name value)))
+              (string? value) (.setValue val-ext (StringType. ^String value))
+              (number? value) (.setValue val-ext (IntegerType. (int value))))
+            (.addExtension ext val-ext))
+          (.addExtension comp ext))))
     comp))
 
 (defn- expansion-param [^String name value]

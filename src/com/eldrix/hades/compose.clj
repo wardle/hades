@@ -82,7 +82,7 @@
   [ctx valueset-urls expanding]
   (mapcat (fn [vs-url]
             (when (contains? expanding vs-url)
-              (throw (ex-info "Circular ValueSet reference" {:type :invalid :url vs-url})))
+              (throw (ex-info (str "Circular ValueSet reference: " vs-url) {:type :processing :url vs-url})))
             (let [result (registry/valueset-expand ctx {:url vs-url :expanding expanding})]
               (or (:concepts result) [])))
           valueset-urls))
