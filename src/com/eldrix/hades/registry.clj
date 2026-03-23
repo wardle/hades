@@ -69,14 +69,18 @@
 (s/def ::system-version (s/map-of ::uri ::uri))
 (s/def ::force-system-version (s/map-of ::uri ::uri))
 (s/def ::check-system-version (s/map-of ::uri ::uri))
-(s/def ::request (s/keys :opt-un [::lenient-display-validation
-                                  ::system-version
-                                  ::force-system-version
-                                  ::check-system-version]))
-
 (def default-request
   "Default request parameters. Merged with actual request params at construction."
   {:lenient-display-validation true})
+
+(s/def ::display-language (s/nilable string?))
+(s/def ::value-set-version (s/nilable string?))
+(s/def ::request (s/keys :opt-un [::lenient-display-validation
+                                  ::system-version
+                                  ::force-system-version
+                                  ::check-system-version
+                                  ::display-language
+                                  ::value-set-version]))
 
 (s/def ::ctx (s/nilable (s/keys :opt-un [::codesystems ::valuesets ::conceptmaps ::request])))
 

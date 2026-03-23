@@ -50,13 +50,13 @@
   "Convert an exception to a HAPI server exception with OperationOutcome."
   ^Exception [^Throwable e]
   (if (instance? clojure.lang.ExceptionInfo e)
-    (let [{:keys [type]} (ex-data e)
+    (let [{:keys [type details-code]} (ex-data e)
           msg (ex-message e)
           issue-type (case type :invalid "invalid" :not-found "not-found"
                                 :not-supported "not-supported" :processing "processing"
                                 "exception")
           oo (fhir/build-operation-outcome [{:severity "error" :type issue-type
-                                              :details-code (name (or type :exception))
+                                              :details-code (or details-code (name (or type :exception)))
                                               :text msg}])]
       (case type
         :invalid (UnprocessableEntityException. ^String msg oo)
@@ -88,6 +88,9 @@
           vs-version (some (fn [p] (when (= "valueSetVersion" (get p "name"))
                                      (get p "valueString")))
                            params)
+          display-language (some (fn [p] (when (= "displayLanguage" (get p "name"))
+                                           (or (get p "valueCode") (get p "valueString"))))
+                                 params)
           system-versions (keep (fn [p] (when (= "system-version" (get p "name"))
                                           (or (get p "valueCanonical") (get p "valueUri"))))
                                 params)
@@ -100,8 +103,10 @@
           request (cond-> {:lenient-display-validation (boolean lenient-val)}
                     (seq system-versions) (assoc :system-version (registry/parse-version-param system-versions))
                     (seq force-system-versions) (assoc :force-system-version (registry/parse-version-param force-system-versions))
-                    (seq check-system-versions) (assoc :check-system-version (registry/parse-version-param check-system-versions)))]
-      {:tx-resources tx-resources :request request :value-set-version vs-version})
+                    (seq check-system-versions) (assoc :check-system-version (registry/parse-version-param check-system-versions))
+                    vs-version (assoc :value-set-version vs-version)
+                    display-language (assoc :display-language display-language))]
+      {:tx-resources tx-resources :request request})
     (catch Exception _ {:tx-resources nil :extra {}})))
 
 (defn build-tx-ctx
@@ -275,10 +280,11 @@
     (let [ctx *tx-ctx*
           code' (or (some-> code .getValue) (some-> coding .getCode))
           system' (or (some-> system .getValue) (some-> coding .getSystem))
+          dl (or (resolve-display-language (some-> displayLanguage .getValue) request)
+                 (get-in ctx [:request :display-language]))
           result (registry/codesystem-lookup ctx (cond-> {:system system' :code code'}
                                                    (some-> version .getValue) (assoc :version (.getValue version))
-                                                   (resolve-display-language (some-> displayLanguage .getValue) request)
-                                                   (assoc :displayLanguage (resolve-display-language (some-> displayLanguage .getValue) request))))]
+                                                   dl (assoc :displayLanguage dl)))]
       (when-not result
         (if (registry/codesystem ctx system')
           (throw (ResourceNotFoundException. (str "Unknown code '" code' "' in code system '" system' "'")))
@@ -307,7 +313,8 @@
           code' (or (some-> code .getValue) (when coding? (.getCode coding)))
           display' (or (some-> display .getValue) (when coding? (.getDisplay coding)))
           version' (some-> version .getValue)
-          display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
+          display-lang (or (resolve-display-language (some-> displayLanguage .getValue) request)
+                           (get-in ctx [:request :display-language]))
           result (registry/codesystem-validate-code ctx
                    (cond-> {:system system' :code code'}
                      display' (assoc :display display')
@@ -360,8 +367,9 @@
     (log/debug "valueset/$validate-code:" {:url url :code code :system system :coding coding :cc codeableConcept})
     (try
       (let [ctx *tx-ctx*
-            {:keys [value-set-version]} ctx
-            display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
+            value-set-version (get-in ctx [:request :value-set-version])
+            display-lang (or (resolve-display-language (some-> displayLanguage .getValue) request)
+                             (get-in ctx [:request :display-language]))
             url' (some-> url .getValue)
             cc? (and codeableConcept (seq (.getCoding codeableConcept)))
             coding? (and coding (some-> coding .getCode))
@@ -439,7 +447,8 @@
             url' (some-> url .getValue)
             active-only? (some-> activeOnly .getValue)
             exclude-nested? (if excludeNested (.getValue excludeNested) true)
-            display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
+            display-lang (or (resolve-display-language (some-> displayLanguage .getValue) request)
+                             (get-in ctx [:request :display-language]))
             count' (some-> param-count .getValue)
             offset' (some-> offset .getValue)
             result (registry/valueset-expand ctx {:url             url'
@@ -496,15 +505,17 @@
                                    "draft" Enumerations$PublicationStatus/DRAFT
                                    "retired" Enumerations$PublicationStatus/RETIRED
                                    Enumerations$PublicationStatus/UNKNOWN))
-                     (.setExpansion (doto (ValueSet$ValueSetExpansionComponent.)
-                             (.setIdentifier (str "urn:uuid:" (java.util.UUID/randomUUID)))
-                             (.setTimestamp (Date.))
-                             (.setParameter expansion-params)
-                             (.setTotal (:total result))
-                             (.setContains (let [paged (cond->> (:concepts result)
-                                                         offset' (drop offset')
-                                                         count' (take count'))]
-                                             (map #(fhir/map->vs-expansion % :include-designations include-desig?) paged))))))]
+                     (.setExpansion (let [exp (doto (ValueSet$ValueSetExpansionComponent.)
+                                             (.setIdentifier (str "urn:uuid:" (java.util.UUID/randomUUID)))
+                                             (.setTimestamp (Date.))
+                                             (.setParameter expansion-params)
+                                             (.setTotal (:total result))
+                                             (.setContains (let [paged (cond->> (:concepts result)
+                                                                         offset' (drop offset')
+                                                                         count' (take count'))]
+                                                             (map #(fhir/map->vs-expansion % :include-designations include-desig?) paged))))]
+                                         (when offset' (.setOffset exp (int offset')))
+                                         exp)))]
             (when (some? (:experimental vs-meta))
               (.setExperimental vs (boolean (:experimental vs-meta))))
             vs)))
@@ -618,12 +629,11 @@
     (service [^HttpServletRequest request ^HttpServletResponse response]
       (if (= "POST" (.getMethod request))
         (let [body (.readAllBytes (.getInputStream request))
-              {:keys [tx-resources value-set-version]
-               parsed-request :request} (parse-post-params body)
+              {parsed-request :request
+               :keys [tx-resources]} (parse-post-params body)
               overlay (build-tx-ctx tx-resources)
               ctx (assoc overlay
-                    :request (merge registry/default-request parsed-request)
-                    :value-set-version value-set-version)
+                    :request (merge registry/default-request parsed-request))
               wrapped (wrap-request request body)]
           (binding [*tx-ctx* ctx]
             (proxy-super service wrapped response)))

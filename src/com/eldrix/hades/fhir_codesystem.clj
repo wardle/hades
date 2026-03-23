@@ -280,6 +280,47 @@
       :else
       (str prefix "Valid display is '" primary-display "' (for the language(s) '" lang "')"))))
 
+(defn- parse-display-language
+  "Parse a displayLanguage string (potentially Accept-Language format) into
+  a seq of language codes ordered by preference. E.g.:
+    'de'         → ['de']
+    'de,*; q=0'  → ['de']
+    'en, de;q=0.5' → ['en' 'de']"
+  [s]
+  (when s
+    (let [parts (str/split s #",")
+          parsed (keep (fn [p]
+                         (let [trimmed (str/trim p)
+                               [lang q] (str/split trimmed #";")
+                               lang (str/trim lang)]
+                           (when (and (seq lang) (not= lang "*"))
+                             {:lang lang
+                              :q (if q
+                                   (let [m (re-find #"q\s*=\s*([0-9.]+)" q)]
+                                     (if m (Double/parseDouble (second m)) 1.0))
+                                   1.0)})))
+                       parts)]
+      (map :lang (sort-by :q #(compare %2 %1) parsed)))))
+
+(defn- language-matches?
+  "Check if a designation language matches a requested language using prefix matching.
+  'de' matches 'de', 'de-CH', 'de-AT'. Case-insensitive."
+  [designation-lang requested-lang]
+  (when (and designation-lang requested-lang)
+    (let [d (str/lower-case (if (keyword? designation-lang) (name designation-lang) (str designation-lang)))
+          r (str/lower-case requested-lang)]
+      (or (= d r) (str/starts-with? d (str r "-"))))))
+
+(defn- find-display-for-language
+  "Find the best display for a set of designations given language preferences."
+  [designations display-languages]
+  (some (fn [lang]
+          (some (fn [d]
+                  (when (language-matches? (:language d) lang)
+                    (:value d)))
+                designations))
+        display-languages))
+
 (deftype FhirCodeSystem [url version metadata code-index hierarchy property-uri-map case-sensitive? ci-index]
   protos/CodeSystem
   (cs-resource [_ _params]
@@ -396,6 +437,7 @@
     (let [all-concepts (vals code-index)
           children-map (:children hierarchy)
           parents-map (:parents hierarchy)
+          display-langs (parse-display-language displayLanguage)
           matching (if (seq filters)
                      (clojure.core/filter
                        (fn [c]
@@ -403,11 +445,8 @@
                        all-concepts)
                      all-concepts)]
       (map (fn [c]
-             (let [display (or (when displayLanguage
-                                 (some (fn [d]
-                                         (when (and (:language d) (= (name (:language d)) displayLanguage))
-                                           (:value d)))
-                                       (:designations c)))
+             (let [display (or (when (seq display-langs)
+                                 (find-display-for-language (:designations c) display-langs))
                                (:display c))]
                (cond-> {:code    (:code c)
                         :system  url
@@ -440,12 +479,10 @@
                                          (str/includes? (str/lower-case v) f)))
                                      (:designations c))))
                          concepts)))
+          display-langs (parse-display-language displayLanguage)
           all-concepts (mapv (fn [c]
-                               (let [display (or (when displayLanguage
-                                                   (some (fn [d]
-                                                           (when (and (:language d) (= (name (:language d)) displayLanguage))
-                                                             (:value d)))
-                                                         (:designations c)))
+                               (let [display (or (when (seq display-langs)
+                                                   (find-display-for-language (:designations c) display-langs))
                                                  (:display c))]
                                  (cond-> {:code    (:code c)
                                           :system  url

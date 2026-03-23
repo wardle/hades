@@ -180,6 +180,24 @@ resources scoped to a single request. The overlay mechanism has two parts:
 
 When `ctx` is nil or absent, only global registrations are consulted.
 
+### ctx structure (strict)
+
+The `ctx` map has exactly two concerns:
+
+1. **Overlays** (top-level keys): `:codesystems`, `:valuesets`, `:conceptmaps` —
+   maps of `{uri → protocol-impl}` for tx-resource scoped resources.
+2. **Request parameters** (`:request` key): a map of operation parameters that
+   affect behaviour across layers. Spec'd as `::registry/request`.
+
+**All FHIR operation parameters belong in `:request`.** This includes:
+- Version control: `:system-version`, `:force-system-version`, `:check-system-version`
+- Display: `:lenient-display-validation`, `:display-language`
+- Scoping: `:value-set-version`
+
+**Never add FHIR operation parameters as top-level ctx keys.** The top level is
+reserved for overlays. If a new parameter needs to flow through ctx, add it to
+the `:request` map and update `::registry/request` spec.
+
 ## Code style
 
 ### General
