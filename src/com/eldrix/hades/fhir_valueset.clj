@@ -17,96 +17,102 @@
             (get inc "version")))
         (get compose-def "include")))
 
-(defn- version-expression
-  [input-mode coding-index]
-  (case input-mode
-    :code "version"
-    :coding "Coding.version"
-    :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "].version")
-    "version"))
+(defn- add-inactive-warning
+  "Add inactive concept warning issue when the result indicates an inactive concept."
+  [result]
+  (if (:inactive result)
+    (let [code (name (:code result))
+          status (or (:inactive-status result) "inactive")
+          msg (str "The concept '" code "' has a status of " status " and its use should be reviewed")
+          issue {:severity     "warning"
+                 :type         "business-rule"
+                 :details-code "code-comment"
+                 :text         msg
+                 :expression   ["Coding"]}]
+      (-> result
+          (dissoc :inactive-status)
+          (update :issues (fnil conj []) issue)
+          (update :message (fn [existing]
+                             (if existing
+                               (str existing "; " msg)
+                               msg)))))
+    result))
 
 (defn- add-version-mismatch
-  "Add a version mismatch error when the VS include version differs from the coding's."
-  [result caller-version match-ver system override-pattern include-ver force? input-mode coding-index]
+  "Add a version mismatch issue when the VS include version differs from the coding's.
+  Severity is 'warning' when the caller's version doesn't exist (the not-found issue
+  is the primary problem), 'error' otherwise."
+  [result caller-version match-ver system override-pattern include-ver force? ctx]
   (if (and caller-version match-ver (not= caller-version match-ver))
-    (let [use-resulting-from? (and override-pattern
+    (let [caller-version-exists? (nil? (registry/unknown-version-issue ctx system caller-version))
+          default-mismatch? (and (not caller-version-exists?)
+                                 (nil? include-ver) (nil? override-pattern))
+          use-resulting-from? (and override-pattern
                                    (or force? (nil? include-ver) (= "" include-ver)))
           ver-desc (if use-resulting-from?
                      (str "version '" override-pattern "' resulting from the version '"
                           (or include-ver "") "'")
                      (str "version '" (or include-ver match-ver) "'"))
-          msg (str "The code system '" system "' " ver-desc
-                   " in the ValueSet include is different to the one in the value ('" caller-version "')")
-          expr (version-expression input-mode coding-index)
-          issue {:severity     "error"
+          msg (if default-mismatch?
+                (str "The code system '" system "' " ver-desc
+                     " for the versionless include in the ValueSet include is different to the one in the value ('" caller-version "')")
+                (str "The code system '" system "' " ver-desc
+                     " in the ValueSet include is different to the one in the value ('" caller-version "')"))
+          severity (if default-mismatch? "warning" "error")
+          issue {:severity     severity
                  :type         "invalid"
                  :details-code "vs-invalid"
                  :text         msg
-                 :expression   [expr]}
-          cur-msg (get result "message")]
-      (assoc result
-             "result" false
-             "issues" (conj (or (get result "issues") []) issue)
-             "message" (if cur-msg (str cur-msg "; " msg) msg)))
+                 :expression   ["Coding.version"]}
+          cur-msg (:message result)]
+      (cond-> (assoc result
+                     :result false
+                     :issues (conj (or (:issues result) []) issue))
+        (= "error" severity) (assoc :message (if cur-msg (str cur-msg "; " msg) msg))))
     result))
-
-(defn- fix-expression-for-input-mode
-  "Adjust issue expression paths based on input mode.
-  Code-mode uses bare property names; coding-mode uses Coding.* paths;
-  codeableConcept mode uses CodeableConcept.coding[n].* paths."
-  ([issue input-mode] (fix-expression-for-input-mode issue input-mode 0))
-  ([issue input-mode coding-index]
-   (case input-mode
-     :code (update issue :expression
-                   (fn [exprs]
-                     (mapv #(clojure.string/replace % #"^Coding\." "") exprs)))
-     :codeableConcept (update issue :expression
-                              (fn [exprs]
-                                (mapv #(clojure.string/replace
-                                         % #"^Coding\."
-                                         (str "CodeableConcept.coding[" (or coding-index 0) "]."))
-                                      exprs)))
-     issue)))
 
 (defn- add-check-system-version-issue
   "Add check-system-version error when the resolved version doesn't match."
-  [result ctx system resolved-version input-mode coding-index]
-  (if-let [issue (some-> (registry/check-system-version-issue ctx system resolved-version)
-                         (fix-expression-for-input-mode input-mode coding-index))]
-    (let [cur-msg (get result "message")]
+  [result ctx system resolved-version]
+  (if-let [issue (registry/check-system-version-issue ctx system resolved-version)]
+    (let [cur-msg (:message result)]
       (assoc result
-             "result" false
-             "issues" (conj (or (get result "issues") []) issue)
-             "message" (if cur-msg (str cur-msg "; " (:text issue)) (:text issue))))
+             :result false
+             :issues (conj (or (:issues result) []) issue)
+             :message (if cur-msg (str cur-msg "; " (:text issue)) (:text issue))))
     result))
 
 (defn- add-unknown-version-issue
   "Add UNKNOWN_CODESYSTEM_VERSION error when the caller's version doesn't exist."
-  [result ctx system caller-version input-mode coding-index]
-  (if-let [issue (some-> (registry/unknown-version-issue ctx system caller-version)
-                         (fix-expression-for-input-mode input-mode coding-index))]
-    (let [cur-msg (get result "message")]
+  [result ctx system caller-version]
+  (if-let [issue (registry/unknown-version-issue ctx system caller-version)]
+    (let [cur-msg (:message result)]
       (assoc result
-             "result" false
-             "issues" (into [(assoc issue :priority 0)] (or (get result "issues") []))
-             "message" (if cur-msg (str (:text issue) "; " cur-msg) (:text issue))
-             "x-caused-by-unknown-system" (registry/versioned-uri system caller-version)))
+             :result false
+             :issues (into [(assoc issue :priority 0)] (or (:issues result) []))
+             :message (if cur-msg (str (:text issue) "; " cur-msg) (:text issue))
+             :x-caused-by-unknown-system (registry/versioned-uri system caller-version)))
     result))
 
 (deftype FhirValueSet [url version metadata compose-def]
   protos/ValueSet
   (vs-resource [_ _params]
-    (assoc metadata "url" url "version" version))
+    {:url          url
+     :version      version
+     :name         (get metadata "name")
+     :title        (get metadata "title")
+     :status       (get metadata "status")
+     :experimental (get metadata "experimental")
+     :compose      (get metadata "compose")})
 
-  (vs-expand [_ params]
-    (let [ctx (:ctx params)
-          expanding (conj (or (:expanding params) #{}) url)]
+  (vs-expand [_ ctx params]
+    (let [expanding (conj (or (:expanding params) #{}) url)]
       (compose/expand-compose ctx compose-def (assoc params :expanding expanding))))
 
-  (vs-validate-code [_ params]
-    (let [ctx (:ctx params)
+  (vs-validate-code [_ ctx params]
+    (let [
           expanding (conj (or (:expanding params) #{}) url)
-          expanded (compose/expand-compose ctx compose-def {:expanding expanding})
+          expanded (:concepts (compose/expand-compose ctx compose-def {:expanding expanding}))
           {:keys [code system display]} params
           caller-version (:version params)
           match (or (some (fn [c]
@@ -136,7 +142,7 @@
                     (if cs-lookup
                       (assoc match
                              :version caller-version
-                             :display (get cs-lookup "display"))
+                             :display (:display cs-lookup))
                       match))
                   match)
           match-ver (or (:version match) include-ver)
@@ -151,14 +157,14 @@
               actual-code (:code match)
               sys-ver (when (:system match)
                         (str (:system match) (when (:version match) (str "|" (:version match)))))
-              result (cond-> {"result"  true
-                              "display" (:display match)
-                              "code"    (keyword code)
-                              "system"  (:system match)}
-                       (:version match) (assoc "version" (:version match))
-                       (:inactive match) (assoc "inactive" true
-                                                "inactive-status" (:inactive-status match))
-                       case-differs? (assoc "normalized-code" (keyword actual-code)))
+              result (cond-> {:result  true
+                              :display (:display match)
+                              :code    (keyword code)
+                              :system  (:system match)}
+                       (:version match) (assoc :version (:version match))
+                       (:inactive match) (assoc :inactive true)
+                       (:inactive-status match) (assoc :inactive-status (:inactive-status match))
+                       case-differs? (assoc :normalized-code (keyword actual-code)))
               case-issue (when case-differs?
                            {:severity     "information"
                             :type         "business-rule"
@@ -177,34 +183,56 @@
                                  :type         "invalid"
                                  :details-code "invalid-display"
                                  :text         msg
-                                 :expression   ["display"]}]
-              (-> (assoc result "result" (boolean lenient?)
-                                "message" msg
-                                "issues" (filterv some? [case-issue display-issue]))
-                  (add-version-mismatch caller-version match-ver system override-pattern include-ver force? (:input-mode params) (:coding-index params))
-                  (add-unknown-version-issue ctx system caller-version (:input-mode params) (:coding-index params))
-                  (add-check-system-version-issue ctx system match-ver (:input-mode params) (:coding-index params))))
+                                 :expression   ["Coding.display"]}]
+              (-> (assoc result :result (boolean lenient?)
+                                :message msg
+                                :issues (filterv some? [case-issue display-issue]))
+                  (add-inactive-warning)
+                  (add-version-mismatch caller-version match-ver system override-pattern include-ver force? ctx)
+                  (add-unknown-version-issue ctx system caller-version)
+                  (add-check-system-version-issue ctx system match-ver)
+                  (registry/add-cs-status-warnings ctx system)
+                  (registry/add-vs-status-warnings ctx url)))
             (-> (cond-> result
-                  case-issue (assoc "issues" [case-issue]))
-                (add-version-mismatch caller-version match-ver system override-pattern include-ver force? (:input-mode params) (:coding-index params))
-                (add-unknown-version-issue ctx system caller-version (:input-mode params) (:coding-index params))
-                (add-check-system-version-issue ctx system match-ver (:input-mode params) (:coding-index params)))))
+                  case-issue (assoc :issues [case-issue]))
+                (add-inactive-warning)
+                (add-version-mismatch caller-version match-ver system override-pattern include-ver force? ctx)
+                (add-unknown-version-issue ctx system caller-version)
+                (add-check-system-version-issue ctx system match-ver)
+                (registry/add-cs-status-warnings ctx system)
+                (registry/add-vs-status-warnings ctx url))))
         (let [code-ref (cond-> (str system "#" code)
                         display (str " ('" display "')"))
               vs-ref (if version (str url "|" version) url)
-              not-in-vs-msg (str "The provided code '" code-ref "' was not found in the value set '" vs-ref "'")]
-          (-> {"result"  false
-               "code"    (keyword code)
-               "system"  system
-               "message" not-in-vs-msg
-               "issues"  [{:severity     "error"
-                           :type         "code-invalid"
-                           :details-code "not-in-vs"
-                           :text         not-in-vs-msg
-                           :expression   ["code"]}]}
-              (add-version-mismatch caller-version match-ver system override-pattern include-ver force? (:input-mode params) (:coding-index params))
-              (add-unknown-version-issue ctx system caller-version (:input-mode params) (:coding-index params))
-              (add-check-system-version-issue ctx system match-ver (:input-mode params) (:coding-index params))))))))
+              not-in-vs-msg (str "The provided code '" code-ref "' was not found in the value set '" vs-ref "'")
+              cs-result (when system
+                          (registry/codesystem-validate-code ctx {:system system :code code}))
+              cs-invalid? (and cs-result (false? (:result cs-result)))
+              cs-issue (when cs-invalid?
+                         (first (:issues cs-result)))
+              base-issues [{:severity     "error"
+                            :type         "code-invalid"
+                            :details-code "not-in-vs"
+                            :text         not-in-vs-msg
+                            :expression   ["Coding.code"]}]
+              all-issues (if cs-issue (conj base-issues cs-issue) base-issues)
+              combined-msg (if cs-issue
+                             (str not-in-vs-msg "; " (:text cs-issue))
+                             not-in-vs-msg)
+              cs-display (when (and cs-result (:result cs-result)) (:display cs-result))
+              cs-version (when cs-result (:version cs-result))]
+          (-> (cond-> {:result  false
+                       :code    (keyword code)
+                       :system  system
+                       :message combined-msg
+                       :issues  all-issues}
+                cs-display (assoc :display cs-display)
+                cs-version (assoc :version cs-version))
+              (add-version-mismatch caller-version match-ver system override-pattern include-ver force? ctx)
+              (add-unknown-version-issue ctx system caller-version)
+              (add-check-system-version-issue ctx system match-ver)
+              (registry/add-cs-status-warnings ctx system)
+              (registry/add-vs-status-warnings ctx url)))))))
 
 (s/fdef make-fhir-value-set
   :args (s/cat :vs-map map?))
@@ -216,5 +244,6 @@
         version (get vs-map "version")
         compose-def (get vs-map "compose")
         metadata (select-keys vs-map ["resourceType" "name" "title" "status"
-                                      "description" "experimental" "purpose"])]
+                                      "description" "experimental" "purpose"
+                                      "compose"])]
     (->FhirValueSet url version metadata compose-def)))

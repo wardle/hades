@@ -3,13 +3,15 @@
   (:import
     (ca.uhn.fhir.context FhirContext)
     (org.hl7.fhir.instance.model.api IBaseResource)
-    (org.hl7.fhir.r4.model CanonicalType CodeType CodeableConcept Coding
+    (org.hl7.fhir.r4.model BooleanType CanonicalType CodeType CodeableConcept Coding
+                            IntegerType
                             OperationOutcome OperationOutcome$IssueSeverity OperationOutcome$IssueType
                             OperationOutcome$OperationOutcomeIssueComponent
                             Parameters Parameters$ParametersParameterComponent
                             StringType UriType
                             ValueSet$ConceptReferenceDesignationComponent
-                            ValueSet$ValueSetExpansionContainsComponent BooleanType)))
+                            ValueSet$ValueSetExpansionContainsComponent
+                            ValueSet$ValueSetExpansionParameterComponent)))
 
 (defonce ^:private r4-context (delay (FhirContext/forR4)))
 
@@ -28,21 +30,6 @@
     (and strict (not (nil? s))) (throw (IllegalArgumentException. (str "invalid boolean '" s "' : must be 'true' or 'false'")))
     :else default))
 
-(def test-map {"name"        "SNOMED CT"
-               "version"     "LATEST"
-               "display"     "Gender"
-               "property"    [{:code  :parent
-                               :value :278844005}
-                              {:code  :moduleId
-                               :value :900000000000207008}
-                              {:code  :sufficientlyDefined
-                               :value true}]
-               "designation" [{"language" :en
-                               "use"      {:system "http://snomed.info/sct" :code "900001309" :display "Synonym"}
-                               "display"  "Gender"}
-                              {"language" :en
-                               "use"      {:system "http://snomed.info/sct" :code "900001307" :display "Fully specified name"}
-                               "display"  "Gender (Observable entity)"}]})
 
 ;; ---------------------------------------------------------------------------
 ;; OperationOutcome building (for validate-code issues)
@@ -91,64 +78,156 @@
     oo))
 
 ;; ---------------------------------------------------------------------------
-;; Parameters building
+;; Issue expression adjustment
 ;; ---------------------------------------------------------------------------
 
-(def ^:private uri-parameter-names
-  #{"system" "url" "source" "target" "targetSystem"})
+(defn adjust-issue-expressions
+  "Adjust FHIRPath expressions in issues for the input mode.
+  Protocol impls use canonical Coding.* expressions. This adjusts them:
+    :code            → strip 'Coding.' prefix (bare 'code', 'display', etc.)
+    :coding          → keep as-is ('Coding.code', 'Coding.display')
+    :codeableConcept → replace 'Coding.' with 'CodeableConcept.coding[N].'
+  Only adjusts expressions starting with 'Coding' — already-adjusted paths
+  are left unchanged."
+  [issues input-mode coding-index]
+  (let [coding-index (or coding-index 0)]
+    (case input-mode
+      :code (mapv (fn [i]
+                    (update i :expression
+                            (fn [exprs]
+                              (mapv (fn [e]
+                                      (cond
+                                        (clojure.string/starts-with? e "Coding.")
+                                        (subs e 7)
+                                        (= e "Coding") "code"
+                                        :else e))
+                                    exprs))))
+                  issues)
+      :codeableConcept (mapv (fn [i]
+                              (let [idx (or (:coding-index i) coding-index)
+                                    prefix (str "CodeableConcept.coding[" idx "]")]
+                                (-> (update i :expression
+                                            (fn [exprs]
+                                              (mapv (fn [e]
+                                                      (cond
+                                                        (clojure.string/starts-with? e "Coding.")
+                                                        (str prefix "." (subs e 7))
+                                                        (= e "Coding") prefix
+                                                        :else e))
+                                                    exprs)))
+                                    (dissoc :coding-index))))
+                            issues)
+      issues)))
 
-(def ^:private canonical-parameter-names
-  #{"x-caused-by-unknown-system"})
+;; ---------------------------------------------------------------------------
+;; Parameters building — explicit converters per result type
+;; ---------------------------------------------------------------------------
 
-(defn- make-parameter-component
-  [k v]
-  (let [pc (Parameters$ParametersParameterComponent. (StringType. (name k)))]
+(defn- add-param
+  "Add a named parameter to a Parameters resource."
+  [^Parameters params ^String param-name value]
+  (let [pc (Parameters$ParametersParameterComponent. (StringType. param-name))]
     (cond
-      (instance? IBaseResource v)
-      (.setResource pc v)
-      (instance? org.hl7.fhir.r4.model.Type v)
-      (.setValue pc v)
-      (and (string? v) (contains? canonical-parameter-names (name k)))
-      (.setValue pc (CanonicalType. ^String v))
-      (and (string? v) (contains? uri-parameter-names (name k)))
-      (.setValue pc (UriType. v))
-      (string? v)
-      (.setValue pc (StringType. v))
-      (number? v)
-      (.setValue pc (StringType. (str v)))
-      (boolean? v)
-      (.setValue pc (BooleanType. ^Boolean v))
-      (keyword? v)
-      (.setValue pc (CodeType. (name v)))
-      (and (map? v) (contains? v :code) (contains? v :system))
-      (.setValue pc (Coding. (name (:system v)) (name (:code v)) (:display v)))
-      (map? v)
-      (let [parts (map (fn [[k2 v2]] (make-parameter-component k2 v2)) v)]
-        (.setPart pc parts)))
-    pc))
+      (instance? IBaseResource value) (.setResource pc value)
+      (instance? org.hl7.fhir.r4.model.Type value) (.setValue pc value)
+      (string? value) (.setValue pc (StringType. ^String value))
+      (boolean? value) (.setValue pc (BooleanType. ^Boolean value))
+      (keyword? value) (.setValue pc (CodeType. (name value))))
+    (.addParameter params pc))
+  params)
 
-(defn- expand-parameter
-  "Expand a key-value pair into a sequence of parameter components.
-  Sequences produce one component per element; scalars produce one."
-  [[k v]]
-  (if (sequential? v)
-    (map (fn [item] (make-parameter-component k item)) v)
-    [(make-parameter-component k v)]))
+(defn- add-uri-param [^Parameters params ^String param-name ^String value]
+  (let [pc (Parameters$ParametersParameterComponent. (StringType. param-name))]
+    (.setValue pc (UriType. value))
+    (.addParameter params pc))
+  params)
 
-(defn map->parameters
-  "Turn a map into FHIR parameters.
-  If the map contains an \"issues\" key with a sequential value (vector of issue
-  maps), converts it to a HAPI OperationOutcome resource before serialisation."
-  [m]
-  (when m
-    (let [issues (get m "issues")
-          m' (if (sequential? issues)
-               (assoc m "issues" (build-operation-outcome issues))
-               m)
-          params (Parameters.)]
-      (doseq [pc (mapcat expand-parameter m')]
-        (.addParameter params pc))
-      params)))
+(defn- add-canonical-param [^Parameters params ^String param-name ^String value]
+  (let [pc (Parameters$ParametersParameterComponent. (StringType. param-name))]
+    (.setValue pc (CanonicalType. value))
+    (.addParameter params pc))
+  params)
+
+(defn- add-property-param
+  "Add a property parameter with code/value/description parts."
+  [^Parameters params {:keys [code value description code-display]}]
+  (let [pc (Parameters$ParametersParameterComponent. (StringType. "property"))
+        code-part (doto (Parameters$ParametersParameterComponent. (StringType. "code"))
+                    (.setValue (CodeType. (name code))))
+        value-part (let [vp (Parameters$ParametersParameterComponent. (StringType. "value"))]
+                     (cond
+                       (boolean? value) (.setValue vp (BooleanType. ^Boolean value))
+                       (keyword? value) (.setValue vp (CodeType. (name value)))
+                       (string? value) (.setValue vp (StringType. ^String value))
+                       (number? value) (.setValue vp (StringType. (str value))))
+                     vp)]
+    (.addPart pc code-part)
+    (.addPart pc value-part)
+    (when description
+      (.addPart pc (doto (Parameters$ParametersParameterComponent. (StringType. "description"))
+                     (.setValue (StringType. ^String (str description))))))
+    (when code-display
+      (.addPart pc (doto (Parameters$ParametersParameterComponent. (StringType. "display"))
+                     (.setValue (StringType. ^String (str code-display))))))
+    (.addParameter params pc))
+  params)
+
+(defn- add-designation-param
+  "Add a designation parameter with language/value/use parts."
+  [^Parameters params {:keys [language value use]}]
+  (let [pc (Parameters$ParametersParameterComponent. (StringType. "designation"))]
+    (when language
+      (.addPart pc (doto (Parameters$ParametersParameterComponent. (StringType. "language"))
+                     (.setValue (CodeType. (name language))))))
+    (when use
+      (.addPart pc (doto (Parameters$ParametersParameterComponent. (StringType. "use"))
+                     (.setValue (Coding. (str (:system use)) (str (:code use)) (:display use))))))
+    (.addPart pc (doto (Parameters$ParametersParameterComponent. (StringType. "value"))
+                   (.setValue (StringType. ^String (str value)))))
+    (.addParameter params pc))
+  params)
+
+(defn validate-result->parameters
+  "Convert a ::protos/validate-result to HAPI Parameters."
+  ^Parameters [{:keys [result code system version display message
+                        inactive normalized-code issues
+                        x-caused-by-unknown-system codeableConcept]}]
+  (let [params (Parameters.)]
+    (add-param params "result" result)
+    (when code (add-param params "code" code))
+    (when system (add-uri-param params "system" system))
+    (when version (add-param params "version" version))
+    (when display (add-param params "display" display))
+    (when normalized-code (add-param params "normalized-code" normalized-code))
+    (when inactive (add-param params "inactive" inactive))
+    (when message (add-param params "message" message))
+    (when (seq issues) (add-param params "issues" (build-operation-outcome issues)))
+    (when x-caused-by-unknown-system
+      (add-canonical-param params "x-caused-by-unknown-system" x-caused-by-unknown-system))
+    (when codeableConcept (add-param params "codeableConcept" codeableConcept))
+    params))
+
+(defn lookup-result->parameters
+  "Convert a ::protos/lookup-result to HAPI Parameters."
+  ^Parameters [{:keys [name version display system code definition abstract
+                        properties designations]}]
+  (let [params (Parameters.)]
+    (when name (add-param params "name" name))
+    (when version (add-param params "version" version))
+    (when display (add-param params "display" display))
+    (when system (add-uri-param params "system" system))
+    (when code (add-param params "code" code))
+    (when definition (add-param params "definition" definition))
+    (when (some? abstract) (add-param params "abstract" abstract))
+    (doseq [p properties] (add-property-param params p))
+    (doseq [d designations] (add-designation-param params d))
+    params))
+
+(defn subsumes-result->parameters
+  "Convert a subsumes result to HAPI Parameters."
+  ^Parameters [{:keys [outcome]}]
+  (doto (Parameters.)
+    (add-param "outcome" outcome)))
 
 
 (defn map->vs-expansion
@@ -165,25 +244,88 @@
     (when inactive (.setInactive comp true))
     (when (and include-designations (seq designations))
       (.setDesignation comp
-        (mapv (fn [d]
+        (mapv (fn [{:keys [value language use] :as d}]
                 (let [dc (ValueSet$ConceptReferenceDesignationComponent.)]
-                  (if (map? d)
-                    (do (.setValue dc (str (get d "value")))
-                        (when-let [lang (get d "language")]
-                          (.setLanguage dc (str lang)))
-                        (when-let [use-map (get d "use")]
-                          (let [coding (Coding.)]
-                            (when-let [s (or (get use-map "system") (:system use-map))]
-                              (.setSystem coding (str s)))
-                            (when-let [c (or (get use-map "code") (:code use-map))]
-                              (.setCode coding (str c)))
-                            (when-let [disp (or (get use-map "display") (:display use-map))]
-                              (.setDisplay coding (str disp)))
-                            (.setUse dc coding)))
-                        dc)
-                    (doto dc (.setValue (str d))))))
+                  (.setValue dc (str (or value d)))
+                  (when language (.setLanguage dc (name language)))
+                  (when use
+                    (.setUse dc (Coding. (str (:system use)) (str (:code use)) (:display use))))
+                  dc))
               designations)))
     comp))
+
+(defn- expansion-param [^String name value]
+  (doto (ValueSet$ValueSetExpansionParameterComponent.)
+    (.setName name)
+    (.setValue value)))
+
+(defn build-version-echo-params
+  "Build expansion parameter components for version-echo params.
+  Echoes force-system-version always; system-version/check-system-version
+  only for systems not pinned by the compose."
+  [{:keys [force-system-version system-version check-system-version compose-pinned]}]
+  (cond-> []
+    force-system-version
+    (into (map (fn [[sys ver]]
+                 (expansion-param "force-system-version" (UriType. ^String (str sys "|" ver)))))
+          force-system-version)
+    system-version
+    (into (keep (fn [[sys ver]]
+                  (when-not (contains? compose-pinned sys)
+                    (expansion-param "system-version" (UriType. ^String (str sys "|" ver))))))
+          system-version)
+    check-system-version
+    (into (keep (fn [[sys ver]]
+                  (when-not (contains? compose-pinned sys)
+                    (expansion-param "check-system-version" (UriType. ^String (str sys "|" ver))))))
+          check-system-version)))
+
+(defn build-cs-warning-params
+  "Build expansion warning parameters for CodeSystem status (draft/retired/experimental)."
+  [used-codesystems]
+  (mapcat (fn [{:keys [uri status experimental]}]
+            (cond-> []
+              experimental
+              (conj (expansion-param "warning-experimental" (UriType. ^String uri)))
+              (= "draft" status)
+              (conj (expansion-param "warning-draft" (UriType. ^String uri)))
+              (= "retired" status)
+              (conj (expansion-param "warning-deprecated" (UriType. ^String uri)))))
+          used-codesystems))
+
+(defn build-vs-warning-params
+  "Build expansion warning parameters for ValueSet status."
+  [vs-meta vs-version-uri]
+  (cond-> []
+    (= "retired" (:status vs-meta))
+    (conj (expansion-param "warning-withdrawn" (UriType. ^String vs-version-uri)))))
+
+(defn build-used-codesystem-params
+  "Build used-codesystem expansion parameters."
+  [used-codesystems]
+  (mapv (fn [{:keys [uri]}]
+          (expansion-param "used-codesystem" (UriType. ^String uri)))
+        used-codesystems))
+
+(defn build-echo-params
+  "Build echo expansion parameters (displayLanguage, excludeNested, etc.)."
+  [{:keys [display-lang excludeNested exclude-nested? include-desig? active-only?
+           param-filter param-count offset]}]
+  (cond-> []
+    (some? display-lang)
+    (conj (expansion-param "displayLanguage" (CodeType. ^String display-lang)))
+    excludeNested
+    (conj (expansion-param "excludeNested" (BooleanType. (boolean exclude-nested?))))
+    (some? include-desig?)
+    (conj (expansion-param "includeDesignations" (BooleanType. (boolean include-desig?))))
+    (some? active-only?)
+    (conj (expansion-param "activeOnly" (BooleanType. (boolean active-only?))))
+    (some-> param-filter .getValue)
+    (conj (expansion-param "filter" (StringType. ^String (.getValue param-filter))))
+    param-count
+    (conj (expansion-param "count" (IntegerType. (.getValue param-count))))
+    offset
+    (conj (expansion-param "offset" (IntegerType. (.getValue offset))))))
 
 (comment
   ;; import using plain ol' data

@@ -23,12 +23,11 @@
            (org.eclipse.jetty.server Server ServerConnector)
            (org.eclipse.jetty.servlet ServletContextHandler ServletHolder)
            (org.hl7.fhir.instance.model.api IBaseConformance)
-           (org.hl7.fhir.r4.model BooleanType CapabilityStatement CapabilityStatement$CapabilityStatementSoftwareComponent IntegerType
-                                   CodeSystem CodeType Coding ConceptMap
-                                   Enumerations$PublicationStatus StringType
+           (org.hl7.fhir.r4.model CapabilityStatement CapabilityStatement$CapabilityStatementSoftwareComponent
+                                   CodeSystem Coding ConceptMap
+                                   Enumerations$PublicationStatus
                                    TerminologyCapabilities TerminologyCapabilities$TerminologyCapabilitiesCodeSystemComponent
-                                   UriType ValueSet ValueSet$ValueSetExpansionComponent
-                                   ValueSet$ValueSetExpansionParameterComponent)
+                                   ValueSet ValueSet$ValueSetExpansionComponent)
            (java.util Date)))
 
 ;; ---------------------------------------------------------------------------
@@ -83,10 +82,15 @@
       {:tx-resources tx-resources :request request :value-set-version vs-version})
     (catch Exception _ {:tx-resources nil :extra {}})))
 
-(defn- build-tx-ctx
+(defn build-tx-ctx
   "Build an overlay ctx from a seq of resource maps (plain Clojure maps).
   Two-pass: CodeSystems first, then ValueSets, since a ValueSet may reference
-  a CodeSystem from the same tx-resource batch."
+  a CodeSystem from the same tx-resource batch.
+
+  Use from the REPL for direct testing with overlays:
+    (def ctx (server/build-tx-ctx [cs-map vs-map ...]))
+    (registry/valueset-validate-code ctx {:url ... :code ... :system ...})
+    (registry/valueset-expand ctx {:url ...})"
   [resource-maps]
   (when (seq resource-maps)
     (let [code-systems (filter #(= "CodeSystem" (get % "resourceType")) resource-maps)
@@ -231,15 +235,15 @@
     (let [ctx *tx-ctx*
           code' (or (some-> code .getValue) (some-> coding .getCode))
           system' (or (some-> system .getValue) (some-> coding .getSystem))
-          result (registry/codesystem-lookup ctx {:system         system'
-                                                   :code           code'
-                                                   :version        (some-> version .getValue)
-                                                   :displayLanguage (resolve-display-language (some-> displayLanguage .getValue) request)})]
+          result (registry/codesystem-lookup ctx (cond-> {:system system' :code code'}
+                                                   (some-> version .getValue) (assoc :version (.getValue version))
+                                                   (resolve-display-language (some-> displayLanguage .getValue) request)
+                                                   (assoc :displayLanguage (resolve-display-language (some-> displayLanguage .getValue) request))))]
       (when-not result
         (if (registry/codesystem ctx system')
           (throw (ResourceNotFoundException. (str "Unknown code '" code' "' in code system '" system' "'")))
           (throw (ResourceNotFoundException. (str "Unknown code system: " system')))))
-      (fhir/map->parameters result)))
+      (fhir/lookup-result->parameters result)))
 
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;
   ValidateCodeCodeSystemOperation
@@ -261,13 +265,20 @@
                       (some-> system .getValue)
                       (when coding? (.getSystem coding)))
           code' (or (some-> code .getValue) (when coding? (.getCode coding)))
-          result (registry/codesystem-validate-code ctx {:system         system'
-                                                          :code           code'
-                                                          :display        (or (some-> display .getValue) (when coding? (.getDisplay coding)))
-                                                          :version        (some-> version .getValue)
-                                                          :displayLanguage (resolve-display-language (some-> displayLanguage .getValue) request)
-                                                          :input-mode     (if coding? :coding :code)})]
-      (fhir/map->parameters result)))
+          display' (or (some-> display .getValue) (when coding? (.getDisplay coding)))
+          version' (some-> version .getValue)
+          display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
+          result (registry/codesystem-validate-code ctx
+                   (cond-> {:system system' :code code'}
+                     display' (assoc :display display')
+                     version' (assoc :version version')
+                     display-lang (assoc :displayLanguage display-lang)))
+          input-mode (if coding? :coding :code)
+          result (if (:issues result)
+                   (assoc result :issues (fhir/adjust-issue-expressions
+                                           (:issues result) input-mode nil))
+                   result)]
+      (fhir/validate-result->parameters result)))
 
   ;;;;;;;;;;;;;;;;;;;;;;;;;;;
   SubsumesCodeSystemOperation
@@ -282,7 +293,7 @@
               ^{:tag org.hl7.fhir.r4.model.Coding OperationParam {:name "codingB"}} codingB]
     (log/debug "codesystem/$subsumes: " {:codeA codeA :codeB codeB :system system :version version :codingA codingA :codingB codingB})
     (let [ctx *tx-ctx*]
-      (fhir/map->parameters
+      (fhir/subsumes-result->parameters
         (cond
           (and codeA codeB system)
           (registry/codesystem-subsumes ctx {:systemA (.getValue system) :codeA (.getValue codeA) :systemB (.getValue system) :codeB (.getValue codeB)})
@@ -313,94 +324,48 @@
           url' (some-> url .getValue)
           cc? (and codeableConcept (seq (.getCoding codeableConcept)))
           coding? (and coding (some-> coding .getCode))
+          ;; Extract HAPI params into plain maps and call registry
           result
           (if cc?
-            ;; CodeableConcept: iterate all codings, find valid one
-            (let [codings (vec (.getCoding codeableConcept))
-                  per-coding (map-indexed
-                               (fn [idx ^Coding c]
-                                 (registry/valueset-validate-code ctx
-                                   {:url             url'
-                                    :system          (.getSystem c)
-                                    :code            (.getCode c)
-                                    :display         (.getDisplay c)
-                                    :version         (or (some-> systemVersion .getValue)
-                                                         (.getVersion c))
-                                    :valueSetVersion value-set-version
-                                    :displayLanguage display-lang
-                                    :input-mode      :codeableConcept
-                                    :coding-index    idx}))
-                               codings)
-                  valid (last (filter #(get % "result") per-coding))
-                  invalid (remove #(get % "result") per-coding)
-                  all-issues (vec (mapcat #(get % "issues") invalid))]
-              (let [vs-not-found? (some #(and (= "not-found" (:details-code %))
-                                              (nil? (:expression %)))
-                                         all-issues)]
-                (if vs-not-found?
-                  (let [nf-issue (first (filter #(= "not-found" (:details-code %)) all-issues))]
-                    {"result" false
-                     "message" (:text nf-issue)
-                     "issues" [nf-issue]})
-                  (let [cs-error-msgs (distinct (keep (fn [i] (when (= "invalid-code" (:details-code i)) (:text i)))
-                                                        all-issues))
-                        error-msg (first cs-error-msgs)]
-                    (if valid
-                      (cond-> valid
-                        (seq invalid) (assoc "result" false)
-                        (seq all-issues) (update "issues" (fnil into []) all-issues)
-                        error-msg (assoc "message" error-msg)
-                        true (assoc "codeableConcept" codeableConcept))
-                      ;; No valid coding — check if code was found but failed due to
-                      ;; version issues. If so, use that result with its fields.
-                      (let [version-issue-codes #{"vs-invalid" "version-error" "version-mismatch"}
-                            best-invalid (last (filter (fn [r]
-                                                         (and (get r "display") (get r "system")
-                                                              (some #(contains? version-issue-codes (:details-code %))
-                                                                    (get r "issues"))
-                                                              (not (some #(= "not-in-vs" (:details-code %))
-                                                                         (get r "issues")))))
-                                                       per-coding))]
-                        (if best-invalid
-                          (assoc best-invalid "codeableConcept" codeableConcept "result" false)
-                          (let [vs-impl (registry/valueset ctx url')
-                                vs-ver (when vs-impl (get (protos/vs-resource vs-impl {}) "version"))
-                                vs-url-ver (if vs-ver (str url' "|" vs-ver) url')
-                                no-valid-msg (str "No valid coding was found for the value set '" vs-url-ver "'")
-                                combined-msg (if (seq cs-error-msgs)
-                                               (str no-valid-msg "; " (str/join "; " cs-error-msgs))
-                                               no-valid-msg)
-                                no-valid-issue {:severity "error" :type "code-invalid"
-                                                :details-code "not-in-vs" :text no-valid-msg}]
-                            {"result" false
-                             "codeableConcept" codeableConcept
-                             "message" combined-msg
-                             "issues" (into [no-valid-issue] all-issues)}))))))))
-            ;; Single code or Coding
+            (let [codings (mapv (fn [^Coding c]
+                                 (let [sv (some-> systemVersion .getValue)]
+                                   (cond-> {:system (.getSystem c) :code (.getCode c)}
+                                     (.getDisplay c) (assoc :display (.getDisplay c))
+                                     (or sv (.getVersion c))
+                                     (assoc :version (or sv (.getVersion c))))))
+                               (.getCoding codeableConcept))
+                  result (registry/valueset-validate-codeableconcept ctx codings
+                           (cond-> {:url url'}
+                             value-set-version (assoc :valueSetVersion value-set-version)
+                             display-lang (assoc :displayLanguage display-lang)))]
+              (assoc result :codeableConcept codeableConcept))
             (let [system' (or (some-> system .getValue)
                               (when coding? (.getSystem coding)))
                   code' (or (some-> code .getValue)
                             (when coding? (.getCode coding)))
-                  input-mode (if coding? :coding :code)]
+                  display' (or (some-> display .getValue)
+                               (when coding? (.getDisplay coding)))
+                  version' (or (some-> systemVersion .getValue)
+                               (when coding? (.getVersion coding)))
+]
               (registry/valueset-validate-code ctx
-                {:url             url'
-                 :system          system'
-                 :code            code'
-                 :display         (or (some-> display .getValue)
-                                      (when coding? (.getDisplay coding)))
-                 :version         (or (some-> systemVersion .getValue)
-                                      (when coding? (.getVersion coding)))
-                 :valueSetVersion value-set-version
-                 :displayLanguage display-lang
-                 :input-mode      input-mode})))
-          vs-not-found? (some #(and (= "not-found" (:details-code %))
-                                    (nil? (:expression %)))
-                              (get result "issues"))]
-      (if vs-not-found?
+                (cond-> {:url url' :system system' :code code'}
+                  display' (assoc :display display')
+                  version' (assoc :version version')
+                  value-set-version (assoc :valueSetVersion value-set-version)
+                  display-lang (assoc :displayLanguage display-lang)))))
+          ;; Adjust canonical Coding.* expressions for the input mode
+          input-mode (cond cc? :codeableConcept coding? :coding :else :code)
+          result (if (:issues result)
+                   (assoc result :issues (fhir/adjust-issue-expressions
+                                           (:issues result) input-mode nil))
+                   result)]
+      ;; VS not found → 4xx
+      (if (:not-found result)
         (throw (ResourceNotFoundException.
-                 ^String (get result "message")
-                 (fhir/build-operation-outcome (get result "issues"))))
-        (fhir/map->parameters result))))
+                 ^String (:message result)
+                 (fhir/build-operation-outcome (:issues result))))
+        (fhir/validate-result->parameters result))))
   ;;;;;;;;;;;;;;;;;;;;;;;
   ExpandValueSetOperation
   (^{:tag                                  org.hl7.fhir.r4.model.ValueSet
@@ -428,55 +393,23 @@
           url' (some-> url .getValue)
           active-only? (some-> activeOnly .getValue)
           exclude-nested? (if excludeNested (.getValue excludeNested) true)
-          display-lang (resolve-display-language (some-> displayLanguage .getValue) request)]
-      (let [count' (some-> param-count .getValue)
-            offset' (some-> offset .getValue)]
-      (if-let [results (registry/valueset-expand ctx {:url             url'
-                                                       :activeOnly      active-only?
-                                                       :filter          (some-> param-filter .getValue)
-                                                       :displayLanguage display-lang})]
+          display-lang (resolve-display-language (some-> displayLanguage .getValue) request)
+          count' (some-> param-count .getValue)
+          offset' (some-> offset .getValue)]
+      (if-let [result (registry/valueset-expand ctx {:url             url'
+                                                      :activeOnly      active-only?
+                                                      :filter          (some-> param-filter .getValue)
+                                                      :displayLanguage display-lang})]
         (let [vs-impl (registry/valueset ctx url')
               vs-meta (when vs-impl (protos/vs-resource vs-impl {}))
-              system-versions (reduce (fn [m c]
-                                        (if (:system c)
-                                          (update m (:system c) #(or % (:version c)))
-                                          m))
-                                      {} results)
-              cs-infos (map (fn [[sys ver-from-results]]
-                              (let [cs (registry/codesystem ctx sys)
-                                    meta (when cs (protos/cs-resource cs {}))
-                                    ver (or ver-from-results (get meta "version"))
-                                    uri (if ver (str sys "|" ver) sys)]
-                                {:uri uri :meta meta}))
-                            system-versions)
-              vs-version-uri (let [v (get vs-meta "version")]
+              used-cs (:used-codesystems result)
+              compose-pinned (into #{} (keep :system) (:compose-pins result))
+              vs-version-uri (let [v (:version vs-meta)]
                                (if v (str url' "|" v) url'))
-              cs-warning-params (mapcat (fn [{:keys [uri meta]}]
-                                          (cond-> []
-                                            (get meta "experimental")
-                                            (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                                    (.setName "warning-experimental")
-                                                    (.setValue (UriType. ^String uri))))
-                                            (= "draft" (get meta "status"))
-                                            (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                                    (.setName "warning-draft")
-                                                    (.setValue (UriType. ^String uri))))
-                                            (= "retired" (get meta "status"))
-                                            (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                                    (.setName "warning-deprecated")
-                                                    (.setValue (UriType. ^String uri))))))
-                                        cs-infos)
-              vs-warning-params (cond-> []
-                                  (= "retired" (get vs-meta "status"))
-                                  (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                          (.setName "warning-withdrawn")
-                                          (.setValue (UriType. ^String vs-version-uri)))))
-              ;; check-system-version validation: throw 4xx if check fails
               {:keys [check-system-version force-system-version system-version]} (:request ctx)
               _ (when check-system-version
-                  (doseq [[sys ver] system-versions]
-                    (let [resolved (or ver (when-let [cs (registry/codesystem ctx sys)]
-                                             (get (protos/cs-resource cs {}) "version")))]
+                  (doseq [{cs-uri :uri} used-cs]
+                    (let [[sys resolved] (registry/parse-versioned-uri cs-uri)]
                       (when-let [check-pattern (get check-system-version sys)]
                         (when (and resolved (not (registry/version-matches? check-pattern resolved)))
                           (let [issue {:severity "error" :type "exception"
@@ -484,74 +417,32 @@
                                        :text (str "The version '" resolved "' is not allowed for system '"
                                                   sys "': required to be '" check-pattern
                                                   "' by a version-check parameter")}]
-                            (throw (ca.uhn.fhir.rest.server.exceptions.UnprocessableEntityException.
+                            (throw (UnprocessableEntityException.
                                      ^String (:text issue)
                                      (fhir/build-operation-outcome [issue])))))))))
-              ;; Echo version parameters
-              version-echo-params (cond-> []
-                                    check-system-version
-                                    (into (map (fn [[sys ver]]
-                                                 (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                                   (.setName "check-system-version")
-                                                   (.setValue (UriType. ^String (str sys "|" ver)))))
-                                               check-system-version))
-                                    force-system-version
-                                    (into (map (fn [[sys ver]]
-                                                 (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                                   (.setName "force-system-version")
-                                                   (.setValue (UriType. ^String (str sys "|" ver)))))
-                                               force-system-version))
-                                    system-version
-                                    (into (map (fn [[sys ver]]
-                                                 (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                                   (.setName "system-version")
-                                                   (.setValue (UriType. ^String (str sys "|" ver)))))
-                                               system-version))
-                                    (not (or check-system-version force-system-version system-version))
-                                    identity)
-              expansion-params (-> (into version-echo-params
-                                     (cond-> []
-                                       (some? display-lang)
-                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                               (.setName "displayLanguage")
-                                               (.setValue (CodeType. ^String display-lang))))
-                                       excludeNested
-                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                               (.setName "excludeNested")
-                                               (.setValue (BooleanType. (boolean exclude-nested?)))))
-                                       (some? include-desig?)
-                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                               (.setName "includeDesignations")
-                                               (.setValue (BooleanType. (boolean include-desig?)))))
-                                       (some? active-only?)
-                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                               (.setName "activeOnly")
-                                               (.setValue (BooleanType. (boolean active-only?)))))
-                                       (some-> param-filter .getValue)
-                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                               (.setName "filter")
-                                               (.setValue (StringType. ^String (.getValue param-filter)))))
-                                       param-count
-                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                               (.setName "count")
-                                               (.setValue (IntegerType. (.getValue param-count)))))
-                                       offset
-                                       (conj (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                               (.setName "offset")
-                                               (.setValue (IntegerType. (.getValue offset)))))))
-                                   (into (map (fn [{:keys [uri]}]
-                                                (doto (ValueSet$ValueSetExpansionParameterComponent.)
-                                                  (.setName "used-codesystem")
-                                                  (.setValue (UriType. ^String uri))))
-                                              cs-infos))
-                                   (into cs-warning-params)
-                                   (into vs-warning-params))]
+              expansion-params (-> (fhir/build-version-echo-params
+                                     {:force-system-version  force-system-version
+                                      :system-version        system-version
+                                      :check-system-version  check-system-version
+                                      :compose-pinned        compose-pinned})
+                                   (into (fhir/build-cs-warning-params used-cs))
+                                   (into (fhir/build-vs-warning-params vs-meta vs-version-uri))
+                                   (into (fhir/build-used-codesystem-params used-cs))
+                                   (into (fhir/build-echo-params
+                                           {:display-lang    display-lang
+                                            :excludeNested   excludeNested
+                                            :exclude-nested? exclude-nested?
+                                            :include-desig?  include-desig?
+                                            :active-only?    active-only?
+                                            :param-filter    param-filter
+                                            :param-count     param-count
+                                            :offset          offset})))]
           (let [vs (doto (ValueSet.)
-                     (.setUrl (or (get vs-meta "url") (first (registry/parse-versioned-uri url'))))
-                     (.setVersion (get vs-meta "version"))
-                     (.setName (get vs-meta "name"))
-                     (.setTitle (get vs-meta "title"))
-                     (.setStatus (case (get vs-meta "status")
+                     (.setUrl (or (:url vs-meta) (first (registry/parse-versioned-uri url'))))
+                     (.setVersion (:version vs-meta))
+                     (.setName (:name vs-meta))
+                     (.setTitle (:title vs-meta))
+                     (.setStatus (case (:status vs-meta)
                                    "active" Enumerations$PublicationStatus/ACTIVE
                                    "draft" Enumerations$PublicationStatus/DRAFT
                                    "retired" Enumerations$PublicationStatus/RETIRED
@@ -560,14 +451,14 @@
                              (.setIdentifier (str "urn:uuid:" (java.util.UUID/randomUUID)))
                              (.setTimestamp (Date.))
                              (.setParameter expansion-params)
-                             (.setTotal (count results))
-                             (.setContains (let [paged (cond->> results
+                             (.setTotal (:total result))
+                             (.setContains (let [paged (cond->> (:concepts result)
                                                          offset' (drop offset')
                                                          count' (take count'))]
                                              (map #(fhir/map->vs-expansion % :include-designations include-desig?) paged))))))]
-            (when (some? (get vs-meta "experimental"))
-              (.setExperimental vs (boolean (get vs-meta "experimental"))))
-            vs)))))))
+            (when (some? (:experimental vs-meta))
+              (.setExperimental vs (boolean (:experimental vs-meta))))
+            vs))))))
 
 (deftype ConceptMapResourceProvider [svc]
   IResourceProvider
@@ -589,7 +480,7 @@
                ^{:tag org.hl7.fhir.r4.model.UriType OperationParam {:name "targetSystem"}} targetSystem
                ^{:tag org.hl7.fhir.r4.model.BooleanType OperationParam {:name "reverse"}} reverse]
     (log/debug "conceptmap/$translate:" {:url url :code code :system system :version version :source source :coding coding :codeableConcept codeableConcept :target target :targetSystem targetSystem :reverse reverse})
-    (fhir/map->parameters {:operation :translate :url url})))
+    (org.hl7.fhir.r4.model.Parameters.)))
 
 ;; ---------------------------------------------------------------------------
 ;; Conformance / metadata

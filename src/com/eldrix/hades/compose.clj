@@ -5,6 +5,7 @@
   set of concepts. No HAPI, no atoms, no mutable state."
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
+            [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.registry :as registry]))
 
 (s/def ::filter (s/nilable string?))
@@ -43,15 +44,16 @@
           (let [code (get c "code")
                 provided-display (get c "display")
                 looked-up (when system
-                            (registry/codesystem-lookup ctx {:system system :code code :version version}))]
+                            (registry/codesystem-lookup ctx (cond-> {:system system :code code}
+                                                              version (assoc :version version))))]
             (when (or looked-up (nil? system))
-              (let [display (or provided-display (get looked-up "display"))
-                    result-version (or (get looked-up "version") version)
+              (let [display (or provided-display (:display looked-up))
+                    result-version (or (:version looked-up) version)
                     inactive? (when looked-up
                                 (some (fn [p] (and (= :inactive (:code p)) (:value p)))
-                                      (get looked-up "property")))
-                    abstract? (get looked-up "abstract")
-                    designations (get looked-up "designation")]
+                                      (:properties looked-up)))
+                    abstract? (:abstract looked-up)
+                    designations (:designations looked-up)]
                 (cond-> {:code    code
                          :system  system
                          :display display}
@@ -81,8 +83,8 @@
   (mapcat (fn [vs-url]
             (when (contains? expanding vs-url)
               (throw (ex-info "Circular ValueSet reference" {:type :invalid :url vs-url})))
-            (or (registry/valueset-expand ctx {:url vs-url :expanding expanding})
-                []))
+            (let [result (registry/valueset-expand ctx {:url vs-url :expanding expanding})]
+              (or (:concepts result) [])))
           valueset-urls))
 
 (defn- expand-include
@@ -111,13 +113,39 @@
 (defn- concept-key [c]
   [(:system c) (:code c)])
 
+(defn- collect-used-codesystems
+  "Collect used-codesystem metadata for each unique system in the concepts."
+  [ctx concepts]
+  (let [systems (into #{} (keep :system) concepts)]
+    (mapv (fn [sys]
+            (let [cs (registry/codesystem ctx sys)
+                  meta (when cs (protos/cs-resource cs {}))
+                  ver (or (some (fn [c] (when (= sys (:system c)) (:version c))) concepts)
+                          (:version meta))
+                  uri (if ver (str sys "|" ver) sys)]
+              (cond-> {:uri uri}
+                (:status meta) (assoc :status (:status meta))
+                (some? (:experimental meta)) (assoc :experimental (:experimental meta)))))
+          systems)))
+
+(defn- extract-compose-pins
+  "Extract compose pins — systems with explicit versions in include definitions."
+  [compose]
+  (into []
+        (keep (fn [inc]
+                (when-let [ver (get inc "version")]
+                  {:system (get inc "system") :version ver})))
+        (get compose "include")))
+
 (s/fdef expand-compose
-  :args (s/cat :ctx ::registry/ctx :compose map? :params ::expand-params))
+  :args (s/cat :ctx ::registry/ctx :compose map? :params ::expand-params)
+  :ret ::protos/expansion-result)
 
 (defn expand-compose
-  "Expand a FHIR ValueSet compose definition into a sequence of concept maps.
+  "Expand a FHIR ValueSet compose definition into an expansion result.
 
-  Parameters:
+  Returns an ::expansion-result map with :concepts, :total, :used-codesystems,
+  and :compose-pins. Parameters:
   - ctx     — overlay context (::registry/ctx)
   - compose — parsed compose map (string keys: \"include\", \"exclude\", \"inactive\")
   - params  — {:filter :activeOnly :offset :count :expanding}"
@@ -146,8 +174,12 @@
                                             (str/includes? (str/lower-case (:code c)) f-lower))))
                                  after-inactive))
                        after-inactive)
+        all-concepts (vec after-filter)
         offset' (or (:offset params) 0)
-        paged (cond->> after-filter
+        paged (cond->> all-concepts
                 (pos? offset') (drop offset')
                 (:count params) (take (:count params)))]
-    (vec paged)))
+    {:concepts         (vec paged)
+     :total            (count all-concepts)
+     :used-codesystems (collect-used-codesystems ctx (vec paged))
+     :compose-pins     (extract-compose-pins compose)}))

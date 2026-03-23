@@ -138,6 +138,27 @@ server.clj / fhir.clj    HAPI FHIR layer — HTTP, serialisation
 - **Implementations are HAPI-free.** They return plain maps. The server layer converts
   to HAPI model objects via `fhir.clj`.
 
+### Layer responsibilities (strict)
+
+- **Protocol impls** (snomed.clj, fhir_codesystem.clj, fhir_valueset.clj) know their
+  domain. They return **complete, self-describing results** that match the specs in
+  `protocols.clj` (e.g. `::protos/validate-result`, `::protos/expansion-result`).
+  No downstream layer should need to patch, enrich, or re-derive fields.
+- **Registry** dispatches to the right impl by URL/version and handles version
+  resolution (`force-system-version` / `system-version` / `check-system-version`).
+  It does **not** patch results, add issues retroactively, look up other resources
+  to fill gaps, or fix FHIRPath expressions. If the registry is doing post-call
+  surgery on a result, the impl's return value is incomplete — fix the impl.
+- **Server** translates between HAPI types and keyword-keyed Clojure maps. Each
+  operation method should be ~30 lines: extract HAPI params → call registry →
+  convert result via `fhir.clj`. If a server method contains terminology logic
+  (version checking, status warnings, compose inspection), that logic belongs in
+  a lower layer or in the result map itself.
+- **No secret channels.** Data flows through explicit function parameters and return
+  values. No smuggling data through metadata maps, dynamic vars (except `*tx-ctx*`
+  for the HAPI reflection bridge), or by reaching back through `vs-resource` /
+  `cs-resource` to get data that should have been in the result.
+
 ### Request-scoped overlays (`tx-resource`)
 
 FHIR operations accept `tx-resource` parameters — temporary CodeSystem/ValueSet
@@ -180,17 +201,25 @@ When `ctx` is nil or absent, only global registrations are consulted.
 
 ### Data
 - Use plain Clojure maps as the data interchange format between layers.
-- Use keywords for map keys within Clojure (`:code`, `:system`, `:display`).
-- Use strings for map keys when the data represents FHIR JSON that will be
-  serialised (`"result"`, `"display"`, `"message"`). This matches the existing
-  convention in `snomed.clj` for protocol return values.
+- **Keyword keys everywhere inside Clojure** (`:code`, `:system`, `:display`,
+  `:result`, `:version`). This applies to protocol return values, registry
+  results, compose output, and all internal data.
+- **String keys only at serialisation boundaries**: when parsing FHIR JSON
+  input (`clojure.data.json/read-str` produces string keys — convert to
+  keywords at ingestion) and when building HAPI types in `fhir.clj`.
 - Parse FHIR JSON with `clojure.data.json`, not HAPI parsers.
 
 ### Specs
 - Use `clojure.spec.alpha` for all public API boundaries: protocol parameters,
-  registry inputs, and constructor arguments.
+  registry inputs, constructor arguments, **and protocol return values**.
+- The canonical data shapes live in `protocols.clj`: `::protos/validate-result`,
+  `::protos/expansion-result`, `::protos/expansion-concept`,
+  `::protos/lookup-result`, `::protos/issue`. These are the contracts between
+  layers — every protocol impl must return data conforming to these specs.
 - Namespace specs under the relevant module: `::protos/code`, `::registry/url`.
 - Write `s/fdef` for public functions with non-trivial parameter contracts.
+- Use `clojure.spec.test.alpha/instrument` in test runs to validate data at
+  boundaries automatically.
 
 ## Testing
 
@@ -225,18 +254,63 @@ After each phase, the conformance pass count must not decrease. New work should
 increase it. The `messages-hades.json` externals file maps expected error message
 keys to Hades-specific strings.
 
-## Verification checklist
+## Checklists
 
-Run after every task:
+### Before making changes (design checklist)
 
+Run before writing any code. The purpose is to ensure the change is in the right
+place and flows data correctly.
+
+1. **Identify the FHIR spec requirement.** What section of the FHIR spec governs
+   this behaviour? If you can't point to a spec section, you may be solving the
+   wrong problem or optimising for a test rather than the specification.
+2. **Identify which layer owns this change.** Is it domain logic (protocol impl),
+   dispatch/version resolution (registry), or HAPI translation (server/fhir)?
+   If the answer is "a bit of each," reconsider — the design may be unclear.
+3. **Trace the data flow.** For the inputs this change needs: where do they
+   originate and how do they reach this layer? For the outputs: who consumes
+   them and what shape do they expect? Draw the path: server → registry → impl
+   → registry → server. If data needs to flow backwards (server reaching back
+   into impl metadata), the return value is incomplete.
+4. **Check the spec.** Does a spec exist in `protocols.clj` for the return value
+   this change produces? If not, define it before writing the implementation.
+   The spec is the contract — write the contract first.
+5. **Check for secret channels.** Does this change require smuggling data through
+   metadata, dynamic vars, or `:ctx`-in-params? If yes, redesign. The data
+   should be an explicit parameter or part of a return value spec.
+
+### After making changes (verification checklist)
+
+Run after every task. All items must pass.
+
+#### Automated checks
 1. `clj -M:test` — all tests pass
 2. `clj -M:lint/kondo` — clean
 3. `clj -M:lint/eastwood` — clean
-4. Read back every changed file — verify it matches the task requirements
-5. Confirm no HAPI imports outside `server.clj` / `fhir.clj`
-6. Confirm no new atoms or mutable state without justification
-7. Confirm new public functions have tests
-8. Confirm specs exist for public API boundaries
+
+#### Architectural checks (read back every changed file)
+4. **No HAPI imports outside `server.clj` / `fhir.clj`.**
+5. **No new atoms or mutable state** without justification.
+6. **No secret channels introduced.** Data flows through explicit params/returns.
+   No compose-in-metadata, no reaching back through `vs-resource`/`cs-resource`
+   to get data that should be in the result, no ad-hoc keys smuggled in `:ctx`.
+7. **Protocol impls return complete results.** If you changed a protocol impl,
+   its return value should match the relevant spec (`::validate-result`,
+   `::expansion-result`, `::lookup-result`). No downstream patching needed.
+8. **Registry is not patching results.** If you added logic to the registry that
+   modifies a result after the protocol call (adding issues, filling in missing
+   fields, fixing expressions), the impl's return is incomplete — fix the impl.
+9. **Server methods are mechanical translation.** If a server method grew beyond
+   ~30 lines or contains terminology logic (version checking, status warnings,
+   compose inspection, code existence checks), push that logic down.
+10. **Keyword keys used internally.** No string-keyed maps in protocol returns,
+    registry results, or compose output. String keys only in `fhir.clj` at the
+    HAPI serialisation boundary.
+
+#### Completeness checks
+11. **New public functions have tests.**
+12. **Specs exist for public API boundaries** — input params and return values.
+13. **Changes match the task requirements** — not more, not less.
 
 ## Key dependencies
 

@@ -224,56 +224,52 @@
   ([ctx {:keys [system version] :as params}]
    (let [lookup-key (if version (versioned-uri system version) system)]
      (when-let [cs (codesystem ctx lookup-key)]
-       (protos/cs-lookup cs params)))))
-
-(defn- inactive-expression
-  "Return the FHIRPath expression for inactive concept warnings."
-  ([input-mode] (inactive-expression input-mode 0))
-  ([input-mode coding-index]
-   (case input-mode
-     :coding "Coding"
-     :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "]")
-     "code")))
+       (when-let [result (protos/cs-lookup cs params)]
+         (assert (s/valid? ::protos/lookup-result result)
+                 (str "cs-lookup returned invalid ::lookup-result: " (s/explain-str ::protos/lookup-result result)))
+         result)))))
 
 (defn- add-inactive-warning
   "Add inactive concept warning to a validate-code result when the concept is inactive."
-  [result input-mode coding-index]
-  (if (get result "inactive")
-    (let [code (name (get result "code"))
-          status (or (get result "inactive-status") "inactive")
+  [result]
+  (if (:inactive result)
+    (let [code (name (:code result))
+          status (or (:inactive-status result) "inactive")
           msg (str "The concept '" code "' has a status of " status " and its use should be reviewed")
-          expression (inactive-expression input-mode coding-index)
           issue {:severity     "warning"
                  :type         "business-rule"
                  :details-code "code-comment"
                  :text         msg
-                 :expression   [expression]}]
+                 :expression   ["Coding"]}]
       (-> result
-          (dissoc "inactive-status")
-          (update "issues" (fnil conj []) issue)
-          (update "message" (fn [existing]
-                              (if existing
-                                (str existing "; " msg)
-                                msg)))))
+          (dissoc :inactive-status)
+          (update :issues (fnil conj []) issue)
+          (update :message (fn [existing]
+                             (if existing
+                               (str existing "; " msg)
+                               msg)))))
     result))
 
 (defn codesystem-validate-code
   ([params] (codesystem-validate-code nil params))
-  ([ctx {:keys [system code version input-mode] :as params}]
-   (let [lookup-key (if version (versioned-uri system version) system)]
-   (if-let [cs (codesystem ctx lookup-key)]
-     (-> (protos/cs-validate-code cs params)
-         (add-inactive-warning input-mode nil))
-     (let [msg (str "A definition for CodeSystem '" system "' could not be found, so the code cannot be validated")]
-       {"result"  false
-        "code"    (when code (keyword code))
-        "system"  system
-        "message" msg
-        "issues"  [{:severity     "error"
-                    :type         "not-found"
-                    :details-code "not-found"
-                    :text         msg
-                    :expression   ["system"]}]})))))
+  ([ctx {:keys [system code version] :as params}]
+   (let [lookup-key (if version (versioned-uri system version) system)
+         result (if-let [cs (codesystem ctx lookup-key)]
+                  (-> (protos/cs-validate-code cs params)
+                      (add-inactive-warning))
+                  (let [msg (str "A definition for CodeSystem '" system "' could not be found, so the code cannot be validated")]
+                    {:result  false
+                     :code    (when code (keyword code))
+                     :system  system
+                     :message msg
+                     :issues  [{:severity     "error"
+                                :type         "not-found"
+                                :details-code "not-found"
+                                :text         msg
+                                :expression   ["system"]}]}))]
+     (assert (s/valid? ::protos/validate-result result)
+             (str "cs-validate-code returned invalid ::validate-result: " (s/explain-str ::protos/validate-result result)))
+     result)))
 
 (defn codesystem-subsumes
   ([params] (codesystem-subsumes nil params))
@@ -295,7 +291,7 @@
   ([system] (codesystem-version nil system))
   ([ctx system]
    (when-let [cs (codesystem ctx system)]
-     (get (protos/cs-resource cs {}) "version"))))
+     (:version (protos/cs-resource cs {})))))
 
 (defn unknown-version-issue
   "Return an UNKNOWN_CODESYSTEM_VERSION issue if the caller's version doesn't
@@ -340,40 +336,20 @@
   ([ctx {:keys [url valueSetVersion] :as params}]
    (let [lookup-key (if valueSetVersion (versioned-uri url valueSetVersion) url)]
      (when-let [vs (valueset ctx lookup-key)]
-       (protos/vs-expand vs (assoc params :ctx ctx))))))
+       (let [result (protos/vs-expand vs ctx params)]
+         (assert (s/valid? ::protos/expansion-result result)
+                 (str "vs-expand returned invalid ::expansion-result: " (s/explain-str ::protos/expansion-result result)))
+         result)))))
 
-(defn- format-code-ref
-  "Format a code reference for error messages, optionally including display."
-  [system code display]
-  (cond-> (str (when system (str system "#")) code)
-    display (str " ('" display "')")))
 
-(defn- code-expression
-  "Return the FHIRPath expression for code based on the input mode."
-  ([input-mode] (code-expression input-mode 0))
-  ([input-mode coding-index]
-   (case input-mode
-     :coding "Coding.code"
-     :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "].code")
-     "code")))
-
-(defn- display-expression
-  "Return the FHIRPath expression for display based on the input mode."
-  ([input-mode] (display-expression input-mode 0))
-  ([input-mode coding-index]
-   (case input-mode
-     :coding "Coding.display"
-     :codeableConcept (str "CodeableConcept.coding[" (or coding-index 0) "].display")
-     "display")))
-
-(defn- add-cs-status-warnings
+(defn add-cs-status-warnings
   "Add informational issues for CodeSystem publication status (draft/retired/experimental)."
-  [ctx result system]
+  [result ctx system]
   (if-let [cs (codesystem ctx system)]
     (let [meta (protos/cs-resource cs {})
-          status (get meta "status")
-          experimental? (get meta "experimental")
-          version (get meta "version")
+          status (:status meta)
+          experimental? (:experimental meta)
+          version (:version meta)
           cs-ref (if version (str system "|" version) system)
           issues (cond-> []
                    (= "draft" status)
@@ -389,17 +365,17 @@
                           :details-code "status-check"
                           :text (str "Reference to experimental CodeSystem " cs-ref)}))]
       (if (seq issues)
-        (update result "issues" (fn [existing] (vec (concat issues (or existing [])))))
+        (update result :issues (fn [existing] (vec (concat issues (or existing [])))))
         result))
     result))
 
-(defn- add-vs-status-warnings
+(defn add-vs-status-warnings
   "Add informational issues for ValueSet publication status (retired = withdrawn)."
-  [ctx result url]
+  [result ctx url]
   (if-let [vs (when url (valueset ctx url))]
     (let [meta (protos/vs-resource vs {})
-          status (get meta "status")
-          version (get meta "version")
+          status (:status meta)
+          version (:version meta)
           vs-ref (if version (str url "|" version) url)
           issues (cond-> []
                    (= "retired" status)
@@ -411,115 +387,103 @@
                           :details-code "status-check"
                           :text (str "Reference to draft ValueSet " vs-ref)}))]
       (if (seq issues)
-        (update result "issues" (fn [existing] (vec (concat (or existing []) issues))))
+        (update result :issues (fn [existing] (vec (concat (or existing []) issues))))
         result))
     result))
-
-(defn- enrich-vs-validate-result
-  "When a VS validate-code returns result=false, add a not-in-vs issue and
-  check whether the code exists in the CodeSystem to add an invalid-code issue.
-  When result=true and inactive, add inactive warning."
-  [ctx result {:keys [url system code display input-mode coding-index]}]
-  (let [disp-expr (display-expression input-mode coding-index)
-        result (if-let [issues (seq (get result "issues"))]
-                 (assoc result "issues"
-                   (mapv (fn [i]
-                           (if (and (= "invalid-display" (:details-code i))
-                                    (= ["display"] (:expression i)))
-                             (assoc i :expression [disp-expr])
-                             i))
-                         issues))
-                 result)
-        result (add-inactive-warning result input-mode coding-index)
-        result (add-cs-status-warnings ctx result system)
-        result (add-vs-status-warnings ctx result url)]
-  (if (get result "result")
-    result
-    (let [code-expr (code-expression input-mode coding-index)
-          disp-expr (display-expression input-mode coding-index)
-          cc-mode? (= :codeableConcept input-mode)
-          raw-issues (get result "issues" [])
-          existing-issues (if cc-mode?
-                            (mapv (fn [i]
-                                    (if (= "not-in-vs" (:details-code i))
-                                      (assoc i :details-code "this-code-not-in-vs"
-                                               :severity "information")
-                                      i))
-                                  raw-issues)
-                            raw-issues)
-          has-not-in-vs? (some #(contains? #{"not-in-vs" "this-code-not-in-vs"} (:details-code %))
-                               existing-issues)
-          has-display-issue? (some #(= "invalid-display" (:details-code %)) existing-issues)
-          has-version-issue? (some #(contains? #{"vs-invalid" "version-error" "not-found"} (:details-code %))
-                                   existing-issues)
-          not-in-vs-msg (when (and url (not has-not-in-vs?) (not has-display-issue?) (not has-version-issue?))
-                          (let [code-ref (format-code-ref system code display)
-                                vs-version (get result "version")
-                                vs-ref (if vs-version (str url "|" vs-version) url)]
-                            (str "The provided code '" code-ref
-                                 "' was not found in the value set '" vs-ref "'")))
-          not-in-vs-issue (when not-in-vs-msg
-                            {:severity     (if cc-mode? "information" "error")
-                             :type         "code-invalid"
-                             :details-code (if cc-mode? "this-code-not-in-vs" "not-in-vs")
-                             :text         not-in-vs-msg
-                             :expression   [code-expr]})
-          has-invalid-code? (some #(= "invalid-code" (:details-code %)) existing-issues)
-          cs-result (when (and system code (not has-invalid-code?) (not has-display-issue?))
-                      (codesystem-validate-code ctx {:system system :code code}))
-          cs-invalid? (and cs-result (false? (get cs-result "result")))
-          cs-issue (when cs-invalid?
-                     (let [orig-issue (first (get cs-result "issues"))]
-                       (if (= "not-found" (:details-code orig-issue))
-                         orig-issue
-                         (assoc orig-issue :expression [code-expr]))))
-          version-issue-codes #{"vs-invalid" "version-error" "version-mismatch"}
-          updated-existing (mapv (fn [i]
-                                   (cond
-                                     (= "not-found" (:details-code i)) i
-                                     (contains? version-issue-codes (:details-code i)) i
-                                     (= "invalid-display" (:details-code i))
-                                     (assoc i :expression [disp-expr])
-                                     :else (assoc i :expression [code-expr])))
-                                 existing-issues)
-          severity-rank {"fatal" 0 "error" 1 "warning" 2 "information" 3}
-          all-issues (->> (cond-> []
-                            not-in-vs-issue (conj not-in-vs-issue)
-                            true (into updated-existing)
-                            cs-issue (conj cs-issue))
-                          (sort-by #(get severity-rank (:severity %) 4))
-                          vec)
-          messages (keep :text all-issues)
-          combined-msg (when (seq messages) (clojure.string/join "; " messages))
-          cs-display (when (and cs-result (get cs-result "result"))
-                       (get cs-result "display"))
-          cs-version (when cs-result (get cs-result "version"))]
-      (cond-> result
-        (seq all-issues) (assoc "issues" all-issues)
-        combined-msg (assoc "message" combined-msg)
-        (and cs-display (nil? (get result "display"))) (assoc "display" cs-display)
-        (and cs-version (nil? (get result "version"))) (assoc "version" cs-version))))))
 
 (defn valueset-validate-code
   ([params] (valueset-validate-code nil params))
   ([ctx {:keys [url system code valueSetVersion] :as params}]
    (let [vs-lookup (if url
                      (if valueSetVersion (versioned-uri url valueSetVersion) url)
-                     (when system system))]
-   (if-let [vs (when vs-lookup (valueset ctx vs-lookup))]
-     (enrich-vs-validate-result ctx
-       (protos/vs-validate-code vs (assoc params :ctx ctx))
-       params)
-     (let [target (or vs-lookup url system)
-           msg (str "A definition for the value Set '" target "' could not be found")]
-       {"result"  false
-        "code"    (when code (keyword code))
-        "system"  system
-        "message" msg
-        "issues"  [{:severity     "error"
-                    :type         "not-found"
-                    :details-code "not-found"
-                    :text         msg}]})))))
+                     (when system system))
+         result (if-let [vs (when vs-lookup (valueset ctx vs-lookup))]
+                  (protos/vs-validate-code vs ctx params)
+                  (let [target (or vs-lookup url system)
+                        msg (str "A definition for the value Set '" target "' could not be found")]
+                    {:result    false
+                     :not-found true
+                     :code      (when code (keyword code))
+                     :system    system
+                     :message   msg
+                     :issues    [{:severity     "error"
+                                  :type         "not-found"
+                                  :details-code "not-found"
+                                  :text         msg}]}))]
+     (assert (s/valid? ::protos/validate-result result)
+             (str "vs-validate-code returned invalid ::validate-result: " (s/explain-str ::protos/validate-result result)))
+     result)))
+
+(defn valueset-validate-codeableconcept
+  "Validate a CodeableConcept against a ValueSet. Iterates each coding,
+  validates independently, and aggregates per the FHIR spec:
+  - If any coding is valid, it provides the base result (but result may still
+    be false if other codings have errors)
+  - Per-coding not-in-vs issues are downgraded to this-code-not-in-vs (information)
+  - If VS not found, propagates immediately
+  - Returns ::protos/validate-result with all per-coding issues aggregated.
+
+  `codings` is a seq of maps with :system :code :display :version.
+  `base-params` is a map with :url and optionally :valueSetVersion :displayLanguage."
+  [ctx codings base-params]
+  (let [per-coding (map-indexed
+                     (fn [idx coding-map]
+                       (let [result (valueset-validate-code ctx
+                                     (merge base-params
+                                            (select-keys coding-map [:system :code :display :version])))]
+                         ;; Tag issues with coding-index for expression adjustment,
+                         ;; and downgrade not-in-vs to this-code-not-in-vs (informational)
+                         ;; since in CC mode each coding's not-in-vs is secondary to
+                         ;; the overall "no valid coding" error.
+                         (cond-> (assoc result :coding-index idx)
+                           (:issues result)
+                           (update :issues (fn [issues]
+                                             (mapv (fn [i]
+                                                     (cond-> (assoc i :coding-index idx)
+                                                       (= "not-in-vs" (:details-code i))
+                                                       (assoc :details-code "this-code-not-in-vs"
+                                                              :severity "information")))
+                                                   issues))))))
+                     codings)
+        ;; VS not found? Propagate immediately.
+        first-not-found (first (filter :not-found per-coding))]
+    (if first-not-found
+      first-not-found
+      (let [valid (last (filter :result per-coding))
+            invalid (remove :result per-coding)
+            all-issues (vec (mapcat :issues invalid))
+            cs-error-msgs (distinct (keep (fn [i] (when (= "invalid-code" (:details-code i)) (:text i)))
+                                         all-issues))
+            error-msg (first cs-error-msgs)]
+        (if valid
+          (cond-> valid
+            (seq invalid) (assoc :result false)
+            (seq all-issues) (update :issues (fnil into []) all-issues)
+            error-msg (assoc :message error-msg))
+          ;; No valid coding — check for version-issue results
+          (let [version-issue-codes #{"vs-invalid" "version-error" "version-mismatch"}
+                best-invalid (last (filter (fn [r]
+                                             (and (:display r) (:system r)
+                                                  (some #(contains? version-issue-codes (:details-code %))
+                                                        (:issues r))
+                                                  (not (some #(= "not-in-vs" (:details-code %))
+                                                             (:issues r)))))
+                                           per-coding))]
+            (if best-invalid
+              (assoc best-invalid :result false)
+              (let [url (:url base-params)
+                    vs-impl (valueset ctx url)
+                    vs-ver (when vs-impl (:version (protos/vs-resource vs-impl {})))
+                    vs-url-ver (if vs-ver (str url "|" vs-ver) url)
+                    no-valid-msg (str "No valid coding was found for the value set '" vs-url-ver "'")
+                    combined-msg (if (seq cs-error-msgs)
+                                   (str no-valid-msg "; " (clojure.string/join "; " cs-error-msgs))
+                                   no-valid-msg)
+                    no-valid-issue {:severity "error" :type "code-invalid"
+                                    :details-code "not-in-vs" :text no-valid-msg}]
+                {:result false
+                 :message combined-msg
+                 :issues (into [no-valid-issue] all-issues)}))))))))
 
 (defn conceptmap-resource
   ([params] (conceptmap-resource nil params))

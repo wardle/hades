@@ -64,54 +64,54 @@
 (deftest cs-lookup-test
   (testing "returns correct fields"
     (let [result (protos/cs-lookup hier-fcs {:code "A"})]
-      (is (= "Concept A" (get result "display")))
-      (is (= "http://example.com/test-cs" (get result "system")))
-      (is (= "1.0" (get result "version")))
-      (is (= "TestCodeSystem" (get result "name")))
-      (is (= :A (get result "code")))
-      (is (= "The first concept" (get result "definition")))
-      (is (false? (get result "abstract")) "concept A has children but no notSelectable property")))
+      (is (= "Concept A" (:display result)))
+      (is (= "http://example.com/test-cs" (:system result)))
+      (is (= "1.0" (:version result)))
+      (is (= "TestCodeSystem" (:name result)))
+      (is (= :A (:code result)))
+      (is (= "The first concept" (:definition result)))
+      (is (false? (:abstract result)) "concept A has children but no notSelectable property")))
 
   (testing "notSelectable concept has abstract=true"
     (let [result (protos/cs-lookup hier-fcs {:code "C"})]
-      (is (true? (get result "abstract")))))
+      (is (true? (:abstract result)))))
 
   (testing "leaf node has abstract=false"
     (let [result (protos/cs-lookup hier-fcs {:code "B"})]
-      (is (false? (get result "abstract")))))
+      (is (false? (:abstract result)))))
 
   (testing "returns parent/child properties from hierarchy"
     (let [result (protos/cs-lookup hier-fcs {:code "A1"})
-          props (get result "property")
+          props (:properties result)
           parent-props (filter #(= :parent (:code %)) props)]
       (is (= 1 (count parent-props)))
       (is (= :A (:value (first parent-props))))
-      (is (= "Concept A" (get (first parent-props) "description")))))
+      (is (= "Concept A" (:description (first parent-props))))))
 
   (testing "A has children A1 and A2"
     (let [result (protos/cs-lookup hier-fcs {:code "A"})
-          props (get result "property")
+          props (:properties result)
           child-props (filter #(= :child (:code %)) props)
           child-codes (set (map :value child-props))]
       (is (= #{:A1 :A2} child-codes))))
 
   (testing "returns designations"
     (let [result (protos/cs-lookup hier-fcs {:code "A"})
-          desigs (get result "designation")]
+          desigs (:designations result)]
       (is (= 1 (count desigs)))
-      (is (= "Konzept A" (get (first desigs) "value")))
-      (is (= :de (get (first desigs) "language")))))
+      (is (= "Konzept A" (:value (first desigs))))
+      (is (= :de (:language (first desigs))))))
 
   (testing "returns concept properties"
     (let [result (protos/cs-lookup hier-fcs {:code "B"})
-          props (get result "property")
+          props (:properties result)
           status-props (filter #(= :status (:code %)) props)]
       (is (= 1 (count status-props)))
       (is (= "active" (:value (first status-props))))))
 
   (testing "inactive property derived from status"
     (let [result (protos/cs-lookup hier-fcs {:code "A"})
-          props (get result "property")
+          props (:properties result)
           inactive-props (filter #(= :inactive (:code %)) props)]
       (is (= 1 (count inactive-props)))
       (is (false? (:value (first inactive-props))))))
@@ -124,35 +124,35 @@
 (deftest cs-validate-code-test
   (testing "valid code"
     (let [result (protos/cs-validate-code hier-fcs {:code "A"})]
-      (is (true? (get result "result")))
-      (is (= "Concept A" (get result "display")))
-      (is (nil? (get result "issues")))))
+      (is (true? (:result result)))
+      (is (= "Concept A" (:display result)))
+      (is (nil? (:issues result)))))
 
   (testing "unknown code"
     (let [result (protos/cs-validate-code hier-fcs {:code "NOPE"})]
-      (is (false? (get result "result")))
-      (is (some? (get result "message")))
-      (is (= "error" (:severity (first (get result "issues")))))
-      (is (= "invalid-code" (:details-code (first (get result "issues")))))))
+      (is (false? (:result result)))
+      (is (some? (:message result)))
+      (is (= "error" (:severity (first (:issues result)))))
+      (is (= "invalid-code" (:details-code (first (:issues result)))))))
 
   (testing "valid code with correct display"
     (let [result (protos/cs-validate-code hier-fcs {:code "A" :display "Concept A"})]
-      (is (true? (get result "result")))
-      (is (nil? (get result "issues")))))
+      (is (true? (:result result)))
+      (is (nil? (:issues result)))))
 
   (testing "valid code with wrong display"
     (let [result (protos/cs-validate-code hier-fcs {:code "A" :display "Wrong"})]
-      (is (false? (get result "result")))
-      (is (str/includes? (get result "message") "Wrong"))
-      (is (= "invalid-display" (:details-code (first (get result "issues")))))))
+      (is (false? (:result result)))
+      (is (str/includes? (:message result) "Wrong"))
+      (is (= "invalid-display" (:details-code (first (:issues result)))))))
 
   (testing "case-insensitive display matching"
     (let [result (protos/cs-validate-code hier-fcs {:code "A" :display "concept a"})]
-      (is (true? (get result "result")))))
+      (is (true? (:result result)))))
 
   (testing "display matches designation"
     (let [result (protos/cs-validate-code hier-fcs {:code "A" :display "Konzept A"})]
-      (is (true? (get result "result"))))))
+      (is (true? (:result result))))))
 
 ;; --- cs-subsumes ---
 
@@ -182,53 +182,56 @@
 
 (deftest vs-expand-test
   (testing "expand all"
-    (let [result (protos/vs-expand hier-fcs {:url "http://example.com/test-cs"})]
-      (is (= 6 (count result)))
-      (is (every? #(= "http://example.com/test-cs" (:system %)) result))))
+    (let [{:keys [concepts total used-codesystems]} (protos/vs-expand hier-fcs nil {:url "http://example.com/test-cs"})]
+      (is (= 6 (count concepts)))
+      (is (every? #(= "http://example.com/test-cs" (:system %)) concepts))
+      (is (= 6 total))
+      (is (seq used-codesystems))))
 
   (testing "abstract concept in expansion"
-    (let [result (protos/vs-expand hier-fcs {:url "http://example.com/test-cs"})
-          c-concept (first (filter #(= "C" (:code %)) result))]
+    (let [concepts (:concepts (protos/vs-expand hier-fcs nil {:url "http://example.com/test-cs"}))
+          c-concept (first (filter #(= "C" (:code %)) concepts))]
       (is (true? (:abstract c-concept)))))
 
   (testing "expand with filter"
-    (let [result (protos/vs-expand hier-fcs {:url "http://example.com/test-cs" :filter "A2"})]
-      (is (= 2 (count result)))
-      (is (every? #(str/includes? (:display %) "A2") result))))
+    (let [concepts (:concepts (protos/vs-expand hier-fcs nil {:url "http://example.com/test-cs" :filter "A2"}))]
+      (is (= 2 (count concepts)))
+      (is (every? #(str/includes? (:display %) "A2") concepts))))
 
   (testing "expand with filter matches designation"
-    (let [result (protos/vs-expand hier-fcs {:url "http://example.com/test-cs" :filter "Konzept"})]
-      (is (= 1 (count result)))
-      (is (= "A" (:code (first result))))))
+    (let [concepts (:concepts (protos/vs-expand hier-fcs nil {:url "http://example.com/test-cs" :filter "Konzept"}))]
+      (is (= 1 (count concepts)))
+      (is (= "A" (:code (first concepts))))))
 
   (testing "expand with offset and count"
-    (let [all (protos/vs-expand hier-fcs {:url "http://example.com/test-cs"})
-          paged (protos/vs-expand hier-fcs {:url "http://example.com/test-cs" :offset 1 :count 2})]
-      (is (= 2 (count paged)))
-      (is (= (take 2 (drop 1 all)) paged))))
+    (let [{all :concepts} (protos/vs-expand hier-fcs nil {:url "http://example.com/test-cs"})
+          {:keys [concepts total]} (protos/vs-expand hier-fcs nil {:url "http://example.com/test-cs" :offset 1 :count 2})]
+      (is (= 2 (count concepts)))
+      (is (= (take 2 (drop 1 all)) concepts))
+      (is (= 6 total))))
 
   (testing "flat expand"
-    (let [result (protos/vs-expand flat-fcs {:url "http://example.com/flat-cs"})]
-      (is (= 3 (count result))))))
+    (let [concepts (:concepts (protos/vs-expand flat-fcs nil {:url "http://example.com/flat-cs"}))]
+      (is (= 3 (count concepts))))))
 
 ;; --- vs-validate-code ---
 
 (deftest vs-validate-code-test
   (testing "code in system"
-    (let [result (protos/vs-validate-code hier-fcs {:code "A" :system "http://example.com/test-cs"})]
-      (is (true? (get result "result")))
-      (is (= "Concept A" (get result "display")))))
+    (let [result (protos/vs-validate-code hier-fcs nil {:code "A" :system "http://example.com/test-cs"})]
+      (is (true? (:result result)))
+      (is (= "Concept A" (:display result)))))
 
   (testing "code not in system"
-    (let [result (protos/vs-validate-code hier-fcs {:code "NOPE" :system "http://example.com/test-cs"})]
-      (is (false? (get result "result")))))
+    (let [result (protos/vs-validate-code hier-fcs nil {:code "NOPE" :system "http://example.com/test-cs"})]
+      (is (false? (:result result)))))
 
   (testing "wrong system returns nil"
-    (is (nil? (protos/vs-validate-code hier-fcs {:code "A" :system "http://other.com/cs"}))))
+    (is (nil? (protos/vs-validate-code hier-fcs nil {:code "A" :system "http://other.com/cs"}))))
 
   (testing "nil system checks against this code system"
-    (let [result (protos/vs-validate-code hier-fcs {:code "B"})]
-      (is (true? (get result "result"))))))
+    (let [result (protos/vs-validate-code hier-fcs nil {:code "B"})]
+      (is (true? (:result result))))))
 
 ;; --- cs-find-matches ---
 
@@ -299,13 +302,12 @@
 
 (deftest cs-resource-test
   (let [result (protos/cs-resource hier-fcs {})]
-    (is (= "http://example.com/test-cs" (get result "url")))
-    (is (= "1.0" (get result "version")))
-    (is (= "TestCodeSystem" (get result "name")))))
+    (is (= "http://example.com/test-cs" (:url result)))
+    (is (= "1.0" (:version result)))
+    (is (= "TestCodeSystem" (:name result)))))
 
 ;; --- vs-resource ---
 
 (deftest vs-resource-test
   (let [result (protos/vs-resource hier-fcs {})]
-    (is (= "ValueSet" (get result "resourceType")))
-    (is (= "http://example.com/test-cs" (get result "url")))))
+    (is (= "http://example.com/test-cs" (:url result)))))

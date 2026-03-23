@@ -32,7 +32,15 @@
                    entry {:code        code
                           :display     (get c "display")
                           :definition  (get c "definition")
-                          :designations (get c "designation")
+                          :designations (mapv (fn [d]
+                                               (let [use-map (get d "use")]
+                                                 (cond-> {:value (get d "value")}
+                                                   (get d "language") (assoc :language (keyword (get d "language")))
+                                                   use-map (assoc :use (cond-> {:system (get use-map "system")
+                                                                                     :code   (get use-map "code")}
+                                                                              (get use-map "display")
+                                                                              (assoc :display (get use-map "display")))))))
+                                             (get c "designation"))
                           :properties  (get c "property")
                           :parent-code parent-code}
                    children (get c "concept")]
@@ -170,7 +178,7 @@
         designations (:designations concept)]
     (or (and primary (= display-lower (str/lower-case primary)))
         (some (fn [d]
-                (when-let [v (get d "value")]
+                (when-let [v (:value d)]
                   (= display-lower (str/lower-case v))))
               designations))))
 
@@ -224,7 +232,14 @@
 (deftype FhirCodeSystem [url version metadata code-index hierarchy property-uri-map case-sensitive? ci-index]
   protos/CodeSystem
   (cs-resource [_ _params]
-    (assoc metadata "url" url "version" version))
+    {:url          url
+     :version      version
+     :name         (get metadata "name")
+     :title        (get metadata "title")
+     :status       (get metadata "status")
+     :experimental (get metadata "experimental")
+     :description  (get metadata "description")
+     :content      (get metadata "content")})
 
   (cs-lookup [_ {:keys [code]}]
     (when-let [[concept _] (if case-sensitive?
@@ -237,39 +252,32 @@
             props (:properties concept)
             inactive? (concept-inactive? concept)
             abstract? (concept-abstract? property-uri-map concept)]
-        {"name"        cs-name
-         "version"     version
-         "display"     (:display concept)
-         "system"      url
-         "code"        (keyword actual-code)
-         "definition"  (:definition concept)
-         "abstract"    abstract?
-         "property"    (concat
-                         [{:code :inactive :value (boolean inactive?)}]
-                         (when parents
-                           (map (fn [p] {:code :parent
-                                         :value (keyword p)
-                                         "description" (:display (get code-index p))})
-                                parents))
-                         (when children
-                           (map (fn [c] {:code :child
-                                         :value (keyword c)
-                                         "description" (:display (get code-index c))})
-                                children))
-                         (keep (fn [prop]
-                                 (let [pc (get prop "code")
-                                       v (extract-property-value prop)]
-                                   (when (and pc v (not (#{"parent" "child"} pc)))
-                                     {:code (keyword pc) :value v})))
-                               props))
-         "designation" (mapv (fn [d]
-                               (let [use-coding (get d "use")]
-                                 (cond-> {"value" (get d "value")}
-                                   (get d "language") (assoc "language" (keyword (get d "language")))
-                                   use-coding (assoc "use" {:system  (get use-coding "system")
-                                                            :code    (get use-coding "code")
-                                                            :display (get use-coding "display")}))))
-                             (:designations concept))})))
+        {:name        cs-name
+         :version     version
+         :display     (:display concept)
+         :system      url
+         :code        (keyword actual-code)
+         :definition  (:definition concept)
+         :abstract    abstract?
+         :properties  (concat
+                        [{:code :inactive :value (boolean inactive?)}]
+                        (when parents
+                          (map (fn [p] {:code :parent
+                                        :value (keyword p)
+                                        :description (:display (get code-index p))})
+                               parents))
+                        (when children
+                          (map (fn [c] {:code :child
+                                        :value (keyword c)
+                                        :description (:display (get code-index c))})
+                               children))
+                        (keep (fn [prop]
+                                (let [pc (get prop "code")
+                                      v (extract-property-value prop)]
+                                  (when (and pc v (not (#{"parent" "child"} pc)))
+                                    {:code (keyword pc) :value v})))
+                              props))
+         :designations (:designations concept)})))
 
   (cs-validate-code [_ {:keys [code display]}]
     (let [[concept case-differs?] (if case-sensitive?
@@ -278,14 +286,14 @@
       (if concept
         (let [inactive? (concept-inactive? concept)
               actual-code (:code concept)
-              result (cond-> {"result"  true
-                              "display" (:display concept)
-                              "code"    (keyword code)
-                              "system"  url
-                              "version" version}
-                       inactive? (assoc "inactive" true
-                                        "inactive-status" (concept-inactive-status concept))
-                       case-differs? (assoc "normalized-code" (keyword actual-code)))]
+              result (cond-> {:result  true
+                              :display (:display concept)
+                              :code    (keyword code)
+                              :system  url
+                              :version version}
+                       inactive? (assoc :inactive true
+                                        :inactive-status (concept-inactive-status concept))
+                       case-differs? (assoc :normalized-code (keyword actual-code)))]
           (let [case-issue (when case-differs?
                              {:severity     "information"
                               :type         "business-rule"
@@ -300,22 +308,22 @@
                                  :type         "invalid"
                                  :details-code "invalid-display"
                                  :text         (str "Display '" display "' not found for code '" code "'")
-                                 :expression   ["display"]})
+                                 :expression   ["Coding.display"]})
                 issues (filterv some? [case-issue display-issue])]
             (cond-> result
-              display-issue (assoc "result" false "message" (:text display-issue))
-              (seq issues) (assoc "issues" issues))))
+              display-issue (assoc :result false :message (:text display-issue))
+              (seq issues) (assoc :issues issues))))
         (let [msg (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'")]
-          {"result"  false
-           "code"    (keyword code)
-           "system"  url
-           "version" version
-           "message" msg
-           "issues"  [{:severity     "error"
-                       :type         "code-invalid"
-                       :details-code "invalid-code"
-                       :text         msg
-                       :expression   ["code"]}]}))))
+          {:result  false
+           :code    (keyword code)
+           :system  url
+           :version version
+           :message msg
+           :issues  [{:severity     "error"
+                      :type         "code-invalid"
+                      :details-code "invalid-code"
+                      :text         msg
+                      :expression   ["Coding.code"]}]}))))
 
   (cs-subsumes [_ {:keys [codeA codeB]}]
     {:outcome
@@ -338,8 +346,8 @@
       (map (fn [c]
              (let [display (or (when displayLanguage
                                  (some (fn [d]
-                                         (when (= (get d "language") displayLanguage)
-                                           (get d "value")))
+                                         (when (= (name (:language d)) displayLanguage)
+                                           (:value d)))
                                        (:designations c)))
                                (:display c))]
                (cond-> {:code    (:code c)
@@ -354,14 +362,13 @@
 
   protos/ValueSet
   (vs-resource [_ _params]
-    {"resourceType" "ValueSet"
-     "url"          url
-     "version"      version
-     "name"         (get metadata "name")
-     "title"        (get metadata "title")
-     "status"       (get metadata "status")})
+    {:url     url
+     :version version
+     :name    (get metadata "name")
+     :title   (get metadata "title")
+     :status  (get metadata "status")})
 
-  (vs-expand [_ {:keys [filter offset count displayLanguage]}]
+  (vs-expand [_ _ctx {:keys [filter offset count displayLanguage]}]
     (let [concepts (vals code-index)
           filtered (if (str/blank? filter)
                      concepts
@@ -370,65 +377,71 @@
                          (fn [c]
                            (or (and (:display c) (str/includes? (str/lower-case (:display c)) f))
                                (some (fn [d]
-                                       (when-let [v (get d "value")]
+                                       (when-let [v (:value d)]
                                          (str/includes? (str/lower-case v) f)))
                                      (:designations c))))
                          concepts)))
+          all-concepts (mapv (fn [c]
+                               (let [display (or (when displayLanguage
+                                                   (some (fn [d]
+                                                           (when (= (name (:language d)) displayLanguage)
+                                                             (:value d)))
+                                                         (:designations c)))
+                                                 (:display c))]
+                                 (cond-> {:code    (:code c)
+                                          :system  url
+                                          :version version
+                                          :display display}
+                                   (seq (:designations c)) (assoc :designations (:designations c))
+                                   (concept-inactive? c) (assoc :inactive true
+                                                                :inactive-status (concept-inactive-status c))
+                                   (concept-abstract? property-uri-map c) (assoc :abstract true))))
+                             filtered)
           offset' (or offset 0)
-          paged (cond->> filtered
+          paged (cond->> all-concepts
                   (pos? offset') (drop offset')
-                  count (take count))]
-      (map (fn [c]
-             (let [display (or (when displayLanguage
-                                 (some (fn [d]
-                                         (when (= (get d "language") displayLanguage)
-                                           (get d "value")))
-                                       (:designations c)))
-                               (:display c))]
-               (cond-> {:code    (:code c)
-                        :system  url
-                        :version version
-                        :display display
-                        :designations (:designations c)}
-                 (concept-inactive? c) (assoc :inactive true
-                                              :inactive-status (concept-inactive-status c))
-                 (concept-abstract? property-uri-map c) (assoc :abstract true))))
-           paged)))
+                  count (take count))
+          cs-uri (if version (str url "|" version) url)]
+      {:concepts         (vec paged)
+       :total            (clojure.core/count all-concepts)
+       :used-codesystems [{:uri    cs-uri
+                           :status (get metadata "status")}]
+       :compose-pins     []}))
 
-  (vs-validate-code [_ {:keys [code system display ctx]}]
+  (vs-validate-code [_ ctx {:keys [code system display]}]
     (when (or (nil? system) (= system url))
       (if-let [concept (get code-index code)]
         (let [inactive? (concept-inactive? concept)
               {:keys [lenient-display-validation]} (merge registry/default-request (:request ctx))
-              result (cond-> {"result"  true
-                              "display" (:display concept)
-                              "code"    (keyword code)
-                              "system"  url
-                              "version" version}
-                       inactive? (assoc "inactive" true
-                                        "inactive-status" (concept-inactive-status concept)))]
+              result (cond-> {:result  true
+                              :display (:display concept)
+                              :code    (keyword code)
+                              :system  url
+                              :version version}
+                       inactive? (assoc :inactive true
+                                        :inactive-status (concept-inactive-status concept)))]
           (if (and display (not (display-matches? concept display)))
             (let [lenient? lenient-display-validation
                   msg (str "Display '" display "' differs from preferred '" (:display concept) "'")]
-              (assoc result "result" (boolean lenient?)
-                            "message" msg
-                            "issues" [{:severity     (if lenient? "warning" "error")
-                                       :type         "invalid"
-                                       :details-code "invalid-display"
-                                       :text         msg
-                                       :expression   ["display"]}]))
+              (assoc result :result (boolean lenient?)
+                            :message msg
+                            :issues [{:severity     (if lenient? "warning" "error")
+                                      :type         "invalid"
+                                      :details-code "invalid-display"
+                                      :text         msg
+                                      :expression   ["display"]}]))
             result))
         (let [msg (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'")]
-          {"result"  false
-           "code"    (keyword code)
-           "system"  url
-           "version" version
-           "message" msg
-           "issues"  [{:severity     "error"
-                       :type         "code-invalid"
-                       :details-code "invalid-code"
-                       :text         msg
-                       :expression   ["code"]}]})))))
+          {:result  false
+           :code    (keyword code)
+           :system  url
+           :version version
+           :message msg
+           :issues  [{:severity     "error"
+                      :type         "code-invalid"
+                      :details-code "invalid-code"
+                      :text         msg
+                      :expression   ["Coding.code"]}]})))))
 
 (defn- build-property-uri-map
   "Build a {uri → concept-property-code} map from the CodeSystem's property definitions.

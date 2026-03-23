@@ -349,6 +349,142 @@
 (s/def ::run-args (s/keys :req-un [::snomed ::output-dir]
                           :opt-un [::update-baseline]))
 
+;; ---------------------------------------------------------------------------
+;; REPL testing with overlays
+;; ---------------------------------------------------------------------------
+
+(defn load-test-resources
+  "Load test resource files from the tx-ecosystem test data as Clojure maps.
+  Accepts either a suite name (loads all resources for that suite) or specific
+  file paths relative to the test data dir.
+
+  Usage:
+    (def resources (load-test-resources \"version\"))
+    (def resources (load-test-resources [\"version/codesystem-version-1.json\"
+                                         \"version/valueset-version-n.json\"]))"
+  [suite-or-files]
+  (let [base (io/file test-data-dir "tests")
+        files (if (string? suite-or-files)
+                (let [suite-dir (io/file base suite-or-files)]
+                  (->> (.listFiles suite-dir)
+                       (filter #(and (.isFile %)
+                                     (.endsWith (.getName %) ".json")
+                                     (not (.contains (.getName %) "request"))
+                                     (not (.contains (.getName %) "response"))
+                                     (not (.contains (.getName %) "test-cases"))))
+                       (sort-by #(.getName %))))
+                (map #(io/file base %) suite-or-files))]
+    (->> files
+         (keep (fn [f]
+                 (try
+                   (let [m (json/read-str (slurp f))]
+                     (when (#{"CodeSystem" "ValueSet" "ConceptMap"} (get m "resourceType"))
+                       m))
+                   (catch Exception _ nil))))
+         vec)))
+
+(defn make-test-ctx
+  "Build an overlay context from test resources for REPL testing.
+  Combines tx-resource overlays with optional request parameters.
+
+  Usage:
+    (def ctx (make-test-ctx (load-test-resources \"version\")
+                            {:system-version {\"http://...\" \"1.0.0\"}}))
+    (registry/valueset-validate-code ctx {:url ... :code ... :system ...})
+    (registry/valueset-expand ctx {:url ...})"
+  ([resources] (make-test-ctx resources nil))
+  ([resources request-params]
+   (let [overlay (server/build-tx-ctx resources)]
+     (assoc overlay :request (merge registry/default-request request-params)))))
+
+(defn- load-test-case-json
+  "Load a JSON file from the test data directory."
+  [path]
+  (let [f (io/file test-data-dir "tests" path)]
+    (when (.exists f)
+      (json/read-str (slurp f)))))
+
+(defn- find-test-case
+  "Find a test case definition by name. Returns {:test tc :suite suite-def}."
+  [test-name]
+  (let [test-cases (json/read-str (slurp (io/file test-data-dir "tests" "test-cases.json")))]
+    (some (fn [suite]
+            (some (fn [tc]
+                    (when (= test-name (get tc "name"))
+                      {:test tc :suite suite}))
+                  (get suite "tests")))
+          (get test-cases "suites"))))
+
+(defn replay-test
+  "Replay a conformance test by name, sending the exact request TxTester would
+  send (including all tx-resources) to the running server via HTTP. Returns a
+  map with :request, :expected, :actual, :status for comparison.
+
+  Usage:
+    (def r (replay-test \"coding-vbb-vsnn\"))
+    (:actual r)    ;; the server's actual response
+    (:expected r)  ;; the expected response
+    (:status r)    ;; HTTP status code"
+  [test-name]
+  (when-not (server-url)
+    (throw (ex-info "No server running. Call (start! path) first." {})))
+  (let [{:keys [test suite]} (find-test-case test-name)
+        _ (when-not test (throw (ex-info (str "Test case not found: " test-name) {})))
+        tc test
+        op (get tc "operation")
+        req-path (get tc "request")
+        resp-path (get tc "response")
+        profile-path (get tc "profile")
+        ;; Load resources from suite setup
+        setup-files (get suite "setup" [])
+        resources (vec (keep (fn [path]
+                               (let [m (load-test-case-json path)]
+                                 (when (#{"CodeSystem" "ValueSet" "ConceptMap"}
+                                        (get m "resourceType"))
+                                   m)))
+                             setup-files))
+        ;; Load request parameters
+        request-json (load-test-case-json req-path)
+        ;; Load profile (extra params merged into request)
+        profile-json (when profile-path (load-test-case-json profile-path))
+        ;; Merge profile params into request
+        merged-params (cond-> (vec (get request-json "parameter"))
+                        profile-json (into (get profile-json "parameter")))
+        ;; Add tx-resources
+        full-params (into merged-params
+                      (map (fn [r] {"name" "tx-resource" "resource" r}))
+                      resources)
+        full-request (assoc request-json "parameter" full-params)
+        ;; Determine endpoint
+        endpoint (case op
+                   "validate-code" (str (server-url) "/ValueSet/$validate-code")
+                   "expand" (str (server-url) "/ValueSet/$expand")
+                   "lookup" (str (server-url) "/CodeSystem/$lookup")
+                   (str (server-url) "/ValueSet/$" op))
+        ;; Send request
+        body-bytes (.getBytes ^String (json/write-str full-request) "UTF-8")
+        conn (doto ^java.net.HttpURLConnection
+                   (.openConnection (java.net.URL. endpoint))
+               (.setRequestMethod "POST")
+               (.setDoOutput true)
+               (.setRequestProperty "Content-Type" "application/fhir+json")
+               (.setRequestProperty "Accept" "application/fhir+json"))
+        _ (with-open [os (.getOutputStream conn)]
+            (.write os body-bytes))
+        status (.getResponseCode conn)
+        response-str (with-open [is (if (>= status 400)
+                                      (.getErrorStream conn)
+                                      (.getInputStream conn))]
+                       (slurp is))
+        actual (json/read-str response-str)
+        expected (load-test-case-json resp-path)]
+    {:test-name test-name
+     :operation op
+     :status status
+     :request (dissoc (assoc request-json "parameter" merged-params) "parameter")
+     :actual actual
+     :expected expected}))
+
 (defn run
   "Run conformance tests. Intended as an exec-fn for clj -X:conformance.
 

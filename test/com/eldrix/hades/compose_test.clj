@@ -46,26 +46,27 @@
 (deftest expand-compose-include-all-test
   (testing "include all concepts from a system"
     (let [compose {"include" [{"system" "http://example.com/cs"}]}
-          result (compose/expand-compose nil compose {})]
-      (is (= 5 (count result)))
-      (is (every? #(= "http://example.com/cs" (:system %)) result)))))
+          {:keys [concepts total used-codesystems]} (compose/expand-compose nil compose {})]
+      (is (= 5 (count concepts)))
+      (is (every? #(= "http://example.com/cs" (:system %)) concepts))
+      (is (= 5 total))
+      (is (seq used-codesystems)))))
 
 (deftest expand-compose-include-concepts-test
   (testing "include explicit concept list"
     (let [compose {"include" [{"system" "http://example.com/cs"
                                "concept" [{"code" "A" "display" "My Alpha"}
                                           {"code" "B"}]}]}
-          result (compose/expand-compose nil compose {})]
-      (is (= 2 (count result)))
-      (is (= "My Alpha" (:display (first (filter #(= "A" (:code %)) result)))))
-      (is (= "Beta" (:display (first (filter #(= "B" (:code %)) result))))))))
+          concepts (:concepts (compose/expand-compose nil compose {}))]
+      (is (= 2 (count concepts)))
+      (is (= "My Alpha" (:display (first (filter #(= "A" (:code %)) concepts)))))
+      (is (= "Beta" (:display (first (filter #(= "B" (:code %)) concepts))))))))
 
 (deftest expand-compose-include-filter-is-a-test
   (testing "include with is-a filter"
     (let [compose {"include" [{"system" "http://example.com/cs"
                                "filter" [{"property" "concept" "op" "is-a" "value" "A"}]}]}
-          result (compose/expand-compose nil compose {})
-          codes (set (map :code result))]
+          codes (set (map :code (:concepts (compose/expand-compose nil compose {}))))]
       (is (contains? codes "A"))
       (is (contains? codes "A1"))
       (is (contains? codes "A2"))
@@ -76,31 +77,32 @@
     (let [compose {"include" [{"system" "http://example.com/cs"}]
                    "exclude" [{"system" "http://example.com/cs"
                                "concept" [{"code" "B"}]}]}
-          result (compose/expand-compose nil compose {})
-          codes (set (map :code result))]
-      (is (= 4 (count result)))
+          concepts (:concepts (compose/expand-compose nil compose {}))
+          codes (set (map :code concepts))]
+      (is (= 4 (count concepts)))
       (is (not (contains? codes "B"))))))
 
 (deftest expand-compose-filter-text-test
   (testing "post-expansion text filter"
     (let [compose {"include" [{"system" "http://example.com/cs"}]}
-          result (compose/expand-compose nil compose {:filter "alpha"})]
-      (is (= 3 (count result)))
-      (is (every? #(re-find #"(?i)alpha" (or (:display %) "")) result)))))
+          concepts (:concepts (compose/expand-compose nil compose {:filter "alpha"}))]
+      (is (= 3 (count concepts)))
+      (is (every? #(re-find #"(?i)alpha" (or (:display %) "")) concepts)))))
 
 (deftest expand-compose-pagination-test
   (testing "offset and count"
     (let [compose {"include" [{"system" "http://example.com/cs"}]}
-          all (compose/expand-compose nil compose {})
-          paged (compose/expand-compose nil compose {:offset 1 :count 2})]
-      (is (= 2 (count paged)))
-      (is (= (take 2 (drop 1 all)) paged)))))
+          {all :concepts} (compose/expand-compose nil compose {})
+          {:keys [concepts total]} (compose/expand-compose nil compose {:offset 1 :count 2})]
+      (is (= 2 (count concepts)))
+      (is (= (take 2 (drop 1 all)) concepts))
+      (is (= 5 total)))))
 
 (deftest expand-compose-valueset-ref-test
   (testing "include via valueSet reference"
     (let [compose {"include" [{"valueSet" ["http://example.com/cs"]}]}
-          result (compose/expand-compose nil compose {})]
-      (is (= 5 (count result))))))
+          concepts (:concepts (compose/expand-compose nil compose {}))]
+      (is (= 5 (count concepts))))))
 
 (deftest expand-compose-circular-ref-test
   (testing "circular reference detection"
@@ -111,67 +113,68 @@
 (deftest expand-compose-include-version-test
   (testing "include with version selects versioned CodeSystem"
     (let [compose {"include" [{"system" "http://example.com/cs" "version" "2.0"}]}
-          result (compose/expand-compose nil compose {})]
-      (is (= 2 (count result)))
-      (is (some #(= "D" (:code %)) result))
-      (is (not (some #(= "B" (:code %)) result)))))
+          {:keys [concepts compose-pins]} (compose/expand-compose nil compose {})]
+      (is (= 2 (count concepts)))
+      (is (some #(= "D" (:code %)) concepts))
+      (is (not (some #(= "B" (:code %)) concepts)))
+      (is (= [{:system "http://example.com/cs" :version "2.0"}] compose-pins))))
   (testing "include with version passes version to concept lookup"
     (let [compose {"include" [{"system" "http://example.com/cs" "version" "2.0"
                                "concept" [{"code" "A"}]}]}
-          result (compose/expand-compose nil compose {})]
-      (is (= 1 (count result)))
-      (is (= "Alpha v2" (:display (first result))))))
+          concepts (:concepts (compose/expand-compose nil compose {}))]
+      (is (= 1 (count concepts)))
+      (is (= "Alpha v2" (:display (first concepts))))))
   (testing "include with version on filters"
     (let [compose {"include" [{"system" "http://example.com/cs" "version" "2.0"
                                "filter" [{"property" "code" "op" "=" "value" "D"}]}]}
-          result (compose/expand-compose nil compose {})]
-      (is (= 1 (count result)))
-      (is (= "D" (:code (first result)))))))
+          concepts (:concepts (compose/expand-compose nil compose {}))]
+      (is (= 1 (count concepts)))
+      (is (= "D" (:code (first concepts)))))))
 
 (deftest expand-compose-force-system-version-test
   (testing "force-system-version overrides include version"
     (let [ctx {:request {:force-system-version {"http://example.com/cs" "2.0"}}}
           compose {"include" [{"system" "http://example.com/cs" "version" "1.0"}]}
-          result (compose/expand-compose ctx compose {})]
-      (is (= 2 (count result)))
-      (is (some #(= "D" (:code %)) result))
-      (is (not (some #(= "B" (:code %)) result)))))
+          concepts (:concepts (compose/expand-compose ctx compose {}))]
+      (is (= 2 (count concepts)))
+      (is (some #(= "D" (:code %)) concepts))
+      (is (not (some #(= "B" (:code %)) concepts)))))
   (testing "force-system-version applies when no include version"
     (let [ctx {:request {:force-system-version {"http://example.com/cs" "2.0"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
-          result (compose/expand-compose ctx compose {})]
-      (is (= 2 (count result)))
-      (is (some #(= "D" (:code %)) result)))))
+          concepts (:concepts (compose/expand-compose ctx compose {}))]
+      (is (= 2 (count concepts)))
+      (is (some #(= "D" (:code %)) concepts)))))
 
 (deftest expand-compose-system-version-default-test
   (testing "system-version provides default when no include version"
     (let [ctx {:request {:system-version {"http://example.com/cs" "2.0"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
-          result (compose/expand-compose ctx compose {})]
-      (is (= 2 (count result)))
-      (is (some #(= "D" (:code %)) result)))))
+          concepts (:concepts (compose/expand-compose ctx compose {}))]
+      (is (= 2 (count concepts)))
+      (is (some #(= "D" (:code %)) concepts)))))
 
 (deftest expand-compose-system-version-no-override-test
   (testing "system-version does NOT override include version"
     (let [ctx {:request {:system-version {"http://example.com/cs" "2.0"}}}
           compose {"include" [{"system" "http://example.com/cs" "version" "1.0"}]}
-          result (compose/expand-compose ctx compose {})]
-      (is (= 5 (count result)))
-      (is (some #(= "B" (:code %)) result)))))
+          concepts (:concepts (compose/expand-compose ctx compose {}))]
+      (is (= 5 (count concepts)))
+      (is (some #(= "B" (:code %)) concepts)))))
 
 (deftest expand-compose-check-system-version-test
   (testing "check-system-version passes when version matches"
     (let [ctx {:request {:check-system-version {"http://example.com/cs" "1.0"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
-          result (compose/expand-compose ctx compose {})]
-      (is (= 5 (count result)))))
+          concepts (:concepts (compose/expand-compose ctx compose {}))]
+      (is (= 5 (count concepts)))))
   (testing "check-system-version passes with wildcard"
     (let [ctx {:request {:check-system-version {"http://example.com/cs" "1.x"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
-          result (compose/expand-compose ctx compose {})]
-      (is (= 5 (count result)))))
+          concepts (:concepts (compose/expand-compose ctx compose {}))]
+      (is (= 5 (count concepts)))))
   (testing "check-system-version with non-existent version returns no results"
     (let [ctx {:request {:check-system-version {"http://example.com/cs" "3.0"}}}
           compose {"include" [{"system" "http://example.com/cs"}]}
-          result (compose/expand-compose ctx compose {})]
-      (is (zero? (count result))))))
+          concepts (:concepts (compose/expand-compose ctx compose {}))]
+      (is (zero? (count concepts))))))

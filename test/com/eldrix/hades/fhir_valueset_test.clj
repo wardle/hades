@@ -1,9 +1,14 @@
 (ns com.eldrix.hades.fhir-valueset-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.spec.test.alpha :as stest]
+            [clojure.string]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.fhir-codesystem :as fhir-cs]
             [com.eldrix.hades.fhir-valueset :as fhir-vs]
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.registry :as registry]))
+
+(stest/instrument (filter #(clojure.string/starts-with? (namespace %) "com.eldrix.hades")
+                          (stest/instrumentable-syms)))
 
 (def test-cs-map
   {"resourceType" "CodeSystem"
@@ -40,31 +45,33 @@
     (is (some? fvs))
     (testing "vs-resource returns metadata"
       (let [res (protos/vs-resource fvs {})]
-        (is (= "http://example.com/vs" (get res "url")))
-        (is (= "1.0" (get res "version")))))))
+        (is (= "http://example.com/vs" (:url res)))
+        (is (= "1.0" (:version res)))))))
 
 (deftest vs-expand-test
   (let [fvs (fhir-vs/make-fhir-value-set test-vs-map)]
     (testing "expand returns included concepts"
-      (let [result (protos/vs-expand fvs {})]
-        (is (= 2 (count result)))
-        (let [codes (set (map :code result))]
+      (let [{:keys [concepts total used-codesystems]} (protos/vs-expand fvs nil {})]
+        (is (= 2 (count concepts)))
+        (let [codes (set (map :code concepts))]
           (is (contains? codes "X"))
           (is (contains? codes "Y"))
-          (is (not (contains? codes "Z"))))))))
+          (is (not (contains? codes "Z"))))
+        (is (= 2 total))
+        (is (seq used-codesystems))))))
 
 (deftest vs-validate-code-test
   (let [fvs (fhir-vs/make-fhir-value-set test-vs-map)]
     (testing "code in value set"
-      (let [result (protos/vs-validate-code fvs {:code "X" :system "http://example.com/cs"})]
-        (is (true? (get result "result")))
-        (is (= "X-ray" (get result "display")))))
+      (let [result (protos/vs-validate-code fvs nil {:code "X" :system "http://example.com/cs"})]
+        (is (true? (:result result)))
+        (is (= "X-ray" (:display result)))))
 
     (testing "code not in value set"
-      (let [result (protos/vs-validate-code fvs {:code "Z" :system "http://example.com/cs"})]
-        (is (false? (get result "result")))))
+      (let [result (protos/vs-validate-code fvs nil {:code "Z" :system "http://example.com/cs"})]
+        (is (false? (:result result)))))
 
     (testing "display mismatch"
-      (let [result (protos/vs-validate-code fvs {:code "X" :system "http://example.com/cs" :display "Wrong"})]
-        (is (true? (get result "result")))
-        (is (some? (get result "message")))))))
+      (let [result (protos/vs-validate-code fvs nil {:code "X" :system "http://example.com/cs" :display "Wrong"})]
+        (is (true? (:result result)))
+        (is (some? (:message result)))))))
