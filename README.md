@@ -356,3 +356,7 @@ and recombined as needed. Otherwise, developers solving problems need to coordin
 in order to ensure the value sets and reference data they need are available. The exact choice will be 
 determined by the problem-at-hand. Decompose, make them available both as raw data and discrete computing services
 that makes using them easy, and then let others compose them together to suit their needs.
+
+## Links
+
+[![Hypercommit](https://img.shields.io/badge/Hypercommit-DB2475)](https://hypercommit.com/hades)
