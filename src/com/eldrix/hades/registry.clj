@@ -278,6 +278,7 @@
                      :code    (when code (keyword code))
                      :system  system
                      :message msg
+                     :x-unknown-system system
                      :issues  [{:severity     "error"
                                 :type         "not-found"
                                 :details-code "not-found"

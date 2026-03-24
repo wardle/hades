@@ -191,7 +191,8 @@
   "Convert a ::protos/validate-result to HAPI Parameters."
   ^Parameters [{:keys [result code system version display message
                         inactive normalized-code issues
-                        x-caused-by-unknown-system codeableConcept]}]
+                        x-caused-by-unknown-system x-unknown-system
+                        codeableConcept]}]
   (let [params (Parameters.)]
     (add-param params "result" result)
     (when code (add-param params "code" code))
@@ -204,6 +205,8 @@
     (when (seq issues) (add-param params "issues" (build-operation-outcome issues)))
     (when x-caused-by-unknown-system
       (add-canonical-param params "x-caused-by-unknown-system" x-caused-by-unknown-system))
+    (when x-unknown-system
+      (add-canonical-param params "x-unknown-system" x-unknown-system))
     (when codeableConcept (add-param params "codeableConcept" codeableConcept))
     params))
 

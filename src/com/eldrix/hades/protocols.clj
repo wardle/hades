@@ -64,11 +64,14 @@
 (s/def ::inactive-status (s/nilable #{"inactive" "retired" "deprecated"}))
 (s/def ::normalized-code (s/or :string string? :keyword keyword?))
 (s/def ::message string?)
+(s/def ::x-unknown-system (s/nilable string?))
+(s/def ::x-caused-by-unknown-system (s/nilable string?))
 (s/def ::validate-result
   (s/and (s/keys :req-un [::result]
                  :opt-un [::system ::version ::display
                           ::inactive ::inactive-status ::normalized-code
-                          ::message ::issues])
+                          ::message ::issues
+                          ::x-unknown-system ::x-caused-by-unknown-system])
          ;; :code in results is keyword (migration: will become string)
          #(or (nil? (:code %)) (s/valid? ::code-or-kw (:code %)))))
 

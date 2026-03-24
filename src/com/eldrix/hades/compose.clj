@@ -112,17 +112,26 @@
                                           :displayLanguage (:displayLanguage params)}))
 
 (defn- expand-valueset-refs
-  "Expand referenced ValueSets, checking for circular references."
+  "Expand referenced ValueSets, checking for circular references.
+  Returns {:concepts [...] :issues [...]} — issues are populated when a
+  referenced VS cannot be found (a predictable state, not an exception)."
   [ctx valueset-urls expanding]
-  (mapcat (fn [vs-url]
+  (reduce (fn [acc vs-url]
             (when (contains? expanding vs-url)
-              (throw (ex-info (str "Circular ValueSet reference: " vs-url) {:type :processing :details-code "vs-invalid" :url vs-url})))
-            (let [result (registry/valueset-expand ctx {:url vs-url :expanding expanding})]
-              (or (:concepts result) [])))
+              (throw (ex-info (str "Circular ValueSet reference: " vs-url)
+                              {:type :processing :details-code "vs-invalid" :url vs-url})))
+            (if-let [result (registry/valueset-expand ctx {:url vs-url :expanding expanding})]
+              (update acc :concepts into (or (:concepts result) []))
+              (let [msg (str "A definition for the value Set '" vs-url "' could not be found")]
+                (update acc :issues conj
+                         {:severity "error" :type "not-found"
+                          :details-code "not-found" :text msg}))))
+          {:concepts [] :issues []}
           valueset-urls))
 
 (defn- expand-include
-  "Expand a single include element from a compose definition."
+  "Expand a single include element from a compose definition.
+  Returns {:concepts [...] :issues [...]}."
   [ctx include params]
   (let [system (get include "system")
         include-version (get include "version")
@@ -137,12 +146,15 @@
                          filters (expand-include-filters ctx system version filters params)
                          system (expand-include-all ctx system version params)
                          :else nil)
-        vs-results (when (seq vs-urls)
-                     (expand-valueset-refs ctx vs-urls expanding))]
-    (if (and (some? system-results) (seq vs-results))
-      (let [vs-set (set (map (fn [c] [(:system c) (:code c)]) vs-results))]
-        (filter (fn [c] (contains? vs-set [(:system c) (:code c)])) system-results))
-      (concat system-results vs-results))))
+        vs-ref (when (seq vs-urls)
+                 (expand-valueset-refs ctx vs-urls expanding))
+        vs-concepts (:concepts vs-ref)
+        vs-issues (:issues vs-ref)]
+    {:issues (vec vs-issues)
+     :concepts (if (and (some? system-results) (seq vs-concepts))
+                 (let [vs-set (set (map (fn [c] [(:system c) (:code c)]) vs-concepts))]
+                   (filter (fn [c] (contains? vs-set [(:system c) (:code c)])) system-results))
+                 (concat system-results vs-concepts))}))
 
 (defn- concept-key [c]
   [(:system c) (:code c)])
@@ -204,11 +216,13 @@
         includes (get compose "include")
         excludes (get compose "exclude")
         inactive-allowed (get compose "inactive" true)
+        include-results (mapv #(expand-include ctx % params) includes)
+        include-issues (vec (mapcat :issues include-results))
         included (into {} (map (fn [c] [(concept-key c) c]))
-                        (mapcat #(expand-include ctx % params) includes))
+                        (mapcat :concepts include-results))
         excluded (when (seq excludes)
-                   (set (map concept-key
-                             (mapcat #(expand-include ctx % params) excludes))))
+                   (let [exclude-results (mapv #(expand-include ctx % params) excludes)]
+                     (set (map concept-key (mapcat :concepts exclude-results)))))
         after-exclude (if excluded
                         (remove (fn [[k _]] (contains? excluded k)) included)
                         included)
@@ -230,7 +244,8 @@
         paged (cond->> all-concepts
                 (pos? offset') (drop offset')
                 (:count params) (take (:count params)))]
-    {:concepts         (vec paged)
-     :total            (count all-concepts)
-     :used-codesystems (collect-used-codesystems ctx (vec paged))
-     :compose-pins     (extract-compose-pins compose)}))
+    (cond-> {:concepts         (vec paged)
+              :total            (count all-concepts)
+              :used-codesystems (collect-used-codesystems ctx (vec paged))
+              :compose-pins     (extract-compose-pins compose)}
+      (seq include-issues) (assoc :issues include-issues))))

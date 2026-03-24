@@ -151,12 +151,26 @@
       (compose/expand-compose ctx compose-def (assoc params :expanding expanding))))
 
   (vs-validate-code [_ ctx params]
-    (let [
-          expanding (conj (or (:expanding params) #{}) url)
-          expanded (:concepts (compose/expand-compose ctx compose-def {:expanding expanding}))
+    (let [expanding (conj (or (:expanding params) #{}) url)
+          compose-result (compose/expand-compose ctx compose-def {:expanding expanding})
+          compose-issues (:issues compose-result)
+          expanded (:concepts compose-result)
           {:keys [code system display]} params
-          caller-version (:version params)
-          match (or (some (fn [c]
+          caller-version (:version params)]
+      (if (some #(= "not-found" (:details-code %)) compose-issues)
+        (let [issue (first (filter #(= "not-found" (:details-code %)) compose-issues))
+              cs-result (when system
+                          (registry/codesystem-validate-code ctx {:system system :code code}))]
+          (cond-> {:result  false
+                   :code    (when code (keyword code))
+                   :system  system
+                   :message (:text issue)
+                   :issues  compose-issues}
+            (and cs-result (:result cs-result) (:display cs-result))
+            (assoc :display (:display cs-result))
+            (and cs-result (:version cs-result))
+            (assoc :version (:version cs-result))))
+        (let [match (or (some (fn [c]
                           (and (= code (:code c))
                                (or (nil? system) (= system (:system c)))
                                c))
@@ -276,19 +290,21 @@
                                  (str not-in-vs-msg "; " (:text cs-issue))
                                  not-in-vs-msg)
                   cs-display (when (and cs-result (:result cs-result)) (:display cs-result))
-                  cs-version (when cs-result (:version cs-result))]
+                  cs-version (when cs-result (:version cs-result))
+                  cs-unknown-sys (:x-unknown-system cs-result)]
               (-> (cond-> {:result  false
                            :code    (keyword code)
                            :system  system
                            :message combined-msg
                            :issues  all-issues}
+                    cs-unknown-sys (assoc :x-unknown-system cs-unknown-sys)
                     cs-display (assoc :display cs-display)
                     cs-version (assoc :version cs-version))
               (add-version-mismatch caller-version match-ver system override-pattern include-ver force? ctx)
               (add-unknown-version-issue ctx system caller-version)
               (add-check-system-version-issue ctx system match-ver)
               (registry/add-cs-status-warnings ctx system)
-              (registry/add-vs-status-warnings ctx url)))))))))
+              (registry/add-vs-status-warnings ctx url)))))))))))
 
 (s/fdef make-fhir-value-set
   :args (s/cat :vs-map map?))
