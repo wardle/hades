@@ -50,6 +50,7 @@
     "not-supported" OperationOutcome$IssueType/NOTSUPPORTED
     "business-rule" OperationOutcome$IssueType/BUSINESSRULE
     "exception"     OperationOutcome$IssueType/EXCEPTION
+    "informational" OperationOutcome$IssueType/INFORMATIONAL
     OperationOutcome$IssueType/PROCESSING))
 
 (defn- build-issue-component
@@ -194,20 +195,20 @@
                         x-caused-by-unknown-system x-unknown-system
                         codeableConcept]}]
   (let [params (Parameters.)]
-    (add-param params "result" result)
     (when code (add-param params "code" code))
+    (when codeableConcept (add-param params "codeableConcept" codeableConcept))
+    (when display (add-param params "display" display))
+    (when inactive (add-param params "inactive" inactive))
+    (when (seq issues) (add-param params "issues" (build-operation-outcome issues)))
+    (when message (add-param params "message" message))
+    (when normalized-code (add-param params "normalized-code" normalized-code))
+    (add-param params "result" result)
     (when system (add-uri-param params "system" system))
     (when version (add-param params "version" version))
-    (when display (add-param params "display" display))
-    (when normalized-code (add-param params "normalized-code" normalized-code))
-    (when inactive (add-param params "inactive" inactive))
-    (when message (add-param params "message" message))
-    (when (seq issues) (add-param params "issues" (build-operation-outcome issues)))
     (when x-caused-by-unknown-system
       (add-canonical-param params "x-caused-by-unknown-system" x-caused-by-unknown-system))
     (when x-unknown-system
       (add-canonical-param params "x-unknown-system" x-unknown-system))
-    (when codeableConcept (add-param params "codeableConcept" codeableConcept))
     params))
 
 (defn lookup-result->parameters

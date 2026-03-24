@@ -103,12 +103,17 @@
   (cs-lookup
     [_ {:keys [code displayLanguage]}]
     (if (expression? code)
-      (when-let [rendered (try (hermes/render-expression svc code) (catch Exception _ nil))]
-        {:name    "SNOMED CT"
-         :version (version-uri svc)
-         :display rendered
-         :system  snomed-system-uri
-         :code    (keyword code)})
+      (let [lang-ids (hermes/match-locale svc displayLanguage true)
+            rendered (try (hermes/render-expression* svc code
+                            {:terms :update :definition-status :auto
+                             :language-refset-ids lang-ids})
+                          (catch Exception _ nil))]
+        (when rendered
+          {:name    "SNOMED CT"
+           :version (version-uri svc)
+           :display rendered
+           :system  snomed-system-uri
+           :code    (keyword code)}))
       (when-let [code' (parse-long code)]
         (when-let [ec (hermes/extended-concept svc code')]
           (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
@@ -157,10 +162,19 @@
   (cs-validate-code [_ {:keys [code display displayLanguage]}]
     (let [ver (version-uri svc)]
       (if (expression? code)
-        ;; Post-coordinated expression validation
-        (let [errors (hermes/validate-expression svc code)
-              rendered (try (hermes/render-expression svc code) (catch Exception _ nil))]
-          (if (seq errors)
+        ;; Post-coordinated expression: full validation including MRCM
+        ;; Structural errors (concept-not-found, attribute-invalid) → result: false
+        ;; MRCM constraint issues (attribute-not-in-domain, value-out-of-range) → result: true, informational
+        (let [all-errors (hermes/validate-expression svc code)
+              structural-types #{:concept-not-found :concept-inactive :attribute-invalid :syntax-error}
+              structural (filter #(structural-types (:error %)) all-errors)
+              mrcm-issues (remove #(structural-types (:error %)) all-errors)
+              lang-ids (hermes/match-locale svc displayLanguage true)
+              rendered (try (hermes/render-expression* svc code
+                              {:terms :update :definition-status :auto
+                               :language-refset-ids lang-ids})
+                            (catch Exception _ nil))]
+          (if (seq structural)
             (let [msg (str "Unknown code '" code "' in the CodeSystem '" snomed-system-uri "' version '" ver "'")]
               {:result  false
                :code    (keyword code)
@@ -168,19 +182,32 @@
                :version ver
                :message msg
                :issues  (into [{:severity "error" :type "code-invalid" :details-code "invalid-code"
-                                :text     msg :expression ["code"]}]
-                              (map (fn [e] {:severity     "information" :type "code-invalid"
-                                            :details-code "invalid-code" :text (str "Not a valid expression: " e)
-                                            :expression   ["code"]}))
-                              errors)})
+                                :text msg :expression ["code"]}]
+                              (map (fn [e]
+                                     (let [detail (case (:error e)
+                                                    :attribute-invalid
+                                                    (str "Concept " (:concept-id e)
+                                                         " is not valid in this context (must be a descendent of one of 410662002,106237007)")
+                                                    (:message e))]
+                                       {:severity "information" :type "code-invalid"
+                                        :details-code "invalid-code"
+                                        :text (str "Not a valid expression: " detail)
+                                        :expression ["code"]})))
+                              structural)})
             {:result  true
              :code    (keyword code)
              :system  snomed-system-uri
              :version ver
              :display (or rendered code)
-             :issues  [{:severity   "information" :type "informational" :details-code "process-note"
-                        :text       "The expression is grammatically correct and the concepts are valid, but the expression has not been checked against the SNOMED CT concept model (MRCM)"
-                        :expression ["code"]}]}))
+             :issues  (if (seq mrcm-issues)
+                        (mapv (fn [e] {:severity "information" :type "informational"
+                                       :details-code "process-note"
+                                       :text (str "MRCM: " (:message e))
+                                       :expression ["code"]})
+                              mrcm-issues)
+                        [{:severity "information" :type "informational" :details-code "process-note"
+                          :text "The expression is grammatically correct and the concepts are valid"
+                          :expression ["code"]}])}))
         ;; Simple concept code validation
         (when-let [code' (parse-long code)]
           (if-let [concept (hermes/concept svc code')]
@@ -273,9 +300,10 @@
            :compose-pins     []}))))
   (vs-validate-code [_ _ctx {:keys [url code system display displayLanguage]}]
     (when (= system snomed-system-uri)
-      (when-let [code' (parse-long code)]
-        (let [ver (version-uri svc)
-              {:keys [ecl error message]} (parse-implicit-value-set url)]
+      (let [code' (parse-long code)
+            ver (version-uri svc)
+            {:keys [ecl error message]} (parse-implicit-value-set url)]
+        (when (or code' (expression? code))
           (cond
             error
             {:result  false :code (keyword code) :system system
@@ -285,8 +313,14 @@
 
             ecl
             (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
-                  preferred (:term (hermes/preferred-synonym* svc code' lang-refset-ids))
-                  member? (seq (hermes/intersect-ecl svc [code'] ecl))]
+                  ;; For expressions, check focus concept against ECL; for simple codes, check directly
+                  focus-id (if code'
+                             code'
+                             (some-> (try (hermes/parse-expression svc code) (catch Exception _ nil))
+                                     (get-in [:subExpression :focusConcepts])
+                                     first :conceptId))
+                  preferred (when focus-id (:term (hermes/preferred-synonym* svc focus-id lang-refset-ids)))
+                  member? (when focus-id (seq (hermes/intersect-ecl svc [focus-id] ecl)))]
               (if member?
                 (let [result {:result true :display preferred :code (keyword code)
                               :system system :version ver}]

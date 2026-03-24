@@ -43,7 +43,7 @@
 ;; Note: :type uses a namespaced spec to avoid clashing with clojure.core/type.
 (s/def ::severity #{"fatal" "error" "warning" "information"})
 (s/def ::type #{"code-invalid" "invalid" "not-found" "not-supported"
-                 "business-rule" "exception" "processing"})
+                 "business-rule" "exception" "processing" "informational"})
 (s/def ::details-code string?)
 (s/def ::text string?)
 (s/def ::expression (s/coll-of string?))
