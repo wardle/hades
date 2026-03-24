@@ -9,7 +9,7 @@
            ca.uhn.hapi.fhir/hapi-fhir-server        {:mvn/version "8.0.0"}
            ca.uhn.hapi.fhir/hapi-fhir-structures-r4 {:mvn/version "8.0.0"}
 
-           com.eldrix/hermes                        {:mvn/version "1.4.1454"}
+           com.eldrix/hermes                        {:mvn/version "1.4.1540"}
            io.pedestal/pedestal.jetty               {:mvn/version "0.7.2"}
            lambdaisland/uri                         {:mvn/version "1.19.155"}}
 
