@@ -3,6 +3,7 @@
             [clojure.java.io :as io]
             [clojure.set]
             [clojure.spec.alpha :as s]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [com.eldrix.hades.registry :as registry]
             [com.eldrix.hades.server :as server]
@@ -22,6 +23,9 @@
 
 (def ^:private test-data-dir ".hades/tx-ecosystem")
 (def ^:private test-data-repo "https://github.com/HL7/fhir-tx-ecosystem-ig.git")
+(def ^:private snomed-rf2-dir ".hades/tx-ecosystem/tx-source/snomed")
+(def ^:private snomed-db-default ".hades/snomed-conformance.db")
+(def ^:private snomed-rev-path ".hades/snomed-conformance.rev")
 (def ^:private baseline-path "test/resources/conformance-baseline.json")
 (def ^:private results-dir "test/resources/conformance")
 (def ^:private externals-path "resources/messages-hades.json")
@@ -51,6 +55,41 @@
                           {:repo test-data-repo :path test-data-dir})))))
     test-data-dir))
 
+(defn- tx-ecosystem-rev
+  "Return the current HEAD commit hash of the tx-ecosystem clone, or nil."
+  []
+  (let [git-dir (io/file test-data-dir ".git")]
+    (when (.exists git-dir)
+      (let [pb (ProcessBuilder. ["git" "rev-parse" "HEAD"])
+            _ (.directory pb (io/file test-data-dir))
+            process (.start pb)
+            rev (-> (.getInputStream process) slurp str/trim)]
+        (when (zero? (.waitFor process))
+          rev)))))
+
+(defn build-snomed-db!
+  "Build the SNOMED conformance database from the tx-ecosystem RF2 subset.
+  Rebuilds if the database is missing or the tx-ecosystem repo has been updated."
+  []
+  (ensure-test-data!)
+  (let [db-file (io/file snomed-db-default)
+        rev-file (io/file snomed-rev-path)
+        current-rev (tx-ecosystem-rev)
+        cached-rev (when (.exists rev-file) (str/trim (slurp rev-file)))
+        stale? (or (not (.exists db-file))
+                   (not= current-rev cached-rev))]
+    (when stale?
+      (when (.exists db-file)
+        (log/info "SNOMED subset has changed, rebuilding conformance database")
+        (run! io/delete-file (reverse (file-seq db-file))))
+      (log/info "Building SNOMED conformance database from test subset")
+      (hermes/import-snomed (str db-file) [snomed-rf2-dir])
+      (hermes/index (str db-file))
+      (hermes/compact (str db-file))
+      (spit rev-file current-rev)
+      (log/info "SNOMED conformance database ready" {:path (str db-file)}))
+    (str db-file)))
+
 ;; ---------------------------------------------------------------------------
 ;; Server lifecycle
 ;; ---------------------------------------------------------------------------
@@ -61,12 +100,14 @@
 
 (defn start!
   "Start a Hades server with Hermes. Stores state for subsequent calls.
+  With no arguments, builds the SNOMED database from the tx-ecosystem subset.
+  With a path, uses that pre-existing database directly.
   Returns the server URL."
-  [snomed-db-path & {:keys [port] :or {port 0}}]
+  [& {:keys [snomed port] :or {port 0}}]
   (when @state
     (throw (ex-info "Server already running. Call (stop!) first." {})))
-  (ensure-test-data!)
-  (let [port (if (zero? port) (free-port) port)
+  (let [snomed-db-path (or snomed (build-snomed-db!))
+        port (if (zero? port) (free-port) port)
         svc (hermes/open snomed-db-path)
         snomed-svc (snomed/->HermesService svc)
         srv (server/make-server svc {:port port})]
@@ -95,7 +136,7 @@
   []
   (let [{:keys [snomed-db-path port]} @state]
     (when-not snomed-db-path
-      (throw (ex-info "No server to restart. Call (start! path) first." {})))
+      (throw (ex-info "No server to restart. Call (start!) first." {})))
     (stop!)
     (doseq [ns-sym '[com.eldrix.hades.protocols
                      com.eldrix.hades.fhir
@@ -106,7 +147,7 @@
                      com.eldrix.hades.registry
                      com.eldrix.hades.server]]
       (require ns-sym :reload))
-    (start! snomed-db-path :port port)))
+    (start! :snomed snomed-db-path :port port)))
 
 (defn server-url
   "Return the URL of the running server, or nil."
@@ -346,8 +387,7 @@
 (s/def ::snomed (s/and string? #(.exists (io/file %))))
 (s/def ::output-dir string?)
 (s/def ::update-baseline boolean?)
-(s/def ::run-args (s/keys :req-un [::snomed ::output-dir]
-                          :opt-un [::update-baseline]))
+(s/def ::run-args (s/keys :opt-un [::snomed ::output-dir ::update-baseline]))
 
 ;; ---------------------------------------------------------------------------
 ;; REPL testing with overlays
@@ -488,25 +528,25 @@
 (defn run
   "Run conformance tests. Intended as an exec-fn for clj -X:conformance.
 
-  Required:
-    :snomed     — path to Hermes snomed.db
-    :output-dir — directory for timestamped result files
+  All arguments are optional. With no arguments, builds the SNOMED database
+  from the tx-ecosystem RF2 subset automatically.
 
   Optional:
-    :update-baseline — when true, updates the baseline file (default false)
+    :snomed           — path to pre-existing Hermes snomed.db (default: auto-build)
+    :output-dir       — directory for timestamped result files
+    :update-baseline  — when true, updates the baseline file (default false)
 
   Examples:
-    clj -X:conformance :snomed '\"path/to/snomed.db\"' :output-dir '\"test/resources/conformance\"'
-    clj -X:conformance :snomed '\"path/to/snomed.db\"' :output-dir '\"test/resources/conformance\"' :update-baseline true"
+    clj -X:conformance
+    clj -X:conformance :snomed '\"path/to/snomed.db\"'
+    clj -X:conformance :update-baseline true"
   [{:keys [snomed output-dir update-baseline]
     :or   {update-baseline false}
     :as   args}]
-  (when-not (s/valid? ::run-args args)
-    (println "Invalid arguments:")
-    (println (s/explain-str ::run-args args))
-    (println "\nUsage: clj -X:conformance :snomed '\"path/to/snomed.db\"' :output-dir '\"test/resources/conformance\"'")
+  (when (and snomed (not (s/valid? ::snomed snomed)))
+    (println (format "SNOMED database not found: %s" snomed))
     (System/exit 1))
-  (start! snomed)
+  (start! :snomed snomed)
   (try
     (let [results (run-tests)
           prev (load-latest)

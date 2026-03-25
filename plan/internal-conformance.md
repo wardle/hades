@@ -1,27 +1,21 @@
 # Internal Conformance Test Plan
 
-This document maps each HL7 FHIR Terminology Ecosystem conformance test to the
-underlying FHIR specification requirement it exercises, and identifies which
-Hades component should implement and be tested for that requirement.
+Maps each HL7 FHIR Terminology Ecosystem conformance test suite to the
+underlying FHIR spec requirement and the Hades component responsible.
 
-The goal: every conformance test should pass because a lower-level unit test
-already proves the behaviour. The full-stack conformance suite is confirmation,
-not the primary test.
+**Current: 354/572 passing (62%)** as of 2026-03-23.
 
----
+## Component model
 
-## Component model (post architecture-fix)
-
-| Component | Responsibility | Tests via |
-|-----------|---------------|-----------|
-| **compose** | Evaluate ValueSet compose: include/exclude, filters, version resolution, paging | Unit tests with in-memory CodeSystem impls |
-| **validate** | Validate code/coding/CC against a ValueSet or CodeSystem: find match, check display, check version, build issues | Unit tests with in-memory impls |
-| **version** | Resolve effective CodeSystem version given compose pins, system-version, force-system-version, check-system-version, wildcard patterns | Pure function tests |
-| **language** | BCP 47 language matching, designation selection, display language negotiation | Pure function tests |
-| **properties** | Concept property evaluation: inactive, notSelectable, deprecated, status, abstract | Pure function tests |
-| **registry** | Dispatch to implementations, overlay lookup | Integration tests |
-| **server/fhir** | HAPI translation, parameter echo, HTTP semantics | Full-stack HTTP tests |
-| **snomed** | SNOMED CT via Hermes: hierarchy, descriptions, properties, post-coordination | Integration tests with Hermes |
+| Component | Responsibility |
+|-----------|---------------|
+| **compose.clj** | ValueSet compose: include/exclude, filters, version resolution, paging |
+| **registry.clj** | Dispatch, overlay lookup, CC aggregation, version resolution |
+| **fhir_codesystem.clj** | File-backed CS + implicit VS: lookup, validate, expand, find-matches |
+| **fhir_valueset.clj** | Named ValueSet: expand (via compose), validate-code |
+| **snomed.clj** | SNOMED CT via Hermes: hierarchy, descriptions, properties |
+| **server.clj / fhir.clj** | HAPI translation, parameter echo, HTTP semantics |
+| **protocols.clj** | Data contracts: specs for validate-result, expansion-result, lookup-result |
 
 ---
 
@@ -706,14 +700,155 @@ HAPI wiring issues, not terminology logic bugs.
 
 ---
 
-## Mapping to architecture-fix steps
+## SNOMED provisioning for conformance tests
 
-| architecture-fix step | Enables internal tests for |
-|----------------------|--------------------------|
-| Step 1: Return specs | All layers — specs define the test contracts |
-| Step 2: Explicit ctx | Layer 2-3 tests can construct ctx directly |
-| Step 3: Keyword keys | Simpler assertions in all layers |
-| Step 4: Push enrichment into impls | Layer 3 tests verify complete results from impls |
-| Step 5: Rich expansion result | Layer 2 tests verify metadata in expansion results |
-| Step 6: Clean ctx | All layers use consistent ctx shape |
-| Step 7: HAPI helpers in fhir.clj | Layer 4 tests verify serialization independently |
+### Key insight: the test data ships its own SNOMED subset
+
+The HL7 `fhir-tx-ecosystem-ig` repo includes a **pre-extracted SNOMED CT
+subset** in RF2 format at `tx-source/snomed/`. This is a ~2,176 concept subset
+of the International Edition (module `900000000000207008`), containing exactly
+the concepts needed by the conformance tests. No full distribution download
+is required.
+
+**Subset contents** (snapshot date `20250909`):
+
+```
+tx-source/snomed/
+├── Terminology/
+│   ├── sct2_Concept_Snapshot_INT_20250909.txt
+│   ├── sct2_Description_Snapshot-en_INT_20250909.txt
+│   ├── sct2_Relationship_Snapshot_INT_20250909.txt
+│   ├── sct2_RelationshipConcreteValues_Snapshot_INT_20250909.txt
+│   ├── sct2_sRefset_OWLExpressionSnapshot_INT_20250909.txt
+│   └── sct2_TextDefinition_Snapshot-en_INT_20250909.txt
+├── Refset/
+│   ├── der2_cRefset_AssociationSnapshot_INT_20250909.txt
+│   ├── Language/der2_cRefset_LanguageSnapshot-en_INT_20250909.txt
+│   └── Metadata/der2_ssRefset_ModuleDependencySnapshot-en_INT_20250909.txt
+└── Readme.txt
+```
+
+The subset is generated from a full international distribution using the
+`snomed-owl-toolkit` and `snomed-subontology-extraction` tools, driven by a
+concept list in `tx-source/snomed-subset.txt`. When the HL7 test suite updates,
+they regenerate the subset and commit it — the RF2 files change in-repo.
+
+### Problem
+
+Currently, conformance tests require a manually-built Hermes database at a
+developer-specific path. This makes tests non-reproducible and not runnable
+in CI without manual setup.
+
+### Solution: build from the shipped subset
+
+Since the RF2 files are already in the test data repo, we can build the Hermes
+database automatically using Hermes' import/index API — no authentication,
+no downloads beyond the git clone we already do.
+
+| Function | Purpose |
+|----------|---------|
+| `hermes/import-snomed` | Import RF2 files into an LMDB database |
+| `hermes/index` | Build search indices |
+| `hermes/compact` | Compact the database |
+
+### Design
+
+#### 1. Build on demand from test data
+
+An `build-snomed-db!` function checks whether the database exists and is current.
+If not, it builds from the RF2 files already cloned by `ensure-test-data!`:
+
+```clojure
+(def ^:private snomed-db-path ".hades/snomed-conformance.db")
+(def ^:private snomed-rf2-dir ".hades/tx-ecosystem/tx-source/snomed")
+
+(defn- build-snomed-db!
+  "Build the SNOMED database from the conformance test subset if needed."
+  []
+  (ensure-test-data!)  ;; clone tx-ecosystem repo if missing
+  (when-not (.exists (io/file snomed-db-path))
+    (log/info "Building SNOMED conformance database from test subset")
+    (hermes/import-snomed snomed-db-path [snomed-rf2-dir])
+    (hermes/index snomed-db-path)
+    (hermes/compact snomed-db-path)
+    (log/info "SNOMED conformance database ready" {:path snomed-db-path})))
+```
+
+The build takes seconds for ~2k concepts (vs. hours for a full distribution).
+
+#### 2. Staleness detection
+
+The database should be rebuilt when the RF2 files change (i.e. when the
+tx-ecosystem repo updates). Options:
+
+- **Simple**: delete `.hades/snomed-conformance.db` whenever `ensure-test-data!`
+  pulls new commits. A git-rev marker file (`.hades/snomed-conformance.rev`)
+  stores the commit hash used to build the current database.
+- **Manual**: `(ct/rebuild-snomed!)` force-rebuilds.
+
+#### 3. Updated `start!` signature
+
+```clojure
+;; Zero-arg: build from subset automatically
+(ct/start!)
+
+;; Explicit path: use a pre-existing database (e.g. full edition for manual testing)
+(ct/start! "/path/to/full/snomed.db")
+```
+
+When no path is given, `start!` calls `build-snomed-db!` and opens
+`.hades/snomed-conformance.db`. The explicit path bypasses the auto-build.
+
+#### 4. CI/CD integration
+
+No authentication or secrets required — the RF2 subset is public in the
+tx-ecosystem repo.
+
+```yaml
+conformance:
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
+    - uses: DeLaGuardo/setup-clojure@13.4
+      with:
+        cli: latest
+    - name: Cache SNOMED conformance database
+      uses: actions/cache@v4
+      with:
+        path: .hades/snomed-conformance.db
+        key: snomed-${{ hashFiles('.hades/tx-ecosystem/tx-source/snomed/**') }}
+    - name: Run conformance tests
+      run: clj -X:conformance
+```
+
+Key points:
+- **No secrets needed** — the subset is open-source test data.
+- **Cache the built database** keyed on the RF2 file hashes — rebuild only
+  when the HL7 repo updates the SNOMED subset.
+- **Zero-config** — `clj -X:conformance` with no `:snomed` argument.
+
+#### 5. Version tracking
+
+When the HL7 conformance tests update to a new SNOMED version:
+1. `ensure-test-data!` pulls the new RF2 files from the tx-ecosystem repo.
+2. The staleness check detects the changed commit hash.
+3. `build-snomed-db!` rebuilds the database automatically.
+4. CI cache key changes (RF2 hash changed) → CI rebuilds too.
+
+No manual intervention. No version pins to maintain.
+
+### Migration
+
+1. Add `com.eldrix/hermes` as an extra-dep in the `:conformance` alias (it's
+   currently only a main dep — needed at test time for import/index).
+2. Add `build-snomed-db!` with import/index/compact from `snomed-rf2-dir`.
+3. Update `start!` to accept zero args, defaulting to the auto-built database.
+4. Add staleness detection (git-rev marker file).
+5. Update `.gitignore` to exclude `.hades/snomed-conformance.db`.
+6. Add CI workflow (Phase 8.1 in roadmap).
+7. Update CLAUDE.md quick-reference with the new zero-arg `(ct/start!)` form.
+
+---
+
+*Architecture refactoring (specs, keyword keys, explicit ctx, layer separation)
+is complete. See commit f933993 for details.*
