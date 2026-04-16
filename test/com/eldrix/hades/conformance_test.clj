@@ -110,10 +110,12 @@
         port (if (zero? port) (free-port) port)
         svc (hermes/open snomed-db-path)
         snomed-svc (snomed/->HermesService svc)
-        srv (server/make-server svc {:port port})]
+        srv (server/make-server svc {:port port :max-expansion-size 1000})]
     (registry/register-codesystem "http://snomed.info/sct" snomed-svc)
+    (registry/register-codesystem "http://snomed.info/sct|*" snomed-svc)
     (registry/register-codesystem "sct" snomed-svc)
     (registry/register-valueset "http://snomed.info/sct" snomed-svc)
+    (registry/register-valueset "http://snomed.info/sct|*" snomed-svc)
     (registry/register-valueset "sct" snomed-svc)
     (.start srv)
     (let [url (str "http://localhost:" port "/fhir")]
@@ -155,6 +157,39 @@
   (:url @state))
 
 ;; ---------------------------------------------------------------------------
+;; Test case index — loads test-cases.json once for enriching results
+;; ---------------------------------------------------------------------------
+
+(defn- load-test-cases
+  "Load the test-cases.json index. Returns a map of test-name -> test case info."
+  []
+  (let [f (io/file test-data-dir "tests" "test-cases.json")]
+    (when (.exists f)
+      (let [data (json/read-str (slurp f) :key-fn keyword)]
+        (into {}
+              (for [suite (:suites data)
+                    tc (:tests suite)
+                    :let [full-name (str (:name suite) "/" (:name tc))]]
+                [full-name
+                 {:operation (:operation tc)
+                  :request   (:request tc)
+                  :response  (:response tc)
+                  :profile   (:profile tc)
+                  :http-code (:http-code tc)
+                  :setup     (:setup suite [])}]))))))
+
+(defn- load-test-case-json
+  "Load a JSON file from the test data directory."
+  [path]
+  (let [f (io/file test-data-dir "tests" path)]
+    (when (.exists f)
+      (try
+        (json/read-str (slurp f) :key-fn keyword)
+        (catch Exception e
+          (log/debug "Failed to parse test JSON" {:path path :error (.getMessage e)})
+          nil)))))
+
+;; ---------------------------------------------------------------------------
 ;; TestReport parsing
 ;; ---------------------------------------------------------------------------
 
@@ -178,24 +213,109 @@
       (.getMessage (.getAssert action)))
     :else nil))
 
+(defn- parse-action-message
+  "Parse a TxTester error message into structured fields.
+  Returns the message map with :message and optional :path, :expected, :actual."
+  [^String msg]
+  (when msg
+    (let [base {:message msg}]
+      (cond
+        ;; "string property values differ at .foo\nExpected:\"x\" for test\nActual:\"y\""
+        (str/includes? msg "property values differ at ")
+        (let [path (second (re-find #"differ at ([.\w\[\]]+)" msg))
+              expected (second (re-find #"Expected:\"(.+?)\"" msg))
+              actual (second (re-find #"Actual\s*:\"(.+?)\"" msg))]
+          (cond-> (assoc base :path path)
+            expected (assoc :expected expected)
+            actual (assoc :actual actual)))
+
+        ;; "array item count differs at .foo\nExpected:\"5\" for test\nActual:\"3\""
+        (str/includes? msg "array item count differs at ")
+        (let [path (second (re-find #"differs at ([.\w\[\]]+)" msg))
+              expected (second (re-find #"Expected:\"(.+?)\"" msg))
+              actual (second (re-find #"Actual\s*:\"(.+?)\"" msg))]
+          (cond-> (assoc base :path path)
+            expected (assoc :expected expected)
+            actual (assoc :actual actual)))
+
+        ;; "Response Code fail: should be '4xx' but is '200'"
+        (str/includes? msg "Response Code fail")
+        (let [expected (second (re-find #"should be '(.+?)'" msg))
+              actual (second (re-find #"but is '(.+?)'" msg))]
+          (cond-> (assoc base :path "HTTP status")
+            expected (assoc :expected expected)
+            actual (assoc :actual actual)))
+
+        ;; "properties differ at .foo: missing property bar"
+        (str/includes? msg "missing property")
+        (let [path (second (re-find #"differ at ([.\w\[\]]+)" msg))
+              prop (second (re-find #"missing property (\w+)" msg))]
+          (cond-> (assoc base :path path)
+            prop (assoc :expected (str "property " prop) :actual "missing")))
+
+        ;; "Unexpected Node found in array at '.foo' at index N"
+        (str/includes? msg "Unexpected Node")
+        (let [path (second (re-find #"at '([^']+)'" msg))
+              idx (second (re-find #"at index (\d+)" msg))]
+          (cond-> base
+            path (assoc :path path)
+            idx (assoc :actual (str "unexpected node at index " idx))))
+
+        ;; "The expected item at .foo at index N was not found"
+        (str/includes? msg "was not found")
+        (let [path (second (re-find #"at ([.\w\[\]]+) at index" msg))]
+          (cond-> base
+            path (assoc :path path :actual "not found")))
+
+        :else base))))
+
+(defn- test-suite
+  "Extract suite name from a test name like \"suite/test-name\"."
+  [test-name]
+  (let [idx (.indexOf ^String test-name "/")]
+    (if (pos? idx)
+      (subs test-name 0 idx)
+      test-name)))
+
 (defn- parse-test-component
-  [^TestReport$TestReportTestComponent test-comp]
-  (let [actions (.getAction test-comp)
+  "Parse a TestReport test component into a rich result map."
+  [^TestReport$TestReportTestComponent test-comp test-index]
+  (let [name' (.getName test-comp)
+        actions (.getAction test-comp)
         results (mapv action-result actions)
         failed? (some #(contains? #{"fail" "error"} %) results)
-        skipped? (and (not failed?) (every? #(= "skip" %) results))]
-    {:name (.getName test-comp)
-     :description (when (.hasDescription test-comp) (.getDescription test-comp))
-     :status (cond skipped? "skip" failed? "fail" :else "pass")
-     :actions (mapv (fn [^TestReport$TestActionComponent a]
-                      {:result (action-result a)
-                       :message (action-message a)})
-                    actions)}))
+        skipped? (and (not failed?) (every? #(= "skip" %) results))
+        parsed-actions (mapv (fn [^TestReport$TestActionComponent a]
+                               (let [result (action-result a)
+                                     msg (action-message a)]
+                                 (merge {:result result}
+                                        (parse-action-message msg))))
+                             actions)
+        tc-info (get test-index name')]
+    (cond-> {:name name'
+             :suite (test-suite name')
+             :status (cond skipped? "skip" failed? "fail" :else "pass")
+             :actions parsed-actions}
+      (:operation tc-info) (assoc :operation (:operation tc-info))
+      (:http-code tc-info) (assoc :expected-http-code (:http-code tc-info)))))
+
+(defn- enrich-failure
+  "For a failed test, load expected response from test data."
+  [test-result test-index]
+  (if (not= "fail" (:status test-result))
+    test-result
+    (let [tc-info (get test-index (:name test-result))]
+      (cond-> test-result
+        (:response tc-info) (assoc :expected-response
+                                   (load-test-case-json (:response tc-info)))))))
 
 (defn- parse-test-report
+  "Parse a TxTester TestReport into structured results with rich failure data."
   [^TestReport report]
   (when report
-    (let [tests (mapv parse-test-component (.getTest report))
+    (let [test-index (load-test-cases)
+          tests (mapv #(parse-test-component % test-index) (.getTest report))
+          tests (mapv #(enrich-failure % test-index) tests)
           passed (count (filter #(= "pass" (:status %)) tests))
           failed (count (filter #(= "fail" (:status %)) tests))
           skipped (count (filter #(= "skip" (:status %)) tests))]
@@ -203,6 +323,7 @@
        :passed passed
        :failed failed
        :skipped skipped
+       :timestamp (str (Instant/now))
        :tests tests})))
 
 ;; ---------------------------------------------------------------------------
@@ -230,16 +351,8 @@
     (parse-test-report (.getTestReport tester))))
 
 ;; ---------------------------------------------------------------------------
-;; Result processing — pure functions on results data
+;; Result querying — pure functions on results data
 ;; ---------------------------------------------------------------------------
-
-(defn- test-suite
-  "Extract suite name from a test name like \"suite/test-name\"."
-  [test-name]
-  (let [idx (.indexOf ^String test-name "/")]
-    (if (pos? idx)
-      (subs test-name 0 idx)
-      test-name)))
 
 (defn suite-summary
   "Group results by suite, showing pass/fail counts per suite.
@@ -247,31 +360,20 @@
   [results]
   (->> (:tests results)
        (remove #(= "skip" (:status %)))
-       (group-by (comp test-suite :name))
+       (group-by :suite)
        (map (fn [[suite tests]]
               (let [passed (count (filter #(= "pass" (:status %)) tests))
                     total (count tests)]
                 {:suite suite :passed passed :total total})))
        (sort-by (juxt (comp - :passed) :suite))))
 
-(defn print-suites
-  "Print a per-suite summary table."
-  [results]
-  (let [suites (suite-summary results)
-        run (- (:total results) (or (:skipped results) 0))]
-    (println (format "\n%-30s %s" "Suite" "Passed/Total"))
-    (println (apply str (repeat 45 "-")))
-    (doseq [{:keys [suite passed total]} suites]
-      (println (format "%-30s %d/%d" suite passed total)))
-    (println (format "%-30s %d/%d" "TOTAL" (:passed results) run))))
-
 (defn failures
-  "Return only the failed tests from results. Optionally filter by suite."
+  "Return failed tests from results. Optionally filter by suite."
   ([results]
    (filter #(= "fail" (:status %)) (:tests results)))
   ([results suite]
    (filter #(and (= "fail" (:status %))
-                 (= suite (test-suite (:name %))))
+                 (= suite (:suite %)))
            (:tests results))))
 
 (defn diff
@@ -284,11 +386,71 @@
     {:gained (sort (clojure.set/difference new-passed old-passed))
      :lost   (sort (clojure.set/difference old-passed new-passed))}))
 
+;; ---------------------------------------------------------------------------
+;; Printing — human-readable output
+;; ---------------------------------------------------------------------------
+
+(defn print-suites
+  "Print a per-suite summary table."
+  [results]
+  (let [suites (suite-summary results)
+        run (- (:total results) (or (:skipped results) 0))]
+    (println (format "\n%-30s %s" "Suite" "Passed/Total"))
+    (println (apply str (repeat 45 "-")))
+    (doseq [{:keys [suite passed total]} suites]
+      (println (format "%-30s %d/%d" suite passed total)))
+    (println (format "%-30s %d/%d" "TOTAL" (:passed results) run))))
+
+(defn print-failures
+  "Print failed tests with structured expected/actual details.
+  Optionally filter by suite."
+  ([results] (print-failures results nil))
+  ([results suite]
+   (let [failed (if suite (failures results suite) (failures results))]
+     (println (format "\nFailed: %d" (count failed)))
+     (doseq [{:keys [name operation actions]} failed]
+       (println (format "\n  FAIL: %s%s" name (if operation (str "  (" operation ")") "")))
+       (doseq [{:keys [result message path expected actual]} actions
+               :when (contains? #{"fail" "error"} result)]
+         (if (and path (or expected actual))
+           (do
+             (println (format "    at %s" path))
+             (when expected (println (format "      expected: %s" expected)))
+             (when actual   (println (format "      actual:   %s" actual))))
+           (when message
+             (println (format "    %s" message)))))))))
+
+(defn print-detail
+  "Print full detail for a single test, including expected response JSON."
+  [results test-name]
+  (if-let [test (first (filter #(= test-name (:name %)) (:tests results)))]
+    (do
+      (println (format "\nTest: %s" (:name test)))
+      (println (format "Suite: %s" (:suite test)))
+      (println (format "Status: %s" (:status test)))
+      (when (:operation test)
+        (println (format "Operation: %s" (:operation test))))
+      (when (= "fail" (:status test))
+        (println "\nFailure details:")
+        (doseq [{:keys [result message path expected actual]} (:actions test)
+                :when (contains? #{"fail" "error"} result)]
+          (if (and path (or expected actual))
+            (do
+              (println (format "  at %s" path))
+              (when expected (println (format "    expected: %s" expected)))
+              (when actual   (println (format "    actual:   %s" actual))))
+            (when message
+              (println (format "  %s" message)))))
+        (when-let [resp (:expected-response test)]
+          (println "\nExpected response:")
+          (println (json/write-str resp :indent true)))))
+    (println (format "Test not found: %s" test-name))))
+
 (defn print-diff
   "Print gained/lost tests between two results."
   [old-results new-results]
   (let [{:keys [gained lost]} (diff old-results new-results)]
-    (println (format "\nPassed: %d → %d" (:passed old-results) (:passed new-results)))
+    (println (format "\nPassed: %d -> %d" (:passed old-results) (:passed new-results)))
     (when (seq gained)
       (println (format "\n  GAINED (%d):" (count gained)))
       (doseq [n gained] (println (format "    + %s" n))))
@@ -296,28 +458,17 @@
       (println (format "\n  LOST (%d):" (count lost)))
       (doseq [n lost]
         (let [test (first (filter #(= n (:name %)) (:tests new-results)))
-              msg (->> (:actions test)
-                       (filter #(contains? #{"fail" "error"} (:result %)))
-                       (keep :message)
-                       first)]
+              action (->> (:actions test)
+                          (filter #(contains? #{"fail" "error"} (:result %)))
+                          first)]
           (println (format "    - %s" n))
-          (when msg
-            (println (format "      %s" (subs msg 0 (min 200 (count msg)))))))))
+          (when (:path action)
+            (println (format "      at %s: expected %s, got %s"
+                             (:path action)
+                             (or (:expected action) "?")
+                             (or (:actual action) "?")))))))
     (when (and (empty? gained) (empty? lost))
       (println "  No change."))))
-
-(defn print-failures
-  "Print failed tests, optionally filtered by suite."
-  ([results] (print-failures results nil))
-  ([results suite]
-   (let [failed (if suite (failures results suite) (failures results))]
-     (println (format "\nFailed: %d" (count failed)))
-     (doseq [{:keys [name actions]} failed]
-       (println (format "  FAIL: %s" name))
-       (doseq [{:keys [result message]} actions
-               :when (contains? #{"fail" "error"} result)]
-         (when message
-           (println (format "        %s" message))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Persistence
@@ -327,47 +478,58 @@
   (.format (DateTimeFormatter/ofPattern "yyyy-MM-dd'T'HH-mm-ss")
            (LocalDateTime/ofInstant (Instant/now) (ZoneId/systemDefault))))
 
-(defn- results->report [results]
-  {:timestamp (str (Instant/now))
+(defn- results->json
+  "Convert results to a JSON-serializable map, preserving full failure detail."
+  [results]
+  {:timestamp (:timestamp results)
    :total     (:total results)
    :passed    (:passed results)
    :failed    (:failed results)
-   :tests     (mapv (fn [{:keys [name status actions]}]
-                      {:name    name
-                       :status  status
-                       :actions (mapv (fn [{:keys [result message]}]
+   :skipped   (or (:skipped results) 0)
+   :tests     (mapv (fn [{:keys [name suite status operation actions expected-response]}]
+                      (cond-> {:name name :suite suite :status status}
+                        operation (assoc :operation operation)
+                        (seq actions)
+                        (assoc :actions
+                               (mapv (fn [{:keys [result message path expected actual]}]
                                        (cond-> {:result result}
-                                         message (assoc :message message)))
-                                     actions)})
+                                         message  (assoc :message message)
+                                         path     (assoc :path path)
+                                         expected (assoc :expected expected)
+                                         actual   (assoc :actual actual)))
+                                     actions))
+                        expected-response (assoc :expected-response expected-response)))
                     (:tests results))})
 
 (defn save-results!
-  "Save results: timestamped archive + latest.json. Returns the report map."
+  "Save results: timestamped archive + latest.json."
   [results]
   (let [dir (io/file results-dir)]
     (.mkdirs dir)
-    (let [report (results->report results)
+    (let [report (results->json results)
           report-json (json/write-str report :indent true)
           ts-path (str (io/file dir (str (timestamp) ".json")))
           latest-path (str (io/file dir "latest.json"))]
       (spit ts-path report-json)
       (spit latest-path report-json)
-      (println (format "Results saved: %s" ts-path))
-      report)))
+      (println (format "Results saved: %s" ts-path)))))
+
+(defn load-results
+  "Load results from a specific file path."
+  [path]
+  (let [f (io/file path)]
+    (when (.exists f)
+      (json/read-str (slurp f) :key-fn keyword))))
 
 (defn load-latest
   "Load the most recent conformance results."
   []
-  (let [f (io/file results-dir "latest.json")]
-    (when (.exists f)
-      (json/read-str (slurp f) :key-fn keyword))))
+  (load-results (str (io/file results-dir "latest.json"))))
 
 (defn load-baseline
   "Load the conformance baseline."
   []
-  (let [f (io/file baseline-path)]
-    (when (.exists f)
-      (json/read-str (slurp f) :key-fn keyword))))
+  (load-results baseline-path))
 
 (defn save-baseline!
   "Save results as the new baseline."
@@ -389,6 +551,42 @@
 (s/def ::update-baseline boolean?)
 (s/def ::run-args (s/keys :opt-un [::snomed ::output-dir ::update-baseline]))
 
+(defn run
+  "Run conformance tests. Intended as an exec-fn for clj -X:conformance.
+
+  Optional:
+    :snomed           — path to pre-existing Hermes snomed.db (default: auto-build)
+    :update-baseline  — when true, updates the baseline file (default false)
+
+  Examples:
+    clj -X:conformance
+    clj -X:conformance :snomed '\"path/to/snomed.db\"'
+    clj -X:conformance :update-baseline true"
+  [{:keys [snomed update-baseline]
+    :or   {update-baseline false}}]
+  (when (and snomed (not (s/valid? ::snomed snomed)))
+    (println (format "SNOMED database not found: %s" snomed))
+    (System/exit 1))
+  (start! :snomed snomed)
+  (try
+    (let [results (run-tests)
+          prev (load-latest)
+          baseline (load-baseline)]
+      (print-suites results)
+      (println)
+      (print-failures results)
+      (when prev (print-diff prev results))
+      (save-results! results)
+      (when baseline
+        (println (format "\nBaseline: %d passed" (:passed baseline)))
+        (when (< (:passed results) (:passed baseline))
+          (println "REGRESSION: pass count decreased!")
+          (System/exit 1)))
+      (when update-baseline
+        (save-baseline! results)))
+    (finally
+      (stop!))))
+
 ;; ---------------------------------------------------------------------------
 ;; REPL testing with overlays
 ;; ---------------------------------------------------------------------------
@@ -396,12 +594,7 @@
 (defn load-test-resources
   "Load test resource files from the tx-ecosystem test data as Clojure maps.
   Accepts either a suite name (loads all resources for that suite) or specific
-  file paths relative to the test data dir.
-
-  Usage:
-    (def resources (load-test-resources \"version\"))
-    (def resources (load-test-resources [\"version/codesystem-version-1.json\"
-                                         \"version/valueset-version-n.json\"]))"
+  file paths relative to the test data dir."
   [suite-or-files]
   (let [base (io/file test-data-dir "tests")
         files (if (string? suite-or-files)
@@ -424,25 +617,11 @@
          vec)))
 
 (defn make-test-ctx
-  "Build an overlay context from test resources for REPL testing.
-  Combines tx-resource overlays with optional request parameters.
-
-  Usage:
-    (def ctx (make-test-ctx (load-test-resources \"version\")
-                            {:system-version {\"http://...\" \"1.0.0\"}}))
-    (registry/valueset-validate-code ctx {:url ... :code ... :system ...})
-    (registry/valueset-expand ctx {:url ...})"
+  "Build an overlay context from test resources for REPL testing."
   ([resources] (make-test-ctx resources nil))
   ([resources request-params]
    (let [overlay (server/build-tx-ctx resources)]
      (assoc overlay :request (merge registry/default-request request-params)))))
-
-(defn- load-test-case-json
-  "Load a JSON file from the test data directory."
-  [path]
-  (let [f (io/file test-data-dir "tests" path)]
-    (when (.exists f)
-      (json/read-str (slurp f)))))
 
 (defn- find-test-case
   "Find a test case definition by name. Returns {:test tc :suite suite-def}."
@@ -455,53 +634,46 @@
                   (get suite "tests")))
           (get test-cases "suites"))))
 
+(defn- operation->endpoint
+  "Map a test operation name to the correct FHIR endpoint."
+  [op base-url]
+  (case op
+    "validate-code"    (str base-url "/ValueSet/$validate-code")
+    "cs-validate-code" (str base-url "/CodeSystem/$validate-code")
+    "expand"           (str base-url "/ValueSet/$expand")
+    "lookup"           (str base-url "/CodeSystem/$lookup")
+    "translate"        (str base-url "/ConceptMap/$translate")
+    (str base-url "/ValueSet/$" op)))
+
 (defn replay-test
   "Replay a conformance test by name, sending the exact request TxTester would
   send (including all tx-resources) to the running server via HTTP. Returns a
-  map with :request, :expected, :actual, :status for comparison.
-
-  Usage:
-    (def r (replay-test \"coding-vbb-vsnn\"))
-    (:actual r)    ;; the server's actual response
-    (:expected r)  ;; the expected response
-    (:status r)    ;; HTTP status code"
+  map with :request, :expected, :actual, :status for comparison."
   [test-name]
   (when-not (server-url)
     (throw (ex-info "No server running. Call (start! path) first." {})))
   (let [{:keys [test suite]} (find-test-case test-name)
         _ (when-not test (throw (ex-info (str "Test case not found: " test-name) {})))
-        tc test
-        op (get tc "operation")
-        req-path (get tc "request")
-        resp-path (get tc "response")
-        profile-path (get tc "profile")
-        ;; Load resources from suite setup
+        op (get test "operation")
+        req-path (get test "request")
+        resp-path (get test "response")
+        profile-path (get test "profile")
         setup-files (get suite "setup" [])
         resources (vec (keep (fn [path]
                                (let [m (load-test-case-json path)]
-                                 (when (#{"CodeSystem" "ValueSet" "ConceptMap"}
-                                        (get m "resourceType"))
+                                 (when (#{:CodeSystem :ValueSet :ConceptMap}
+                                        (:resourceType m))
                                    m)))
                              setup-files))
-        ;; Load request parameters
         request-json (load-test-case-json req-path)
-        ;; Load profile (extra params merged into request)
         profile-json (when profile-path (load-test-case-json profile-path))
-        ;; Merge profile params into request
-        merged-params (cond-> (vec (get request-json "parameter"))
-                        profile-json (into (get profile-json "parameter")))
-        ;; Add tx-resources
+        merged-params (cond-> (vec (:parameter request-json))
+                        profile-json (into (:parameter profile-json)))
         full-params (into merged-params
-                      (map (fn [r] {"name" "tx-resource" "resource" r}))
+                      (map (fn [r] {:name "tx-resource" :resource r}))
                       resources)
-        full-request (assoc request-json "parameter" full-params)
-        ;; Determine endpoint
-        endpoint (case op
-                   "validate-code" (str (server-url) "/ValueSet/$validate-code")
-                   "expand" (str (server-url) "/ValueSet/$expand")
-                   "lookup" (str (server-url) "/CodeSystem/$lookup")
-                   (str (server-url) "/ValueSet/$" op))
-        ;; Send request
+        full-request (assoc request-json :parameter full-params)
+        endpoint (operation->endpoint op (server-url))
         body-bytes (.getBytes ^String (json/write-str full-request) "UTF-8")
         conn (doto ^java.net.HttpURLConnection
                    (.openConnection (java.net.URL. endpoint))
@@ -516,50 +688,11 @@
                                       (.getErrorStream conn)
                                       (.getInputStream conn))]
                        (slurp is))
-        actual (json/read-str response-str)
+        actual (json/read-str response-str :key-fn keyword)
         expected (load-test-case-json resp-path)]
     {:test-name test-name
      :operation op
      :status status
-     :request (dissoc (assoc request-json "parameter" merged-params) "parameter")
+     :request full-request
      :actual actual
      :expected expected}))
-
-(defn run
-  "Run conformance tests. Intended as an exec-fn for clj -X:conformance.
-
-  All arguments are optional. With no arguments, builds the SNOMED database
-  from the tx-ecosystem RF2 subset automatically.
-
-  Optional:
-    :snomed           — path to pre-existing Hermes snomed.db (default: auto-build)
-    :output-dir       — directory for timestamped result files
-    :update-baseline  — when true, updates the baseline file (default false)
-
-  Examples:
-    clj -X:conformance
-    clj -X:conformance :snomed '\"path/to/snomed.db\"'
-    clj -X:conformance :update-baseline true"
-  [{:keys [snomed output-dir update-baseline]
-    :or   {update-baseline false}
-    :as   args}]
-  (when (and snomed (not (s/valid? ::snomed snomed)))
-    (println (format "SNOMED database not found: %s" snomed))
-    (System/exit 1))
-  (start! :snomed snomed)
-  (try
-    (let [results (run-tests)
-          prev (load-latest)
-          baseline (load-baseline)]
-      (print-suites results)
-      (when prev (print-diff prev results))
-      (save-results! results)
-      (when baseline
-        (println (format "Baseline: %d passed" (:passed baseline)))
-        (when (< (:passed results) (:passed baseline))
-          (println "REGRESSION: pass count decreased!")
-          (System/exit 1)))
-      (when update-baseline
-        (save-baseline! results)))
-    (finally
-      (stop!))))

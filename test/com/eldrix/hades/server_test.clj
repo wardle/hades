@@ -29,8 +29,10 @@
           snomed-svc (snomed/->HermesService svc)
           srv (server/make-server svc {:port port})]
       (registry/register-codesystem "http://snomed.info/sct" snomed-svc)
+      (registry/register-codesystem "http://snomed.info/sct|*" snomed-svc)
       (registry/register-codesystem "sct" snomed-svc)
       (registry/register-valueset "http://snomed.info/sct" snomed-svc)
+      (registry/register-valueset "http://snomed.info/sct|*" snomed-svc)
       (registry/register-valueset "sct" snomed-svc)
       (.start srv)
       (reset! test-state {:port port :svc svc :server srv})

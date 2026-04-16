@@ -43,13 +43,14 @@
 ;; Note: :type uses a namespaced spec to avoid clashing with clojure.core/type.
 (s/def ::severity #{"fatal" "error" "warning" "information"})
 (s/def ::type #{"code-invalid" "invalid" "not-found" "not-supported"
-                 "business-rule" "exception" "processing" "informational"})
+                 "business-rule" "exception" "processing" "informational"
+                 "too-costly"})
 (s/def ::details-code string?)
 (s/def ::text string?)
 (s/def ::expression (s/coll-of string?))
 (s/def ::issue
-  (s/keys :req-un [::severity ::type ::details-code ::text]
-          :opt-un [::expression]))
+  (s/keys :req-un [::severity ::type ::text]
+          :opt-un [::details-code ::expression]))
 (s/def ::issues (s/coll-of ::issue))
 
 ;; Return value code — FHIR codes are strings but hades currently uses keywords
@@ -64,13 +65,14 @@
 (s/def ::inactive-status (s/nilable #{"inactive" "retired" "deprecated"}))
 (s/def ::normalized-code (s/or :string string? :keyword keyword?))
 (s/def ::message string?)
+(s/def ::not-found boolean?)
 (s/def ::x-unknown-system (s/nilable string?))
 (s/def ::x-caused-by-unknown-system (s/nilable string?))
 (s/def ::validate-result
   (s/and (s/keys :req-un [::result]
                  :opt-un [::system ::version ::display
                           ::inactive ::inactive-status ::normalized-code
-                          ::message ::issues
+                          ::message ::issues ::not-found
                           ::x-unknown-system ::x-caused-by-unknown-system])
          ;; :code in results is keyword (migration: will become string)
          #(or (nil? (:code %)) (s/valid? ::code-or-kw (:code %)))))

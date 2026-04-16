@@ -51,6 +51,7 @@
     "business-rule" OperationOutcome$IssueType/BUSINESSRULE
     "exception"     OperationOutcome$IssueType/EXCEPTION
     "informational" OperationOutcome$IssueType/INFORMATIONAL
+    "too-costly"    OperationOutcome$IssueType/TOOCOSTLY
     OperationOutcome$IssueType/PROCESSING))
 
 (defn- build-issue-component
@@ -58,10 +59,11 @@
   [{:keys [severity type details-code text expression]}]
   (let [ic (OperationOutcome$OperationOutcomeIssueComponent.)
         cc (doto (CodeableConcept.)
-             (.addCoding (doto (Coding.)
-                           (.setSystem "http://hl7.org/fhir/tools/CodeSystem/tx-issue-type")
-                           (.setCode ^String details-code)))
              (.setText text))]
+    (when details-code
+      (.addCoding cc (doto (Coding.)
+                       (.setSystem "http://hl7.org/fhir/tools/CodeSystem/tx-issue-type")
+                       (.setCode ^String details-code))))
     (.setSeverity ic (issue-severity severity))
     (.setCode ic (issue-type type))
     (.setDetails ic cc)

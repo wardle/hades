@@ -45,6 +45,7 @@
 (def valuesets (atom {}))
 (def conceptmaps (atom {}))
 
+
 (s/def ::uri string?)
 (s/def ::url ::uri)
 (s/def ::system ::uri)
@@ -171,16 +172,21 @@
   [uri-or-logical-id ^CodeSystem impl]
   (swap! codesystems assoc uri-or-logical-id impl))
 
+(def ^:const wildcard-version "*")
+
 (defn- lookup-impl
   "Look up an implementation from an overlay map and a global atom.
-  Tries the key as-is, then splits url|version if present, then strips query params."
+  Tries the key as-is, then url|version, then the wildcard url|*, then
+  strips query params."
   [overlay-map global-atom key]
   (or (get overlay-map key)
       (get @global-atom key)
       (let [[base-url version] (parse-versioned-uri key)]
         (when version
           (or (get overlay-map (versioned-uri base-url version))
-              (get @global-atom (versioned-uri base-url version)))))
+              (get @global-atom (versioned-uri base-url version))
+              (get overlay-map (versioned-uri base-url wildcard-version))
+              (get @global-atom (versioned-uri base-url wildcard-version)))))
       (when-let [uri (uri-without-query key)]
         (when (not= key uri)
           (or (get overlay-map uri)
@@ -188,8 +194,9 @@
 
 (defn codesystem
   "Return a codesystem implementation for the given URI or logical id.
-  Handles url|version syntax and query parameter fallback.
-  When ctx is provided, its :codesystems overlay is checked before global atoms."
+  Handles url|version syntax, wildcard url|* fallback, and query parameter
+  stripping. When ctx is provided, its :codesystems overlay is checked before
+  global atoms."
   (^CodeSystem [uri-or-logical-id] (codesystem nil uri-or-logical-id))
   (^CodeSystem [ctx uri-or-logical-id]
    (lookup-impl (:codesystems ctx) codesystems uri-or-logical-id)))

@@ -101,7 +101,7 @@
   protos/CodeSystem
   (cs-resource [this params])
   (cs-lookup
-    [_ {:keys [code displayLanguage]}]
+    [_ {:keys [code version displayLanguage]}]
     (if (expression? code)
       (let [lang-ids (hermes/match-locale svc displayLanguage true)
             rendered (try (hermes/render-expression* svc code
@@ -110,7 +110,7 @@
                           (catch Exception _ nil))]
         (when rendered
           {:name    "SNOMED CT"
-           :version (version-uri svc)
+           :version (or version (version-uri svc))
            :display rendered
            :system  snomed-system-uri
            :code    (keyword code)}))
@@ -120,7 +120,7 @@
                 preferred (:term (hermes/preferred-synonym* svc code' lang-refset-ids))
                 usage {snomed/Synonym            (hermes/preferred-synonym* svc snomed/Synonym lang-refset-ids)
                        snomed/FullySpecifiedName (hermes/preferred-synonym* svc snomed/FullySpecifiedName lang-refset-ids)}
-                ver (version-uri svc)
+                ver (or version (version-uri svc))
                 parents (get-in ec [:directParentRelationships snomed/IsA])
                 children (hermes/child-relationships-of-type svc code' snomed/IsA)
                 attrs (dissoc (:directParentRelationships ec) snomed/IsA)]
@@ -159,8 +159,8 @@
                                          :value    (:term d)})
                                 (:descriptions ec))})))))
 
-  (cs-validate-code [_ {:keys [code display displayLanguage]}]
-    (let [ver (version-uri svc)]
+  (cs-validate-code [_ {:keys [code display version displayLanguage]}]
+    (let [ver (or version (version-uri svc))]
       (if (expression? code)
         ;; Post-coordinated expression: full validation including MRCM
         ;; Structural errors (concept-not-found, attribute-invalid) → result: false
@@ -199,15 +199,11 @@
              :system  snomed-system-uri
              :version ver
              :display (or rendered code)
-             :issues  (if (seq mrcm-issues)
-                        (mapv (fn [e] {:severity "information" :type "informational"
-                                       :details-code "process-note"
-                                       :text (str "MRCM: " (:message e))
-                                       :expression ["code"]})
-                              mrcm-issues)
-                        [{:severity "information" :type "informational" :details-code "process-note"
-                          :text "The expression is grammatically correct and the concepts are valid"
-                          :expression ["code"]}])}))
+             :issues  [{:severity "information" :type "informational" :details-code "process-note"
+                        :text (if (seq mrcm-issues)
+                                "The expression is grammatically correct and the concepts are valid, but the expression has not been checked against the SNOMED CT concept model (MRCM)"
+                                "The expression is grammatically correct and the concepts are valid")
+                        :expression ["code"]}]}))
         ;; Simple concept code validation
         (when-let [code' (parse-long code)]
           (if-let [concept (hermes/concept svc code')]
@@ -218,17 +214,33 @@
                                   :system snomed-system-uri :version ver}
                            inactive? (assoc :inactive true))]
               (if (and display (not= display preferred))
-                (let [lang (or displayLanguage "--")
-                      msg (str "Wrong Display Name '" display "' for " snomed-system-uri "#" code
-                               " - should be '" preferred "'"
-                               " (for the language(s) '" lang "')")]
-                  (assoc result :result false
-                                :message msg
-                                :issues [{:severity     "error"
-                                          :type         "invalid"
-                                          :details-code "invalid-display"
-                                          :text         msg
-                                          :expression   ["display"]}]))
+                (let [descriptions (:descriptions (hermes/extended-concept svc code'))
+                      matching-desc (first (filter #(= display (:term %)) descriptions))
+                      active-displays (->> descriptions
+                                           (filter :active)
+                                           (map :term)
+                                           distinct)
+                      lang (or displayLanguage "--")]
+                  (if (and matching-desc (not (:active matching-desc)))
+                    (let [quoted (str/join "," (map #(str "\"" % "\"") active-displays))
+                          msg (str "'" display "' is no longer considered a correct display for code '"
+                                   code "' (status = inactive). The correct display is one of " quoted ".")]
+                      (assoc result :message msg
+                                    :issues [{:severity     "warning"
+                                              :type         "invalid"
+                                              :details-code "display-comment"
+                                              :text         msg
+                                              :expression   ["display"]}]))
+                    (let [msg (str "Wrong Display Name '" display "' for " snomed-system-uri "#" code
+                                   " - should be '" preferred "'"
+                                   " (for the language(s) '" lang "')")]
+                      (assoc result :result false
+                                    :message msg
+                                    :issues [{:severity     "error"
+                                              :type         "invalid"
+                                              :details-code "invalid-display"
+                                              :text         msg
+                                              :expression   ["display"]}]))))
                 result))
             (let [msg (str "Unknown code '" code "' in the CodeSystem '" snomed-system-uri "' version '" ver "'")]
               {:result  false
@@ -255,8 +267,8 @@
          ;; look up historical associations, and check for equivalence  - this catches SAME-AS and REPLACED-BY etc.
          (and (= systemA systemB) ((hermes/with-historical svc codeA') codeB')) "equivalent"
          :else "not-subsumed")}))
-  (cs-find-matches [_ {:keys [filters]}]
-    (let [ver (version-uri svc)
+  (cs-find-matches [_ {:keys [version filters]}]
+    (let [ver (or version (version-uri svc))
           ecl (if (seq filters)
                 (->> filters
                      (keep (fn [{:keys [property op value]}]
@@ -302,7 +314,7 @@
     (when (= system snomed-system-uri)
       (let [code' (parse-long code)
             ver (version-uri svc)
-            {:keys [ecl error message]} (parse-implicit-value-set url)]
+            {:keys [ecl query error message]} (parse-implicit-value-set url)]
         (when (or code' (expression? code))
           (cond
             error
@@ -312,43 +324,67 @@
                         :details-code "not-implemented" :text message}]}
 
             ecl
-            (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
-                  ;; For expressions, check focus concept against ECL; for simple codes, check directly
-                  focus-id (if code'
-                             code'
-                             (some-> (try (hermes/parse-expression svc code) (catch Exception _ nil))
-                                     (get-in [:subExpression :focusConcepts])
-                                     first :conceptId))
-                  preferred (when focus-id (:term (hermes/preferred-synonym* svc focus-id lang-refset-ids)))
-                  member? (when focus-id (seq (hermes/intersect-ecl svc [focus-id] ecl)))]
-              (if member?
-                (let [result {:result true :display preferred :code (keyword code)
-                              :system system :version ver}]
-                  (if (and display (not= display preferred))
-                    (let [lang (or displayLanguage "--")
-                          msg (str "Wrong Display Name '" display "' for " system "#" code
-                                   " - should be '" preferred "'"
-                                   " (for the language(s) '" lang "')")]
-                      (assoc result :message msg
-                                    :issues [{:severity     "warning"
-                                              :type         "invalid"
-                                              :details-code "invalid-display"
-                                              :text         msg
-                                              :expression   ["display"]}]))
-                    result))
-                (let [code-ref (cond-> (str system "#" code)
-                                 display (str " ('" display "')"))
-                      msg (str "The provided code '" code-ref "' was not found in the value set '" url "'")]
-                  {:result  false
-                   :code    (keyword code)
-                   :system  system
-                   :version ver
-                   :message msg
-                   :issues  [{:severity     "error"
-                              :type         "code-invalid"
-                              :details-code "not-in-vs"
-                              :text         msg
-                              :expression   ["code"]}]})))
+            (let [;; Validate that the implicit VS root concept/refset exists
+                  vs-valid? (case query
+                              :isa (let [root (parse-long (subs ecl 1))]
+                                     (and root (hermes/concept svc root)))
+                              :in-refset (let [refset-id (parse-long (subs ecl 1))]
+                                           (and refset-id
+                                                (hermes/concept svc refset-id)
+                                                (hermes/subsumed-by? svc refset-id snomed/ReferenceSetConcept)))
+                              true)]
+              (if-not vs-valid?
+                (let [msg (str "A definition for the value Set '" url "' could not be found")]
+                  {:result    false
+                   :not-found true
+                   :code      (keyword code)
+                   :system    system
+                   :message   msg
+                   :issues    [{:severity "error" :type "not-found" :details-code "not-found"
+                                :text msg}]})
+                (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
+                      focus-id (if code'
+                                 code'
+                                 (some-> (try (hermes/parse-expression svc code) (catch Exception _ nil))
+                                         (get-in [:subExpression :focusConcepts])
+                                         first :conceptId))
+                      preferred (when focus-id (:term (hermes/preferred-synonym* svc focus-id lang-refset-ids)))
+                      expr-display (when (expression? code)
+                                     (try (hermes/render-expression* svc code
+                                            {:terms :update :definition-status :auto
+                                             :language-refset-ids lang-refset-ids})
+                                          (catch Exception _ nil)))
+                      display-val (or expr-display preferred)
+                      member? (when focus-id (seq (hermes/intersect-ecl svc [focus-id] ecl)))]
+                  (if member?
+                    (let [result {:result true :display display-val :code (keyword code)
+                                  :system system :version ver}]
+                      (if (and display (not= display display-val))
+                        (let [lang (or displayLanguage "--")
+                              msg (str "Wrong Display Name '" display "' for " system "#" code
+                                       " - should be '" display-val "'"
+                                       " (for the language(s) '" lang "')")]
+                          (assoc result :message msg
+                                        :issues [{:severity     "warning"
+                                                  :type         "invalid"
+                                                  :details-code "invalid-display"
+                                                  :text         msg
+                                                  :expression   ["display"]}]))
+                        result))
+                    (let [code-ref (cond-> (str system "#" code)
+                                     display (str " ('" display "')"))
+                          msg (str "The provided code '" code-ref "' was not found in the value set '" url "'")]
+                      {:result  false
+                       :code    (keyword code)
+                       :system  system
+                       :version ver
+                       :display display-val
+                       :message msg
+                       :issues  [{:severity     "error"
+                                  :type         "code-invalid"
+                                  :details-code "not-in-vs"
+                                  :text         msg
+                                  :expression   ["code"]}]})))))
 
             :else
             (let [msg (str "Cannot parse value set URL: " url)]

@@ -347,7 +347,7 @@
           (and codingA codingB)
           (registry/codesystem-subsumes ctx {:systemA (.getSystem codingA) :codeA (.getCode codingA) :systemB (.getSystem codingB) :codeB (.getCode codingB)}))))))
 
-(deftype ValueSetResourceProvider [svc]
+(deftype ValueSetResourceProvider [svc max-expansion-size]
   IResourceProvider
   (getResourceType [_this] ValueSet)
   ;;;;;;;;;;;;;;;;;;;;;;;
@@ -458,6 +458,12 @@
         (when-not result
           (throw (ResourceNotFoundException.
                    (str "A definition for the value Set '" url' "' could not be found"))))
+        (when (and max-expansion-size (nil? count') (> (:total result) max-expansion-size))
+          (let [msg (str "The value set '" url' "' expansion has too many codes to display (>"
+                         max-expansion-size ")")
+                issue {:severity "error" :type "too-costly" :text msg}]
+            (throw (UnprocessableEntityException.
+                     ^String msg (fhir/build-operation-outcome [issue])))))
         (let [vs-impl (registry/valueset ctx url')
               vs-meta (when vs-impl (protos/vs-resource vs-impl {}))
               used-cs (:used-codesystems result)
@@ -604,7 +610,7 @@
 ;; Servlet and server
 ;; ---------------------------------------------------------------------------
 
-(defn make-r4-servlet ^Servlet [svc]
+(defn make-r4-servlet ^Servlet [svc {:keys [max-expansion-size]}]
   (proxy [RestfulServer] [(FhirContext/forR4)]
     (initialize []
       (log/info "Initialising HL7 FHIR R4 server; providers: CodeSystem ValueSet ConceptMap")
@@ -622,7 +628,7 @@
       (let [^RestfulServer this this]
         (.setDefaultResponseEncoding this EncodingEnum/JSON)
         (.setResourceProviders this [(CodeSystemResourceProvider. svc)
-                                     (ValueSetResourceProvider. svc)
+                                     (ValueSetResourceProvider. svc max-expansion-size)
                                      (ConceptMapResourceProvider. svc)])
         (.setServerConformanceProvider this (HadesConformanceProvider. this))
         (log/debug "Resource providers:" (seq (.getResourceProviders this)))))
@@ -649,8 +655,8 @@
           (binding [*tx-ctx* ctx]
             (proxy-super service request response)))))))
 
-(defn make-server ^Server [svc {:keys [port]}]
-  (let [servlet-holder (ServletHolder. ^Servlet (make-r4-servlet svc))
+(defn make-server ^Server [svc {:keys [port max-expansion-size] :or {max-expansion-size 10000}}]
+  (let [servlet-holder (ServletHolder. ^Servlet (make-r4-servlet svc {:max-expansion-size max-expansion-size}))
         handler (doto (ServletContextHandler. ServletContextHandler/SESSIONS)
                   (.setContextPath "/")
                   (.addServlet servlet-holder "/fhir/*"))
