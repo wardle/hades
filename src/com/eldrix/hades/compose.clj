@@ -66,6 +66,25 @@
            :value    (get f "value")})
         filter-array))
 
+(defn- broken-filter-issue
+  "Return a vs-invalid issue when a compose filter is missing required parts.
+  The `op = exists` filter is the only one that doesn't require a value;
+  every other op needs a non-empty value."
+  [system filter-array]
+  (some (fn [f]
+          (let [property (get f "property")
+                op       (get f "op")
+                value    (get f "value")]
+            (when (and op
+                       (not= "exists" op)
+                       (or (nil? value) (and (string? value) (str/blank? value))))
+              {:severity     "error"
+               :type         "invalid"
+               :details-code "vs-invalid"
+               :text         (str "The system " system " filter with property = "
+                                  (or property "?") ", op = " op " has no value")})))
+        filter-array))
+
 (defn- expand-include-concepts
   "Expand an include element that has an explicit concept list.
   Enriches each concept with display from CodeSystem lookup when available.
@@ -94,7 +113,14 @@
                   result-version (assoc :version result-version)
                   (seq designations) (assoc :designations designations)
                   abstract? (assoc :abstract true)
-                  inactive? (assoc :inactive true))))))
+                  inactive? (assoc :inactive true)
+                  (and (seq (:properties params)) looked-up)
+                  (assoc :properties
+                         (let [want (set (:properties params))]
+                           (filterv (fn [p]
+                                      (let [k (:code p)]
+                                        (contains? want (if (keyword? k) (name k) (str k)))))
+                                    (:properties looked-up)))))))))
         concepts))
 
 (defn- expand-include-filters
@@ -102,14 +128,16 @@
   [ctx system version filters params]
   (registry/codesystem-find-matches ctx {:system system :version version
                                           :filters (parse-filters filters)
-                                          :displayLanguage (:displayLanguage params)}))
+                                          :displayLanguage (:displayLanguage params)
+                                          :properties (:properties params)}))
 
 (defn- expand-include-all
   "Expand an include element with just a system (no concept list, no filters).
   Returns all concepts from the CodeSystem."
   [ctx system version params]
   (registry/codesystem-find-matches ctx {:system system :version version :filters nil
-                                          :displayLanguage (:displayLanguage params)}))
+                                          :displayLanguage (:displayLanguage params)
+                                          :properties (:properties params)}))
 
 (defn- expand-valueset-refs
   "Expand referenced ValueSets, checking for circular references.
@@ -129,6 +157,9 @@
           {:concepts [] :issues []}
           valueset-urls))
 
+(defn- concept-key [c]
+  [(:system c) (:version c) (:code c)])
+
 (defn- expand-include
   "Expand a single include element from a compose definition.
   Returns {:concepts [...] :issues [...]}."
@@ -141,6 +172,18 @@
         filters (get include "filter")
         vs-urls (get include "valueSet")
         expanding (or (:expanding params) #{})
+        ;; Detect an include referencing an unknown CS version. The CS itself
+        ;; must exist (otherwise this is not a version problem but an unknown
+        ;; system), and the (system, version) combo must not be registered.
+        ;; The :purpose param (set by the caller) selects validate vs expand
+        ;; wording; defaults to :validate for compose-level callers that
+        ;; produce a validate-code result.
+        unknown-version-issue
+        (when (and system include-version
+                   (registry/codesystem ctx system)
+                   (not (registry/codesystem ctx (registry/versioned-uri system version))))
+          (registry/unknown-version-issue ctx system version (:purpose params :validate)))
+        bad-filter-issue (when (seq filters) (broken-filter-issue system filters))
         system-results (cond
                          concepts (expand-include-concepts ctx system version concepts params)
                          filters (expand-include-filters ctx system version filters params)
@@ -150,29 +193,32 @@
                  (expand-valueset-refs ctx vs-urls expanding))
         vs-concepts (:concepts vs-ref)
         vs-issues (:issues vs-ref)]
-    {:issues (vec vs-issues)
+    {:issues (cond-> (vec vs-issues)
+               unknown-version-issue (conj unknown-version-issue)
+               bad-filter-issue (conj bad-filter-issue))
      :concepts (if (and (some? system-results) (seq vs-concepts))
-                 (let [vs-set (set (map (fn [c] [(:system c) (:code c)]) vs-concepts))]
-                   (filter (fn [c] (contains? vs-set [(:system c) (:code c)])) system-results))
+                 (let [vs-set (set (map concept-key vs-concepts))]
+                   (filter (fn [c] (contains? vs-set (concept-key c))) system-results))
                  (concat system-results vs-concepts))}))
 
-(defn- concept-key [c]
-  [(:system c) (:code c)])
-
 (defn- collect-used-codesystems
-  "Collect used-codesystem metadata for each unique system in the concepts."
+  "Collect used-codesystem metadata for each distinct (system, version) pair
+  in the concepts. When a concept has no :version, the CodeSystem's own
+  version is used (if any)."
   [ctx concepts]
-  (let [systems (into #{} (keep :system) concepts)]
-    (mapv (fn [sys]
-            (let [cs (registry/codesystem ctx sys)
+  (let [pairs (into #{} (keep (fn [c] (when-let [sys (:system c)] [sys (:version c)]))) concepts)]
+    (mapv (fn [[sys ver]]
+            (let [cs (when sys
+                       (or (when ver (registry/codesystem ctx (registry/versioned-uri sys ver)))
+                           (registry/codesystem ctx sys)))
                   meta (when cs (protos/cs-resource cs {}))
-                  ver (or (some (fn [c] (when (= sys (:system c)) (:version c))) concepts)
-                          (:version meta))
-                  uri (if ver (str sys "|" ver) sys)]
+                  ver' (or ver (:version meta))
+                  uri (if ver' (str sys "|" ver') sys)]
               (cond-> {:uri uri}
                 (:status meta) (assoc :status (:status meta))
-                (some? (:experimental meta)) (assoc :experimental (:experimental meta)))))
-          systems)))
+                (some? (:experimental meta)) (assoc :experimental (:experimental meta))
+                (:standards-status meta) (assoc :standards-status (:standards-status meta)))))
+          pairs)))
 
 (defn- extract-compose-pins
   "Extract compose pins — systems with explicit versions in include definitions."
@@ -240,12 +286,26 @@
                                  after-inactive))
                        after-inactive)
         all-concepts (vec after-filter)
+        used-cs (collect-used-codesystems ctx all-concepts)
+        ;; Systems that appear at multiple distinct versions in the
+        ;; expansion (overload). Rendering uses this to decide whether to
+        ;; emit :version on each concept.
+        sys->versions (reduce (fn [acc c]
+                                (if-let [sys (:system c)]
+                                  (update acc sys (fnil conj #{}) (:version c))
+                                  acc))
+                              {} all-concepts)
+        multi-version (into #{} (keep (fn [[sys vers]]
+                                        (when (> (count vers) 1) sys)))
+                            sys->versions)
         offset' (or (:offset params) 0)
         paged (cond->> all-concepts
                 (pos? offset') (drop offset')
                 (:count params) (take (:count params)))]
-    (cond-> {:concepts         (vec paged)
-              :total            (count all-concepts)
-              :used-codesystems (collect-used-codesystems ctx (vec paged))
-              :compose-pins     (extract-compose-pins compose)}
+    (cond-> {:concepts              (vec paged)
+             :total                 (count all-concepts)
+             :used-codesystems      used-cs
+             :compose-pins          (extract-compose-pins compose)
+             :multi-version-systems multi-version}
+      (:displayLanguage params) (assoc :display-language (:displayLanguage params))
       (seq include-issues) (assoc :issues include-issues))))

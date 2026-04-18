@@ -4,12 +4,25 @@
   Creates providers from FHIR CodeSystem JSON (as Clojure maps). Used both for
   loading code systems from the filesystem and for the tx-resource mechanism."
   (:require [clojure.string :as str]
+            [com.eldrix.hades.display :as display]
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.registry :as registry]))
 
 (def ^:private value-keys
   ["valueCode" "valueCoding" "valueString" "valueInteger"
    "valueBoolean" "valueDecimal" "valueDateTime"])
+
+(def ^:private standards-status-ext
+  "http://hl7.org/fhir/StructureDefinition/structuredefinition-standards-status")
+
+(defn- extract-standards-status
+  "Read the standards-status extension (deprecated/withdrawn/trial-use/etc.)
+  from a FHIR resource's top-level extensions. Returns nil when absent."
+  [metadata]
+  (some (fn [ext]
+          (when (= standards-status-ext (get ext "url"))
+            (get ext "valueCode")))
+        (get metadata "extension")))
 
 (defn- extract-property-value
   "Extract the value from a FHIR concept property, which uses one of several
@@ -19,6 +32,21 @@
             (let [v (get prop k ::not-found)]
               (if (not= v ::not-found)
                 (reduced v)
+                nil)))
+          nil value-keys))
+
+(defn- typed-property-value
+  "Like `extract-property-value` but returns the value with a Clojure type
+  that encodes the original FHIR value[x] field, so downstream rendering
+  can choose CodeType vs StringType vs IntegerType etc. Coded values come
+  back as keywords; everything else keeps its native type."
+  [prop]
+  (reduce (fn [_ k]
+            (let [v (get prop k ::not-found)]
+              (if (not= v ::not-found)
+                (reduced (case k
+                           "valueCode" (if (string? v) (keyword v) v)
+                           v))
                 nil)))
           nil value-keys))
 
@@ -169,20 +197,6 @@
     (throw (ex-info (str "The filter operation '" op "' is not supported")
                     {:type :invalid}))))
 
-(defn- display-matches?
-  "Check whether a display string matches the concept, checking against the
-  primary display and all designations. Always case-insensitive for display
-  matching per FHIR terminology service spec."
-  [concept display]
-  (let [display-lower (str/lower-case display)
-        primary (:display concept)
-        designations (:designations concept)]
-    (or (and primary (= display-lower (str/lower-case primary)))
-        (some (fn [d]
-                (when-let [v (:value d)]
-                  (= display-lower (str/lower-case v))))
-              designations))))
-
 (defn- concept-inactive?
   "Check whether a concept is inactive based on its properties.
   Checks both 'status' property (retired/inactive/deprecated) and
@@ -280,59 +294,19 @@
       :else
       (str prefix "Valid display is '" primary-display "' (for the language(s) '" lang "')"))))
 
-(defn- parse-display-language
-  "Parse a displayLanguage string (potentially Accept-Language format) into
-  a seq of language codes ordered by preference. E.g.:
-    'de'         → ['de']
-    'de,*; q=0'  → ['de']
-    'en, de;q=0.5' → ['en' 'de']"
-  [s]
-  (when s
-    (let [parts (str/split s #",")
-          parsed (keep (fn [p]
-                         (let [trimmed (str/trim p)
-                               [lang q] (str/split trimmed #";")
-                               lang (str/trim lang)]
-                           (when (and (seq lang) (not= lang "*"))
-                             {:lang lang
-                              :q (if q
-                                   (let [m (re-find #"q\s*=\s*([0-9.]+)" q)]
-                                     (if m (Double/parseDouble (second m)) 1.0))
-                                   1.0)})))
-                       parts)]
-      (map :lang (sort-by :q #(compare %2 %1) parsed)))))
-
-(defn- language-matches?
-  "Check if a designation language matches a requested language using prefix matching.
-  'de' matches 'de', 'de-CH', 'de-AT'. Case-insensitive."
-  [designation-lang requested-lang]
-  (when (and designation-lang requested-lang)
-    (let [d (str/lower-case (if (keyword? designation-lang) (name designation-lang) (str designation-lang)))
-          r (str/lower-case requested-lang)]
-      (or (= d r) (str/starts-with? d (str r "-"))))))
-
-(defn- find-display-for-language
-  "Find the best display for a set of designations given language preferences."
-  [designations display-languages]
-  (some (fn [lang]
-          (some (fn [d]
-                  (when (language-matches? (:language d) lang)
-                    (:value d)))
-                designations))
-        display-languages))
-
 (deftype FhirCodeSystem [url version metadata code-index hierarchy property-uri-map case-sensitive? ci-index]
   protos/CodeSystem
   (cs-resource [_ _params]
-    {:url          url
-     :version      version
-     :name         (get metadata "name")
-     :title        (get metadata "title")
-     :status       (get metadata "status")
-     :experimental (get metadata "experimental")
-     :description  (get metadata "description")
-     :content      (get metadata "content")
-     :language     (get metadata "language")})
+    {:url              url
+     :version          version
+     :name             (get metadata "name")
+     :title            (get metadata "title")
+     :status           (get metadata "status")
+     :experimental     (get metadata "experimental")
+     :description      (get metadata "description")
+     :content          (get metadata "content")
+     :language         (get metadata "language")
+     :standards-status (extract-standards-status metadata)})
 
   (cs-lookup [_ {:keys [code]}]
     (when-let [[concept _] (if case-sensitive?
@@ -366,8 +340,8 @@
                                children))
                         (keep (fn [prop]
                                 (let [pc (get prop "code")
-                                      v (extract-property-value prop)]
-                                  (when (and pc v (not (#{"parent" "child"} pc)))
+                                      v (typed-property-value prop)]
+                                  (when (and pc (some? v) (not (#{"parent" "child"} pc)))
                                     {:code (keyword pc) :value v})))
                               props))
          :designations (:designations concept)})))
@@ -379,8 +353,12 @@
       (if concept
         (let [inactive? (concept-inactive? concept)
               actual-code (:code concept)
+              display-langs (display/parse-display-language displayLanguage)
+              lang-display (when (seq display-langs)
+                             (display/find-display-for-language (:designations concept) display-langs))
+              best-display (or lang-display (:display concept))
               result (cond-> {:result  true
-                              :display (:display concept)
+                              :display best-display
                               :code    (keyword code)
                               :system  url
                               :version version}
@@ -396,7 +374,7 @@
                                                  url "|" version "' is case insensitive, implementers "
                                                  "are strongly encouraged to use the correct case anyway")
                               :expression   ["Coding.code"]})
-                display-issue (when (and display (not (display-matches? concept display)))
+                display-issue (when (and display (not (display/display-matches? concept display display-langs)))
                                 (let [msg (format-display-mismatch display url code
                                             (:display concept) (:designations concept) displayLanguage
                                             (get metadata "language"))]
@@ -433,11 +411,12 @@
        (ancestor? (:parents hierarchy) codeB codeA) "subsumes"
        :else "not-subsumed")})
 
-  (cs-find-matches [_ {:keys [filters displayLanguage]}]
+  (cs-find-matches [_ {:keys [filters displayLanguage properties]}]
     (let [all-concepts (vals code-index)
           children-map (:children hierarchy)
           parents-map (:parents hierarchy)
-          display-langs (parse-display-language displayLanguage)
+          display-langs (display/parse-display-language displayLanguage)
+          want-props (when (seq properties) (set properties))
           matching (if (seq filters)
                      (clojure.core/filter
                        (fn [c]
@@ -446,8 +425,15 @@
                      all-concepts)]
       (map (fn [c]
              (let [display (or (when (seq display-langs)
-                                 (find-display-for-language (:designations c) display-langs))
-                               (:display c))]
+                                 (display/find-display-for-language (:designations c) display-langs))
+                               (:display c))
+                   selected-props (when want-props
+                                    (vec (keep (fn [prop]
+                                                 (let [pc (get prop "code")
+                                                       v (typed-property-value prop)]
+                                                   (when (and pc (some? v) (contains? want-props pc))
+                                                     {:code (keyword pc) :value v})))
+                                               (:properties c))))]
                (cond-> {:code    (:code c)
                         :system  url
                         :version version
@@ -455,16 +441,18 @@
                         :designations (:designations c)}
                  (concept-inactive? c) (assoc :inactive true
                                               :inactive-status (concept-inactive-status c))
-                 (concept-abstract? property-uri-map c) (assoc :abstract true))))
+                 (concept-abstract? property-uri-map c) (assoc :abstract true)
+                 (seq selected-props) (assoc :properties selected-props))))
            matching)))
 
   protos/ValueSet
   (vs-resource [_ _params]
-    {:url     url
-     :version version
-     :name    (get metadata "name")
-     :title   (get metadata "title")
-     :status  (get metadata "status")})
+    {:url              url
+     :version          version
+     :name             (get metadata "name")
+     :title            (get metadata "title")
+     :status           (get metadata "status")
+     :standards-status (extract-standards-status metadata)})
 
   (vs-expand [_ _ctx {:keys [filter offset count displayLanguage]}]
     (let [concepts (vals code-index)
@@ -479,10 +467,10 @@
                                          (str/includes? (str/lower-case v) f)))
                                      (:designations c))))
                          concepts)))
-          display-langs (parse-display-language displayLanguage)
+          display-langs (display/parse-display-language displayLanguage)
           all-concepts (mapv (fn [c]
                                (let [display (or (when (seq display-langs)
-                                                   (find-display-for-language (:designations c) display-langs))
+                                                   (display/find-display-for-language (:designations c) display-langs))
                                                  (:display c))]
                                  (cond-> {:code    (:code c)
                                           :system  url
@@ -509,14 +497,18 @@
       (if-let [concept (get code-index code)]
         (let [inactive? (concept-inactive? concept)
               {:keys [lenient-display-validation]} (merge registry/default-request (:request ctx))
+              display-langs (display/parse-display-language displayLanguage)
+              lang-display (when (seq display-langs)
+                             (display/find-display-for-language (:designations concept) display-langs))
+              best-display (or lang-display (:display concept))
               result (cond-> {:result  true
-                              :display (:display concept)
+                              :display best-display
                               :code    (keyword code)
                               :system  url
                               :version version}
                        inactive? (assoc :inactive true
                                         :inactive-status (concept-inactive-status concept)))]
-          (if (and display (not (display-matches? concept display)))
+          (if (and display (not (display/display-matches? concept display display-langs)))
             (let [lenient? lenient-display-validation
                   msg (format-display-mismatch display url code
                         (:display concept) (:designations concept) displayLanguage
@@ -571,7 +563,7 @@
         metadata (select-keys cs-map ["resourceType" "name" "title" "status"
                                       "description" "experimental" "hierarchyMeaning"
                                       "content" "caseSensitive" "compositional" "versionNeeded"
-                                      "count" "language"])
+                                      "count" "language" "extension"])
         prop-uri-map (build-property-uri-map cs-map)
         cs? (get cs-map "caseSensitive" true)
         ci-idx (when-not cs?

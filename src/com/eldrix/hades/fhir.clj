@@ -193,7 +193,7 @@
 (defn validate-result->parameters
   "Convert a ::protos/validate-result to HAPI Parameters."
   ^Parameters [{:keys [result code system version display message
-                        inactive normalized-code issues
+                        inactive inactive-status normalized-code issues
                         x-caused-by-unknown-system x-unknown-system
                         codeableConcept]}]
   (let [params (Parameters.)]
@@ -205,6 +205,8 @@
     (when message (add-param params "message" message))
     (when normalized-code (add-param params "normalized-code" normalized-code))
     (add-param params "result" result)
+    (when (and inactive-status (not= "inactive" inactive-status))
+      (add-param params "status" (keyword inactive-status)))
     (when system (add-uri-param params "system" system))
     (when version (add-param params "version" version))
     (when x-caused-by-unknown-system
@@ -240,12 +242,13 @@
   "Create a FHIR ValueSetExpansion Component from a plain map.
   Options:
     :include-designations — when true, include designation list"
-  ^ValueSet$ValueSetExpansionContainsComponent [{:keys [system code display designations abstract inactive properties]}
+  ^ValueSet$ValueSetExpansionContainsComponent [{:keys [system version code display designations abstract inactive properties]}
                                                 & {:keys [include-designations]}]
   (let [comp (doto (ValueSet$ValueSetExpansionContainsComponent.)
                (.setCode code)
                (.setSystem system)
                (.setDisplay display))]
+    (when version (.setVersion comp ^String version))
     (when abstract (.setAbstract comp true))
     (when inactive (.setInactive comp true))
     (when (and include-designations (seq designations))
@@ -302,24 +305,34 @@
           check-system-version)))
 
 (defn build-cs-warning-params
-  "Build expansion warning parameters for CodeSystem status (draft/retired/experimental)."
+  "Build expansion warning parameters for CodeSystem status.
+  Emits warning-experimental / warning-draft / warning-deprecated /
+  warning-withdrawn based on the resource status and the
+  structuredefinition-standards-status extension."
   [used-codesystems]
-  (mapcat (fn [{:keys [uri status experimental]}]
+  (mapcat (fn [{:keys [uri status experimental standards-status]}]
             (cond-> []
               experimental
               (conj (expansion-param "warning-experimental" (UriType. ^String uri)))
-              (= "draft" status)
+              (or (= "draft" status) (= "draft" standards-status))
               (conj (expansion-param "warning-draft" (UriType. ^String uri)))
-              (= "retired" status)
-              (conj (expansion-param "warning-deprecated" (UriType. ^String uri)))))
+              (or (= "retired" status) (= "deprecated" standards-status))
+              (conj (expansion-param "warning-deprecated" (UriType. ^String uri)))
+              (= "withdrawn" standards-status)
+              (conj (expansion-param "warning-withdrawn" (UriType. ^String uri)))))
           used-codesystems))
 
 (defn build-vs-warning-params
-  "Build expansion warning parameters for ValueSet status."
+  "Build expansion warning parameters for ValueSet status.
+  Draws on both resource status and the structuredefinition-standards-status
+  extension."
   [vs-meta vs-version-uri]
-  (cond-> []
-    (= "retired" (:status vs-meta))
-    (conj (expansion-param "warning-withdrawn" (UriType. ^String vs-version-uri)))))
+  (let [{:keys [status standards-status]} vs-meta]
+    (cond-> []
+      (or (= "retired" status) (= "deprecated" standards-status))
+      (conj (expansion-param "warning-deprecated" (UriType. ^String vs-version-uri)))
+      (= "withdrawn" standards-status)
+      (conj (expansion-param "warning-withdrawn" (UriType. ^String vs-version-uri))))))
 
 (defn build-used-codesystem-params
   "Build used-codesystem expansion parameters."

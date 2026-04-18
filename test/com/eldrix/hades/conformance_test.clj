@@ -376,6 +376,30 @@
                  (= suite (:suite %)))
            (:tests results))))
 
+(defn- first-failing-action
+  "Return the first failing/erroring action from a test, or nil."
+  [test]
+  (->> (:actions test)
+       (filter #(contains? #{"fail" "error"} (:result %)))
+       first))
+
+(defn cluster-failures
+  "Group failed tests by their first failing action's (path, expected, actual)
+  signature. Returns a seq of {:signature {...} :count N :tests [...]} sorted
+  by count descending — high-count clusters are the highest-leverage fixes.
+  Optionally filter by suite."
+  ([results] (cluster-failures results nil))
+  ([results suite]
+   (let [fails (if suite (failures results suite) (failures results))]
+     (->> fails
+          (group-by #(select-keys (first-failing-action %)
+                                  [:path :expected :actual]))
+          (map (fn [[sig tests]]
+                 {:signature sig
+                  :count     (count tests)
+                  :tests     (mapv :name tests)}))
+          (sort-by (comp - :count))))))
+
 (defn diff
   "Compare two results, returning {:gained [...] :lost [...]} test names.
   Ignores skipped tests in both results."
@@ -445,6 +469,29 @@
           (println "\nExpected response:")
           (println (json/write-str resp :indent true)))))
     (println (format "Test not found: %s" test-name))))
+
+(defn print-clusters
+  "Print failed tests grouped by failure signature. Each cluster shows the
+  parsed (path, expected, actual) and the names of the affected tests. The
+  highest-count cluster is your highest-leverage fix candidate.
+  Optionally filter by suite."
+  ([results] (print-clusters results nil))
+  ([results suite]
+   (let [clusters (cluster-failures results suite)
+         show-tests 5]
+     (println (format "\nFailure clusters%s: %d distinct, %d failures total"
+                      (if suite (str " in " suite) "")
+                      (count clusters)
+                      (reduce + (map :count clusters))))
+     (doseq [{:keys [signature count tests]} clusters
+             :let [{:keys [path expected actual]} signature]]
+       (println (format "\n  [%dx] at %s" count (or path "?")))
+       (when expected (println (format "        expected: %s" expected)))
+       (when actual   (println (format "        actual:   %s" actual)))
+       (doseq [t (take show-tests tests)]
+         (println (format "        - %s" t)))
+       (when (> count show-tests)
+         (println (format "        ... and %d more" (- count show-tests))))))))
 
 (defn print-diff
   "Print gained/lost tests between two results."
@@ -634,6 +681,41 @@
                   (get suite "tests")))
           (get test-cases "suites"))))
 
+(defn list-tests
+  "List all conformance tests (or those in one suite). Returns a vec of
+  {:name :suite :operation :http-code} maps."
+  ([] (list-tests nil))
+  ([suite-filter]
+   (let [data (json/read-str (slurp (io/file test-data-dir "tests" "test-cases.json"))
+                             :key-fn keyword)]
+     (vec (for [suite (:suites data)
+                :when (or (nil? suite-filter) (= suite-filter (:name suite)))
+                tc (:tests suite)]
+            {:name      (:name tc)
+             :suite     (:name suite)
+             :operation (:operation tc)
+             :http-code (:http-code tc)})))))
+
+(defn test-info
+  "Return everything about a test: the case definition, suite setup files,
+  the parsed request and expected response, and the parsed setup resources.
+  Replaces the need to `cat` or grep test fixture files from the shell."
+  [test-name]
+  (when-let [{:keys [test suite]} (find-test-case test-name)]
+    (let [suite-name (get suite "name")
+          setup-files (get suite "setup" [])
+          setup-resources (vec (keep load-test-case-json setup-files))]
+      {:name            test-name
+       :suite           suite-name
+       :operation       (get test "operation")
+       :http-code       (get test "http-code")
+       :request-path    (get test "request")
+       :response-path   (get test "response")
+       :request         (when-let [p (get test "request")] (load-test-case-json p))
+       :expected        (when-let [p (get test "response")] (load-test-case-json p))
+       :setup-files     setup-files
+       :setup-resources setup-resources})))
+
 (defn- operation->endpoint
   "Map a test operation name to the correct FHIR endpoint."
   [op base-url]
@@ -661,7 +743,7 @@
         setup-files (get suite "setup" [])
         resources (vec (keep (fn [path]
                                (let [m (load-test-case-json path)]
-                                 (when (#{:CodeSystem :ValueSet :ConceptMap}
+                                 (when (#{"CodeSystem" "ValueSet" "ConceptMap"}
                                         (:resourceType m))
                                    m)))
                              setup-files))

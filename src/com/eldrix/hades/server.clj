@@ -100,10 +100,18 @@
           check-system-versions (keep (fn [p] (when (= "check-system-version" (get p "name"))
                                                 (or (get p "valueCanonical") (get p "valueUri"))))
                                       params)
+          use-supplements (keep (fn [p] (when (#{"useSupplement" "useSupplements"} (get p "name"))
+                                          (or (get p "valueCanonical") (get p "valueUri"))))
+                                params)
+          properties (keep (fn [p] (when (= "property" (get p "name"))
+                                     (or (get p "valueString") (get p "valueCode"))))
+                           params)
           request (cond-> {:lenient-display-validation (boolean lenient-val)}
                     (seq system-versions) (assoc :system-version (registry/parse-version-param system-versions))
                     (seq force-system-versions) (assoc :force-system-version (registry/parse-version-param force-system-versions))
                     (seq check-system-versions) (assoc :check-system-version (registry/parse-version-param check-system-versions))
+                    (seq use-supplements) (assoc :use-supplements (vec use-supplements))
+                    (seq properties) (assoc :properties (vec properties))
                     vs-version (assoc :value-set-version vs-version)
                     display-language (assoc :display-language display-language))]
       {:tx-resources tx-resources :request request})
@@ -134,19 +142,27 @@
                             version (-> (assoc-in [:codesystems (str url "|" version)] fcs)
                                         (assoc-in [:valuesets (str url "|" version)] fcs)))))
                       {} regular-cs)
-          ;; Pass 2: apply supplements to base CodeSystems
+          ;; Pass 2: apply supplements to base CodeSystems. Also register the
+          ;; supplement under its own canonical URL so callers can validate
+          ;; useSupplement / valueset-supplement references.
           ctx (reduce (fn [ctx supp]
-                        (let [base-url (get supp "supplements")]
+                        (let [base-url (get supp "supplements")
+                              supp-url (get supp "url")
+                              supp-version (get supp "version")
+                              supp-fcs (fhir-cs/make-fhir-code-system supp)
+                              ctx (cond-> ctx
+                                    supp-url (assoc-in [:codesystems supp-url] supp-fcs)
+                                    (and supp-url supp-version)
+                                    (assoc-in [:codesystems (str supp-url "|" supp-version)] supp-fcs))]
                           (if-let [base-cs (or (get-in ctx [:codesystems base-url])
                                                (registry/codesystem base-url))]
                             (let [merged (fhir-cs/apply-supplement base-cs supp)
-                                  url (get supp "supplements")
                                   version (get supp "version")]
                               (cond-> (-> ctx
-                                          (assoc-in [:codesystems url] merged)
-                                          (assoc-in [:valuesets url] merged))
-                                version (-> (assoc-in [:codesystems (str url "|" version)] merged)
-                                            (assoc-in [:valuesets (str url "|" version)] merged))))
+                                          (assoc-in [:codesystems base-url] merged)
+                                          (assoc-in [:valuesets base-url] merged))
+                                version (-> (assoc-in [:codesystems (str base-url "|" version)] merged)
+                                            (assoc-in [:valuesets (str base-url "|" version)] merged))))
                             ctx)))
                       ctx supplements)]
       ;; Pass 3: ValueSets
@@ -157,6 +173,17 @@
                   (cond-> (assoc-in ctx [:valuesets url] fvs)
                     version (assoc-in [:valuesets (str url "|" version)] fvs))))
               ctx value-sets))))
+
+(defn- check-supplements!
+  "Validate that all referenced supplements (op-level via :use-supplements
+  in ctx, plus VS-level via the valueset-supplement extension on the
+  resolved ValueSet) are registered. Throws ResourceNotFoundException
+  with an OperationOutcome if any are missing."
+  [ctx vs-impl]
+  (when-let [result (registry/check-supplement-refs ctx vs-impl)]
+    (throw (ResourceNotFoundException.
+             ^String (:message result)
+             (fhir/build-operation-outcome (:issues result))))))
 
 (defn- make-buffered-input-stream
   "Create a ServletInputStream backed by a byte array."
@@ -282,6 +309,7 @@
           system' (or (some-> system .getValue) (some-> coding .getSystem))
           dl (or (resolve-display-language (some-> displayLanguage .getValue) request)
                  (get-in ctx [:request :display-language]))
+          _ (check-supplements! ctx nil)
           result (registry/codesystem-lookup ctx (cond-> {:system system' :code code'}
                                                    (some-> version .getValue) (assoc :version (.getValue version))
                                                    dl (assoc :displayLanguage dl)))]
@@ -371,6 +399,7 @@
             display-lang (or (resolve-display-language (some-> displayLanguage .getValue) request)
                              (get-in ctx [:request :display-language]))
             url' (some-> url .getValue)
+            _ (check-supplements! ctx (when url' (registry/valueset ctx url')))
             cc? (and codeableConcept (seq (.getCoding codeableConcept)))
             coding? (and coding (some-> coding .getCode))
             ;; Extract HAPI params into plain maps and call registry
@@ -445,19 +474,26 @@
       (let [ctx *tx-ctx*
             include-desig? (some-> includeDesignations .getValue)
             url' (some-> url .getValue)
+            _ (check-supplements! ctx (when url' (registry/valueset ctx url')))
             active-only? (some-> activeOnly .getValue)
             exclude-nested? (if excludeNested (.getValue excludeNested) true)
             display-lang (or (resolve-display-language (some-> displayLanguage .getValue) request)
                              (get-in ctx [:request :display-language]))
             count' (some-> param-count .getValue)
             offset' (some-> offset .getValue)
-            result (registry/valueset-expand ctx {:url             url'
-                                                   :activeOnly      active-only?
-                                                   :filter          (some-> param-filter .getValue)
-                                                   :displayLanguage display-lang})]
+            req-properties (get-in ctx [:request :properties])
+            result (registry/valueset-expand ctx (cond-> {:url             url'
+                                                           :activeOnly      active-only?
+                                                           :filter          (some-> param-filter .getValue)
+                                                           :displayLanguage display-lang}
+                                                   (seq req-properties) (assoc :properties req-properties)))]
         (when-not result
           (throw (ResourceNotFoundException.
                    (str "A definition for the value Set '" url' "' could not be found"))))
+        (when-let [error-issue (first (filter #(= "error" (:severity %)) (:issues result)))]
+          (throw (ResourceNotFoundException.
+                   ^String (:text error-issue)
+                   (fhir/build-operation-outcome (:issues result)))))
         (when (and max-expansion-size (nil? count') (> (:total result) max-expansion-size))
           (let [msg (str "The value set '" url' "' expansion has too many codes to display (>"
                          max-expansion-size ")")
@@ -484,6 +520,9 @@
                             (throw (UnprocessableEntityException.
                                      ^String (:text issue)
                                      (fhir/build-operation-outcome [issue])))))))))
+              ;; Prefer the caller's displayLanguage; fall back to the VS
+              ;; compose's displayLanguage extension surfaced by the engine.
+              effective-display-lang (or display-lang (:display-language result))
               expansion-params (-> (fhir/build-version-echo-params
                                      {:force-system-version  force-system-version
                                       :system-version        system-version
@@ -493,7 +532,7 @@
                                    (into (fhir/build-vs-warning-params vs-meta vs-version-uri))
                                    (into (fhir/build-used-codesystem-params used-cs))
                                    (into (fhir/build-echo-params
-                                           {:display-lang    display-lang
+                                           {:display-lang    effective-display-lang
                                             :excludeNested   excludeNested
                                             :exclude-nested? exclude-nested?
                                             :include-desig?  include-desig?
@@ -516,10 +555,16 @@
                                              (.setTimestamp (Date.))
                                              (.setParameter expansion-params)
                                              (.setTotal (:total result))
-                                             (.setContains (let [paged (cond->> (:concepts result)
+                                             (.setContains (let [multi-sys (:multi-version-systems result)
+                                                                 paged (cond->> (:concepts result)
                                                                          offset' (drop offset')
-                                                                         count' (take count'))]
-                                                             (map #(fhir/map->vs-expansion % :include-designations include-desig?) paged))))]
+                                                                         count' (take count'))
+                                                                 prep (fn [c]
+                                                                        (if (or (nil? (:system c))
+                                                                                (contains? multi-sys (:system c)))
+                                                                          c
+                                                                          (dissoc c :version)))]
+                                                             (map #(fhir/map->vs-expansion (prep %) :include-designations include-desig?) paged))))]
                                          (when offset' (.setOffset exp (int offset')))
                                          exp)))]
             (when (some? (:experimental vs-meta))

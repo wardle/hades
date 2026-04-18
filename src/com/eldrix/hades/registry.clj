@@ -30,7 +30,7 @@
   should be a URL which resolves to the location of the master version of the
   code system, though this is not always possible."
   (:require [clojure.spec.alpha :as s]
-            [clojure.string]
+            [clojure.string :as str]
             [com.eldrix.hades.protocols :as protos]
             [lambdaisland.uri :as uri])
   (:import (com.eldrix.hades.protocols CodeSystem ConceptMap ValueSet)
@@ -76,12 +76,16 @@
 
 (s/def ::display-language (s/nilable string?))
 (s/def ::value-set-version (s/nilable string?))
+(s/def ::use-supplements (s/coll-of string?))
+(s/def ::properties (s/coll-of string?))
 (s/def ::request (s/keys :opt-un [::lenient-display-validation
                                   ::system-version
                                   ::force-system-version
                                   ::check-system-version
                                   ::display-language
-                                  ::value-set-version]))
+                                  ::value-set-version
+                                  ::use-supplements
+                                  ::properties]))
 
 (s/def ::ctx (s/nilable (s/keys :opt-un [::codesystems ::valuesets ::conceptmaps ::request])))
 
@@ -252,25 +256,34 @@
                  (str "cs-lookup returned invalid ::lookup-result: " (s/explain-str ::protos/lookup-result result)))
          result)))))
 
+(defn- inactive-warning-issue [code status]
+  {:severity     "warning"
+   :type         "business-rule"
+   :details-code "code-comment"
+   :text         (str "The concept '" code "' has a status of " status " and its use should be reviewed")
+   :expression   ["Coding"]})
+
 (defn- add-inactive-warning
-  "Add inactive concept warning to a validate-code result when the concept is inactive."
+  "Add inactive concept warning(s) to a validate-code result when the concept is inactive.
+  Always emits a generic 'status of inactive' warning; when the specific
+  inactive-status differs (e.g. 'retired', 'deprecated'), emits an additional
+  warning for that specific status."
   [result]
   (if (:inactive result)
     (let [code (name (:code result))
-          status (or (:inactive-status result) "inactive")
-          msg (str "The concept '" code "' has a status of " status " and its use should be reviewed")
-          issue {:severity     "warning"
-                 :type         "business-rule"
-                 :details-code "code-comment"
-                 :text         msg
-                 :expression   ["Coding"]}]
+          specific (:inactive-status result)
+          specific? (and specific (not= specific "inactive"))
+          issues (cond-> [(inactive-warning-issue code "inactive")]
+                   specific? (conj (inactive-warning-issue code specific)))
+          msgs (cond-> [(:text (first issues))]
+                 specific? (conj (:text (second issues))))
+          combined (str/join "; " msgs)]
       (-> result
-          (dissoc :inactive-status)
-          (update :issues (fnil conj []) issue)
+          (update :issues (fnil into []) issues)
           (update :message (fn [existing]
                              (if existing
-                               (str existing "; " msg)
-                               msg)))))
+                               (str existing "; " combined)
+                               combined)))))
     result))
 
 (defn codesystem-validate-code
@@ -317,23 +330,53 @@
    (when-let [cs (codesystem ctx system)]
      (:version (protos/cs-resource cs {})))))
 
+(defn check-supplement-refs
+  "Validate that every supplement canonical referenced by an operation is
+  registered. Combines op-level refs (`:use-supplements` in the request)
+  with VS-level refs (`valueset-supplement` extensions on `vs-impl`).
+  Returns nil when all supplements resolve; otherwise returns
+  `{:message ::message :issues [::issue]}` for the first missing
+  supplement, ready for the server to translate into a 4xx response."
+  [ctx vs-impl]
+  (let [op-refs (get-in ctx [:request :use-supplements])
+        vs-refs (when vs-impl (:supplements (protos/vs-resource vs-impl {})))
+        all-refs (distinct (concat op-refs vs-refs))
+        missing (first (remove #(codesystem ctx %) all-refs))]
+    (when missing
+      (let [msg (str "Required supplement not found: " missing)]
+        {:message msg
+         :issues  [{:severity     "error"
+                    :type         "not-found"
+                    :details-code "not-found"
+                    :text         msg}]}))))
+
 (defn unknown-version-issue
   "Return an UNKNOWN_CODESYSTEM_VERSION issue if the caller's version doesn't
-   correspond to a registered CS, or nil if the version exists."
-  [ctx system version]
-  (when (and version system)
-    (let [versioned-key (versioned-uri system version)]
-      (when-not (codesystem ctx versioned-key)
-        (let [valid (sort (available-versions ctx system))
-              valid-str (if (seq valid)
-                          (str ". Valid versions: " (clojure.string/join " or " valid))
-                          "")]
-          {:severity     "error"
-           :type         "not-found"
-           :details-code "not-found"
-           :text         (str "A definition for CodeSystem '" system "' version '" version
-                              "' could not be found, so the code cannot be validated" valid-str)
-           :expression   ["Coding.system"]})))))
+   correspond to a registered CS, or nil if the version exists. The optional
+   `purpose` chooses the trailing message clause and defaults to the
+   validate-code wording; pass `:expand` for the expand-context wording."
+  ([ctx system version] (unknown-version-issue ctx system version :validate))
+  ([ctx system version purpose]
+   (when (and version system)
+     (let [versioned-key (versioned-uri system version)]
+       (when-not (codesystem ctx versioned-key)
+         (let [valid (sort (available-versions ctx system))
+               valid-str (if (seq valid)
+                           (str ". Valid versions: " (clojure.string/join " or " valid))
+                           "")
+               clause (case purpose
+                        :expand "the value set cannot be expanded"
+                        "the code cannot be validated")
+               base {:severity     "error"
+                     :type         "not-found"
+                     :details-code "not-found"
+                     :text         (str "A definition for CodeSystem '" system "' version '" version
+                                        "' could not be found, so " clause valid-str)}]
+           ;; Expression points at the offending Coding for validate-code,
+           ;; but the expand context error refers to the compose definition,
+           ;; not a Coding — so omit the expression there.
+           (cond-> base
+             (not= purpose :expand) (assoc :expression ["Coding.system"]))))))))
 
 (defn check-system-version-issue
   "Return a check-system-version error issue if the resolved version doesn't
@@ -501,13 +544,13 @@
                     vs-url-ver (if vs-ver (str url "|" vs-ver) url)
                     no-valid-msg (str "No valid coding was found for the value set '" vs-url-ver "'")
                     combined-msg (if (seq cs-error-msgs)
-                                   (str no-valid-msg "; " (clojure.string/join "; " cs-error-msgs))
+                                   (str no-valid-msg "; " (str/join "; " cs-error-msgs))
                                    no-valid-msg)
                     no-valid-issue {:severity "error" :type "code-invalid"
                                     :details-code "not-in-vs" :text no-valid-msg}]
-                {:result false
+                {:result  false
                  :message combined-msg
-                 :issues (into [no-valid-issue] all-issues)}))))))))
+                 :issues  (into [no-valid-issue] all-issues)}))))))))
 
 (defn conceptmap-resource
   ([params] (conceptmap-resource nil params))

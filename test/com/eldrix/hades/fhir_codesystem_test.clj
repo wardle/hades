@@ -107,7 +107,7 @@
           props (:properties result)
           status-props (filter #(= :status (:code %)) props)]
       (is (= 1 (count status-props)))
-      (is (= "active" (:value (first status-props))))))
+      (is (= :active (:value (first status-props))))))
 
   (testing "inactive property derived from status"
     (let [result (protos/cs-lookup hier-fcs {:code "A"})

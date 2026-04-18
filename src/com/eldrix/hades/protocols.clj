@@ -31,6 +31,9 @@
 (s/def ::properties (s/coll-of ::code))
 (s/def ::canonical string?)
 (s/def ::useSupplements (s/coll-of ::canonical))
+;; Supplement canonicals declared on a ValueSet via the
+;; http://hl7.org/fhir/StructureDefinition/valueset-supplement extension.
+(s/def ::supplements (s/coll-of ::canonical))
 (s/def ::codesystem-lookup (s/keys :req-un [::code ::system]
                                    :opt-un [::version ::date ::displayLanguage ::properties ::useSupplements]))
 
@@ -125,9 +128,10 @@
 (s/def ::uri string?)
 (s/def ::status #{"active" "draft" "retired"})
 (s/def ::experimental boolean?)
+(s/def ::standards-status (s/nilable string?))
 (s/def ::used-codesystem
   (s/keys :req-un [::uri]
-          :opt-un [::status ::experimental]))
+          :opt-un [::status ::experimental ::standards-status]))
 
 ;; Compose pin — a system+version pair locked by the compose definition.
 (s/def ::compose-pin (s/keys :req-un [::system] :opt-un [::version]))
@@ -140,10 +144,11 @@
 (s/def ::used-codesystems (s/coll-of ::used-codesystem))
 (s/def ::used-valuesets (s/coll-of string?))
 (s/def ::compose-pins (s/coll-of ::compose-pin))
+(s/def ::display-language (s/nilable string?))
 (s/def ::expansion-result
   (s/keys :req-un [::concepts]
           :opt-un [::total ::used-codesystems ::used-valuesets
-                   ::compose-pins ::issues]))
+                   ::compose-pins ::issues ::display-language]))
 
 ;; Resource metadata — returned by cs-resource and vs-resource.
 (s/def ::title (s/nilable string?))
