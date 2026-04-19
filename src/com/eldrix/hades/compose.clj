@@ -210,6 +210,7 @@
         bad-filter-issue (when (seq filters) (broken-filter-issue system filters))
         match-result (when (and system (not concepts))
                        (find-matches ctx (build-query system version filters params)))
+        match-issues (:issues match-result)
         system-results (cond
                          concepts (expand-include-concepts ctx system version concepts params)
                          system   (:concepts match-result)
@@ -221,7 +222,8 @@
     {:issues (cond-> (vec vs-issues)
                unknown-version-issue (conj unknown-version-issue)
                unknown-system-issue (conj unknown-system-issue)
-               bad-filter-issue (conj bad-filter-issue))
+               bad-filter-issue (conj bad-filter-issue)
+               (seq match-issues) (into match-issues))
      :total (:total match-result)
      :concepts (if (and (some? system-results) (seq vs-concepts))
                  (let [vs-set (set (map concept-key vs-concepts))]

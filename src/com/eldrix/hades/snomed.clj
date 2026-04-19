@@ -95,6 +95,95 @@
   [code]
   (and code (or (str/includes? code ":") (str/includes? code "{"))))
 
+(defn- numeric-property-id?
+  "Returns true if the property string looks like a SNOMED concept id —
+  a non-empty run of digits. Used to distinguish attribute-id refinement
+  filters from named filters like \"concept\"/\"parent\"/\"child\"."
+  [property]
+  (boolean (and (string? property) (re-matches #"\d+" property))))
+
+(defn- compose-filter->ecl-part
+  "Translate a single FHIR compose filter into an ECL fragment.
+
+  Returns one of:
+  - `{:hierarchy \"<< 73211009\"}` — a top-level concept-set constraint
+  - `{:refinement \"116676008 = 72704001\"}` — an attribute refinement
+  - `{:unsupported <msg>}` — filter shape is not representable in ECL
+
+  FHIR compose filter properties for SNOMED CT:
+  - `concept`  : hierarchical ops (`is-a`, `descendent-of`, `is-not-a`,
+                 `generalizes`, `in`, `=`)
+  - `parent`   : direct-parent exact match (`=`)
+  - `child`    : direct-child exact match (`=`)
+  - `expression`: raw ECL string (`=` or `in`)
+  - `<sctid>`  : attribute refinement (`=` only)"
+  [{:keys [property op value]}]
+  (if (or (nil? value) (and (string? value) (str/blank? value)))
+    ;; vs-invalid is caught upstream in compose/broken-filter-issue; still
+    ;; guard here so a malformed filter can never poison the ECL string.
+    {:unsupported (str "filter property=" (or property "?")
+                       " op=" (or op "?") " missing value")}
+    (cond
+      (= property "concept")
+      (case op
+        "=" {:hierarchy value}
+        "is-a" {:hierarchy (str "<< " value)}
+        ("descendent-of" "descendant-of") {:hierarchy (str "< " value)}
+        "is-not-a" {:hierarchy (str "* MINUS << " value)}
+        "generalizes" {:hierarchy (str ">> " value)}
+        "in" {:hierarchy (str "^ " value)}
+        {:unsupported (str "filter property=concept op=" op " not supported")})
+
+      (= property "parent")
+      (if (= op "=")
+        {:hierarchy (str ">! " value)}
+        {:unsupported (str "filter property=parent op=" op " not supported")})
+
+      (= property "child")
+      (if (= op "=")
+        {:hierarchy (str "<! " value)}
+        {:unsupported (str "filter property=child op=" op " not supported")})
+
+      (= property "expression")
+      (if (contains? #{"=" "in"} op)
+        {:hierarchy value}
+        {:unsupported (str "filter property=expression op=" op " not supported")})
+
+      (numeric-property-id? property)
+      (if (= op "=")
+        {:refinement (str property " = " value)}
+        {:unsupported (str "filter property=" property " op=" op " not supported")})
+
+      :else
+      {:unsupported (str "filter property=" (or property "?")
+                         " op=" (or op "?") " not supported")})))
+
+(defn compose-filters->ecl
+  "Combine a seq of compose filters into a single ECL expression.
+
+  Hierarchy parts are AND'd; refinement parts become a comma-separated
+  refinement clause attached to the hierarchy. Returns `{:ecl <string>}`
+  on success, or `{:issues [{:severity \"error\" ...}]}` when any filter
+  is unsupported — callers should return zero results plus the issue."
+  [filters]
+  (if-not (seq filters)
+    {:ecl "*"}
+    (let [parts (mapv compose-filter->ecl-part filters)
+          unsupported (keep :unsupported parts)
+          hierarchies (keep :hierarchy parts)
+          refinements (keep :refinement parts)]
+      (if (seq unsupported)
+        {:issues (mapv (fn [msg]
+                         {:severity "error" :type "not-supported"
+                          :details-code "filter-not-supported" :text msg})
+                       unsupported)}
+        (let [base (if (seq hierarchies)
+                     (str/join " AND " hierarchies)
+                     "*")]
+          {:ecl (if (seq refinements)
+                  (str "(" base ") : " (str/join ", " refinements))
+                  base)})))))
+
 ;; FHIR R4 ConceptMap equivalence codes for the SNOMED historical
 ;; association reference sets. See
 ;; https://confluence.ihtsdotools.org/display/DOCRELFMT/5.2.5.1
@@ -417,32 +506,20 @@
   (cs-find-matches [_ query]
     (let [{:keys [version filters max-hits text active-only]} query
           ver (or version (version-uri svc))
-          ecl (if (seq filters)
-                (->> filters
-                     (keep (fn [{:keys [property op value]}]
-                             (when (= property "concept")
-                               (case op
-                                 "is-a" (str "<< " value)
-                                 ;; FHIR spec code is "descendent-of" (with 'e');
-                                 ;; "descendant-of" accepted for natural-spelling clients.
-                                 ("descendent-of" "descendant-of") (str "< " value)
-                                 "is-not-a" (str "* MINUS << " value)
-                                 "generalizes" (str ">> " value)
-                                 nil))))
-                     (str/join " AND "))
-                "*")
-          search-params (cond-> {:constraint ecl}
-                          max-hits                (assoc :max-hits max-hits)
-                          (not (str/blank? text)) (assoc :s text)
-                          (not active-only)       (assoc :inactive-concepts? true))
-          concepts (when-not (str/blank? ecl)
-                     (map (fn [{:keys [conceptId preferredTerm]}]
-                            {:code    (str conceptId)
-                             :system  snomed-system-uri
-                             :version ver
-                             :display preferredTerm})
-                          (hermes/search svc search-params)))]
-      {:concepts (or concepts [])}))
+          {:keys [ecl issues]} (compose-filters->ecl filters)]
+      (if (seq issues)
+        {:concepts [] :issues issues}
+        (let [search-params (cond-> {:constraint ecl}
+                              max-hits                (assoc :max-hits max-hits)
+                              (not (str/blank? text)) (assoc :s text)
+                              (not active-only)       (assoc :inactive-concepts? true))
+              concepts (map (fn [{:keys [conceptId preferredTerm]}]
+                              {:code    (str conceptId)
+                               :system  snomed-system-uri
+                               :version ver
+                               :display preferredTerm})
+                            (hermes/search svc search-params))]
+          {:concepts concepts}))))
   protos/ValueSet
   (vs-resource [_ _params])
   (vs-expand [_ _ctx {:keys [url filter activeOnly] cnt :count ofs :offset}]
