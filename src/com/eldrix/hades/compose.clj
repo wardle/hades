@@ -88,56 +88,65 @@
 (defn- expand-include-concepts
   "Expand an include element that has an explicit concept list.
   Enriches each concept with display from CodeSystem lookup when available.
-  Concepts that don't exist in the CodeSystem are excluded."
+  Concepts that don't exist in the CodeSystem are excluded.
+  Concept enumeration is compose-owned (no cs-find-matches delegation),
+  so compose applies :activeOnly here directly."
   [ctx system version concepts params]
-  (keep (fn [c]
-          (let [code (get c "code")
-                provided-display (get c "display")
-                looked-up (when system
-                            (registry/codesystem-lookup ctx (cond-> {:system system :code code}
-                                                              version (assoc :version version))))]
-            (when (or looked-up (nil? system))
-              (let [display-langs (parse-display-language (:displayLanguage params))
-                    lang-display (when (and (seq display-langs) looked-up)
-                                   (find-display-for-language (:designations looked-up) display-langs))
-                    display (or provided-display lang-display (:display looked-up))
-                    result-version (or (:version looked-up) version)
-                    inactive? (when looked-up
-                                (some (fn [p] (and (= :inactive (:code p)) (:value p)))
-                                      (:properties looked-up)))
-                    abstract? (:abstract looked-up)
-                    designations (:designations looked-up)]
-                (cond-> {:code    code
-                         :system  system
-                         :display display}
-                  result-version (assoc :version result-version)
-                  (seq designations) (assoc :designations designations)
-                  abstract? (assoc :abstract true)
-                  inactive? (assoc :inactive true)
-                  (and (seq (:properties params)) looked-up)
-                  (assoc :properties
-                         (let [want (set (:properties params))]
-                           (filterv (fn [p]
-                                      (let [k (:code p)]
-                                        (contains? want (if (keyword? k) (name k) (str k)))))
-                                    (:properties looked-up)))))))))
-        concepts))
+  (let [active-only? (:activeOnly params)]
+    (keep (fn [c]
+            (let [code (get c "code")
+                  provided-display (get c "display")
+                  looked-up (when system
+                              (registry/codesystem-lookup ctx (cond-> {:system system :code code}
+                                                                version (assoc :version version))))]
+              (when (or looked-up (nil? system))
+                (let [display-langs (parse-display-language (:displayLanguage params))
+                      lang-display (when (and (seq display-langs) looked-up)
+                                     (find-display-for-language (:designations looked-up) display-langs))
+                      display (or provided-display lang-display (:display looked-up))
+                      result-version (or (:version looked-up) version)
+                      inactive? (when looked-up
+                                  (some (fn [p] (and (= :inactive (:code p)) (:value p)))
+                                        (:properties looked-up)))
+                      abstract? (:abstract looked-up)
+                      designations (:designations looked-up)]
+                  (when-not (and active-only? inactive?)
+                    (cond-> {:code    code
+                             :system  system
+                             :display display}
+                      result-version (assoc :version result-version)
+                      (seq designations) (assoc :designations designations)
+                      abstract? (assoc :abstract true)
+                      inactive? (assoc :inactive true)
+                      (and (seq (:properties params)) looked-up)
+                      (assoc :properties
+                             (let [want (set (:properties params))]
+                               (filterv (fn [p]
+                                          (let [k (:code p)]
+                                            (contains? want (if (keyword? k) (name k) (str k)))))
+                                        (:properties looked-up))))))))))
+          concepts)))
 
-(defn- expand-include-filters
-  "Expand an include element that has filters, delegating to cs-find-matches."
-  [ctx system version filters params]
-  (registry/codesystem-find-matches ctx {:system system :version version
-                                          :filters (parse-filters filters)
-                                          :displayLanguage (:displayLanguage params)
-                                          :properties (:properties params)}))
+(defn- build-query
+  "Build the provider-facing ::query map from compose-include state and
+  request params. The provider honours all constraints (filters, text,
+  max-hits, properties, active-only). Offset is not part of the query —
+  compose applies it after dedup/exclude, since only compose has the
+  correct post-merge view for multi-include expansions."
+  [system version filters params]
+  (cond-> {:system system}
+    version                 (assoc :version version)
+    (seq filters)           (assoc :filters (parse-filters filters))
+    (:displayLanguage params) (assoc :displayLanguage (:displayLanguage params))
+    (seq (:properties params)) (assoc :properties (:properties params))
+    (:max-hits params)      (assoc :max-hits (:max-hits params))
+    (:text params)          (assoc :text (:text params))
+    (:activeOnly params)    (assoc :active-only (:activeOnly params))))
 
-(defn- expand-include-all
-  "Expand an include element with just a system (no concept list, no filters).
-  Returns all concepts from the CodeSystem."
-  [ctx system version params]
-  (registry/codesystem-find-matches ctx {:system system :version version :filters nil
-                                          :displayLanguage (:displayLanguage params)
-                                          :properties (:properties params)}))
+(defn- find-matches
+  "Call cs-find-matches and return the raw ::match-result map."
+  [ctx query]
+  (registry/codesystem-find-matches ctx query))
 
 (defn- expand-valueset-refs
   "Expand referenced ValueSets, checking for circular references.
@@ -199,11 +208,12 @@
            :text         (str "A definition for CodeSystem '" system
                               "' could not be found, so the value set cannot be fully expanded")})
         bad-filter-issue (when (seq filters) (broken-filter-issue system filters))
+        match-result (when (and system (not concepts))
+                       (find-matches ctx (build-query system version filters params)))
         system-results (cond
                          concepts (expand-include-concepts ctx system version concepts params)
-                         filters (expand-include-filters ctx system version filters params)
-                         system (expand-include-all ctx system version params)
-                         :else nil)
+                         system   (:concepts match-result)
+                         :else    nil)
         vs-ref (when (seq vs-urls)
                  (expand-valueset-refs ctx vs-urls expanding))
         vs-concepts (:concepts vs-ref)
@@ -212,6 +222,7 @@
                unknown-version-issue (conj unknown-version-issue)
                unknown-system-issue (conj unknown-system-issue)
                bad-filter-issue (conj bad-filter-issue))
+     :total (:total match-result)
      :concepts (if (and (some? system-results) (seq vs-concepts))
                  (let [vs-set (set (map concept-key vs-concepts))]
                    (filter (fn [c] (contains? vs-set (concept-key c))) system-results))
@@ -219,10 +230,20 @@
 
 (defn- collect-used-codesystems
   "Collect used-codesystem metadata for each distinct (system, version) pair
-  in the concepts. When a concept has no :version, the CodeSystem's own
-  version is used (if any)."
-  [ctx concepts]
-  (let [pairs (into #{} (keep (fn [c] (when-let [sys (:system c)] [sys (:version c)]))) concepts)]
+  consulted during expansion. Concept-level pairs (with resolved versions)
+  take precedence; fall back to include-level pairs only for systems whose
+  include returned no concepts (e.g. a bounded expansion with count=0)."
+  [ctx compose concepts]
+  (let [concept-pairs (into #{} (keep (fn [c] (when-let [sys (:system c)] [sys (:version c)]))) concepts)
+        concept-systems (into #{} (map first) concept-pairs)
+        include-pairs (into #{}
+                            (comp
+                              (keep (fn [inc]
+                                      (when-let [sys (get inc "system")]
+                                        (when-not (contains? concept-systems sys)
+                                          [sys (get inc "version")])))))
+                            (get compose "include"))
+        pairs (into concept-pairs include-pairs)]
     (mapv (fn [[sys ver]]
             (let [cs (when sys
                        (or (when ver (registry/codesystem ctx (registry/versioned-uri sys ver)))
@@ -264,21 +285,34 @@
 (defn expand-compose
   "Expand a FHIR ValueSet compose definition into an expansion result.
 
-  Returns an ::expansion-result map with :concepts, :total, :used-codesystems,
-  and :compose-pins. Parameters:
-  - ctx     — overlay context (::registry/ctx)
-  - compose — parsed compose map (string keys: \"include\", \"exclude\", \"inactive\")
-  - params  — {:filter :activeOnly :offset :count :expanding}"
+  Compose is a pure orchestrator: it builds a ::query from each include's
+  state plus request params, asks each CodeSystem provider to satisfy
+  that query in full, and then merges, dedups and excludes the results.
+  Providers are responsible for filter/text/active-only/max-hits —
+  compose does not post-process those. Compose does apply :offset
+  locally, since only compose sees the post-dedup/exclude view."
   [ctx compose params]
-  (let [;; Merge compose-level displayLanguage if not overridden by request
-        compose-lang (extract-compose-display-language compose)
+  (let [compose-lang (extract-compose-display-language compose)
         params (if (and compose-lang (not (:displayLanguage params)))
                  (assoc params :displayLanguage compose-lang)
                  params)
+        ;; Request-level filter is a free-text search; rename to :text
+        ;; for the provider query so it's not confused with include.filter.
+        params (cond-> params
+                 (:filter params) (-> (assoc :text (:filter params))
+                                      (dissoc :filter)))
         includes (get compose "include")
         excludes (get compose "exclude")
         inactive-allowed (get compose "inactive" true)
-        include-results (mapv #(expand-include ctx % params) includes)
+        ;; Inactive-not-allowed at compose level is equivalent to
+        ;; activeOnly for the provider query.
+        active-only? (or (:activeOnly params) (false? inactive-allowed))
+        ;; Push max-hits = count + offset so compose has enough concepts
+        ;; left after dedup + exclude + offset-slice.
+        include-params (cond-> (assoc params :activeOnly active-only?)
+                         (:count params)
+                         (assoc :max-hits (+ (:count params) (or (:offset params) 0))))
+        include-results (mapv #(expand-include ctx % include-params) includes)
         include-issues (vec (mapcat :issues include-results))
         included (into {} (map (fn [c] [(concept-key c) c]))
                         (mapcat :concepts include-results))
@@ -288,40 +322,36 @@
         after-exclude (if excluded
                         (remove (fn [[k _]] (contains? excluded k)) included)
                         included)
-        concepts (map second after-exclude)
-        after-inactive (if (or (false? inactive-allowed) (:activeOnly params))
-                         (remove :inactive concepts)
-                         concepts)
-        after-filter (if-let [f (:filter params)]
-                       (let [f-lower (str/lower-case f)]
-                         (filter (fn [c]
-                                   (or (and (:display c)
-                                            (str/includes? (str/lower-case (:display c)) f-lower))
-                                       (and (:code c)
-                                            (str/includes? (str/lower-case (:code c)) f-lower))))
-                                 after-inactive))
-                       after-inactive)
-        all-concepts (vec after-filter)
-        used-cs (collect-used-codesystems ctx all-concepts)
-        ;; Systems that appear at multiple distinct versions in the
-        ;; expansion (overload). Rendering uses this to decide whether to
-        ;; emit :version on each concept.
+        merged-concepts (vec (map second after-exclude))
+        used-cs (collect-used-codesystems ctx compose merged-concepts)
         sys->versions (reduce (fn [acc c]
                                 (if-let [sys (:system c)]
                                   (update acc sys (fnil conj #{}) (:version c))
                                   acc))
-                              {} all-concepts)
+                              {} merged-concepts)
         multi-version (into #{} (keep (fn [[sys vers]]
                                         (when (> (count vers) 1) sys)))
                             sys->versions)
         offset' (or (:offset params) 0)
-        paged (cond->> all-concepts
-                (pos? offset') (drop offset')
+        paged (cond->> merged-concepts
+                (pos? offset')  (drop offset')
                 (:count params) (take (:count params)))]
     (cond-> {:concepts              (vec paged)
-             :total                 (count all-concepts)
              :used-codesystems      used-cs
              :compose-pins          (extract-compose-pins compose)
              :multi-version-systems multi-version}
+      ;; :total — prefer a value the provider already computed (cheap for
+      ;; in-memory CSes; Hermes will follow once ecl-count lands). For a
+      ;; single-include expansion that's the authoritative total; for
+      ;; multi-include the dedup across sources makes the sum unreliable,
+      ;; so we only emit total when the caller didn't bound the expansion.
+      true (as-> r
+             (let [singleton-total (when (and (= 1 (count include-results))
+                                              (empty? excludes))
+                                     (:total (first include-results)))]
+               (cond-> r
+                 singleton-total              (assoc :total singleton-total)
+                 (and (nil? singleton-total)
+                      (nil? (:count params))) (assoc :total (count merged-concepts)))))
       (:displayLanguage params) (assoc :display-language (:displayLanguage params))
-      (seq include-issues) (assoc :issues include-issues))))
+      (seq include-issues)      (assoc :issues include-issues))))

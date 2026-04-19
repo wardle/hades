@@ -381,9 +381,9 @@
                                concepts)
         expansion (cond-> {"identifier" (str "urn:uuid:" (java.util.UUID/randomUUID))
                            "timestamp"  (str (java.time.Instant/now))
-                           "total"      (int (or total 0))
                            "parameter"  (vec expansion-params)
                            "contains"   contains-entries}
+                    total        (assoc "total" (int total))
                     offset-value (assoc "offset" (int offset-value)))]
     (cond-> {"resourceType" "ValueSet"
              "url"          resolved-url

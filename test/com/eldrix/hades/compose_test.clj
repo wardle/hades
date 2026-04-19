@@ -93,10 +93,9 @@
   (testing "offset and count"
     (let [compose {"include" [{"system" "http://example.com/cs"}]}
           {all :concepts} (compose/expand-compose nil compose {})
-          {:keys [concepts total]} (compose/expand-compose nil compose {:offset 1 :count 2})]
+          {:keys [concepts]} (compose/expand-compose nil compose {:offset 1 :count 2})]
       (is (= 2 (count concepts)))
-      (is (= (take 2 (drop 1 all)) concepts))
-      (is (= 5 total)))))
+      (is (= (take 2 (drop 1 all)) concepts)))))
 
 (deftest expand-compose-valueset-ref-test
   (testing "include via valueSet reference"

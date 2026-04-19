@@ -418,8 +418,9 @@
        (ancestor? (:parents hierarchy) codeB codeA) "subsumes"
        :else "not-subsumed")})
 
-  (cs-find-matches [_ {:keys [filters displayLanguage properties]}]
-    (let [all-concepts (vals code-index)
+  (cs-find-matches [_ query]
+    (let [{:keys [filters displayLanguage properties max-hits text active-only]} query
+          all-concepts (vals code-index)
           children-map (:children hierarchy)
           parents-map (:parents hierarchy)
           display-langs (display/parse-display-language displayLanguage)
@@ -429,28 +430,48 @@
                        (fn [c]
                          (every? #(concept-matches-filter? code-index children-map parents-map c %) filters))
                        all-concepts)
-                     all-concepts)]
-      (map (fn [c]
-             (let [display (or (when (seq display-langs)
-                                 (display/find-display-for-language (:designations c) display-langs))
-                               (:display c))
-                   selected-props (when want-props
-                                    (vec (keep (fn [prop]
-                                                 (let [pc (get prop "code")
-                                                       v (typed-property-value prop)]
-                                                   (when (and pc (some? v) (contains? want-props pc))
-                                                     {:code (keyword pc) :value v})))
-                                               (:properties c))))]
-               (cond-> {:code    (:code c)
-                        :system  url
-                        :version version
-                        :display display
-                        :designations (:designations c)}
-                 (concept-inactive? c) (assoc :inactive true
-                                              :inactive-status (concept-inactive-status c))
-                 (concept-abstract? property-uri-map c) (assoc :abstract true)
-                 (seq selected-props) (assoc :properties selected-props))))
-           matching)))
+                     all-concepts)
+          matching (if active-only
+                     (clojure.core/remove concept-inactive? matching)
+                     matching)
+          matching (if (str/blank? text)
+                     matching
+                     (let [f-lower (str/lower-case text)]
+                       (clojure.core/filter
+                         (fn [c]
+                           (or (and (:display c)
+                                    (str/includes? (str/lower-case (:display c)) f-lower))
+                               (some (fn [d]
+                                       (when-let [v (:value d)]
+                                         (str/includes? (str/lower-case v) f-lower)))
+                                     (:designations c))))
+                         matching)))
+          total-known (clojure.core/count matching)
+          matching (cond->> matching
+                     max-hits (take max-hits))
+          concepts (map (fn [c]
+                          (let [display (or (when (seq display-langs)
+                                              (display/find-display-for-language (:designations c) display-langs))
+                                            (:display c))
+                                selected-props (when want-props
+                                                 (vec (keep (fn [prop]
+                                                              (let [pc (get prop "code")
+                                                                    v (typed-property-value prop)]
+                                                                (when (and pc (some? v) (contains? want-props pc))
+                                                                  {:code (keyword pc) :value v})))
+                                                            (:properties c))))]
+                            (cond-> {:code    (:code c)
+                                     :system  url
+                                     :version version
+                                     :display display
+                                     :designations (:designations c)}
+                              (concept-inactive? c) (assoc :inactive true
+                                                           :inactive-status (concept-inactive-status c))
+                              (concept-abstract? property-uri-map c) (assoc :abstract true)
+                              (seq selected-props) (assoc :properties selected-props))))
+                        matching)]
+      (cond-> {:concepts concepts}
+        total-known (assoc :total total-known))))
 
   protos/ValueSet
   (vs-resource [_ _params]

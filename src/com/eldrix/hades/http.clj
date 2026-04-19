@@ -611,7 +611,9 @@
             expand-params  (cond-> {:url             url
                                     :activeOnly      active-only?
                                     :filter          filter-value
-                                    :displayLanguage display-lang}
+                                    :displayLanguage display-lang
+                                    :count           count-value
+                                    :offset          offset-value}
                              (seq req-properties) (assoc :properties req-properties))
             result (registry/valueset-expand ctx expand-params)]
         (-> context
@@ -702,11 +704,8 @@
                                      (into (wire/build-issues-param (:issues result)))
                                      (into (wire/build-echo-params
                                              (assoc exp-ctx :display-language effective-lang))))
-                {:keys [count-value offset-value include-designations?]} exp-ctx
-                paged-result (cond-> result
-                               offset-value (update :concepts #(drop offset-value %))
-                               count-value  (update :concepts #(take count-value %))
-                               :always      (update :concepts vec))
+                {:keys [offset-value include-designations?]} exp-ctx
+                paged-result (update result :concepts vec)
                 vs-map (wire/expansion->valueset paged-result
                          {:vs-meta vs-meta
                           :url url

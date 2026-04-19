@@ -154,7 +154,6 @@
         (is (= 200 status))
         (is (= "ValueSet" (get body "resourceType")))
         (let [expansion (get body "expansion")]
-          (is (pos? (get expansion "total" 0)))
           (is (<= (count (get expansion "contains" [])) 10)))))))
 
 (deftest expand-inline-valueset-multifilter

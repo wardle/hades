@@ -266,8 +266,9 @@
          ;; look up historical associations, and check for equivalence  - this catches SAME-AS and REPLACED-BY etc.
          (and (= systemA systemB) ((hermes/with-historical svc codeA') codeB')) "equivalent"
          :else "not-subsumed")}))
-  (cs-find-matches [_ {:keys [version filters]}]
-    (let [ver (or version (version-uri svc))
+  (cs-find-matches [_ query]
+    (let [{:keys [version filters max-hits text active-only]} query
+          ver (or version (version-uri svc))
           ecl (if (seq filters)
                 (->> filters
                      (keep (fn [{:keys [property op value]}]
@@ -281,36 +282,47 @@
                                  "generalizes" (str ">> " value)
                                  nil))))
                      (str/join " AND "))
-                "*")]
-      (when-not (str/blank? ecl)
-        (->> (hermes/search svc {:constraint ecl})
-             (map (fn [{:keys [conceptId preferredTerm]}]
-                    {:code    (str conceptId)
-                     :system  snomed-system-uri
-                     :version ver
-                     :display preferredTerm}))))))
+                "*")
+          search-params (cond-> {:constraint ecl}
+                          max-hits                (assoc :max-hits max-hits)
+                          (not (str/blank? text)) (assoc :s text)
+                          (not active-only)       (assoc :inactive-concepts? true))
+          concepts (when-not (str/blank? ecl)
+                     (map (fn [{:keys [conceptId preferredTerm]}]
+                            {:code    (str conceptId)
+                             :system  snomed-system-uri
+                             :version ver
+                             :display preferredTerm})
+                          (hermes/search svc search-params)))]
+      {:concepts (or concepts [])}))
   protos/ValueSet
   (vs-resource [_ _params])
-  (vs-expand [_ _ctx {:keys [url filter activeOnly]}]
+  (vs-expand [_ _ctx {:keys [url filter activeOnly] cnt :count ofs :offset}]
     (when-let [{:keys [ecl error message]} (parse-implicit-value-set url)]
       (if error
         {:concepts [] :total 0
          :issues   [{:severity     "error" :type "not-supported"
                      :details-code "not-implemented" :text message}]}
-        (let [ver (version-uri svc)
+        (let [ver      (version-uri svc)
+              ofs'     (or ofs 0)
+              max-hits (when cnt (+ cnt ofs'))
+              search-params (cond-> {:constraint         ecl
+                                     :inactive-concepts? (if (false? activeOnly) true false)}
+                              filter   (assoc :s filter)
+                              max-hits (assoc :max-hits max-hits))
+              results  (cond->> (hermes/search svc search-params)
+                         (pos? ofs') (drop ofs'))
               concepts (mapv (fn [{:keys [conceptId term preferredTerm]}]
-                               (hash-map :code (str conceptId)
-                                         :system snomed-system-uri
-                                         :version ver
-                                         :display preferredTerm
-                                         :designations [{:value term}]))
-                             (hermes/search svc (cond-> {:constraint         ecl
-                                                         :inactive-concepts? (if (false? activeOnly) true false)}
-                                                  filter (assoc :s filter))))]
-          {:concepts         concepts
-           :total            (count concepts)
-           :used-codesystems [{:uri (str snomed-system-uri "|" ver) :status "active"}]
-           :compose-pins     []}))))
+                               {:code         (str conceptId)
+                                :system       snomed-system-uri
+                                :version      ver
+                                :display      preferredTerm
+                                :designations [{:value term}]})
+                             results)]
+          (cond-> {:concepts         concepts
+                   :used-codesystems [{:uri (str snomed-system-uri "|" ver) :status "active"}]
+                   :compose-pins     []}
+            (nil? cnt) (assoc :total (count concepts)))))))
   (vs-validate-code [_ _ctx {:keys [url code system display displayLanguage]}]
     (when (= system snomed-system-uri)
       (let [code' (parse-long code)

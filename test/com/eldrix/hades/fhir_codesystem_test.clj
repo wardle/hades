@@ -235,21 +235,27 @@
 
 ;; --- cs-find-matches ---
 
+(defn- find-matches
+  "Test helper — unwrap the ::match-result's :concepts seq."
+  [cs query]
+  (:concepts (protos/cs-find-matches cs query)))
+
 (deftest cs-find-matches-nil-filters-test
   (testing "nil filters returns all concepts"
-    (let [result (protos/cs-find-matches hier-fcs {:filters nil})]
+    (let [result (find-matches hier-fcs {:system "http://example.com/test-cs"})]
       (is (= 6 (count result)))
       (is (every? #(= "http://example.com/test-cs" (:system %)) result)))))
 
 (deftest cs-find-matches-empty-filters-test
   (testing "empty filters returns all concepts"
-    (let [result (protos/cs-find-matches hier-fcs {:filters []})]
+    (let [result (find-matches hier-fcs {:system "http://example.com/test-cs" :filters []})]
       (is (= 6 (count result))))))
 
 (deftest cs-find-matches-is-a-test
   (testing "is-a filter"
-    (let [result (protos/cs-find-matches hier-fcs
-                   {:filters [{:property "concept" :op "is-a" :value "A"}]})
+    (let [result (find-matches hier-fcs
+                   {:system "http://example.com/test-cs"
+                    :filters [{:property "concept" :op "is-a" :value "A"}]})
           codes (set (map :code result))]
       (is (contains? codes "A"))
       (is (contains? codes "A1"))
@@ -259,8 +265,9 @@
 
 (deftest cs-find-matches-descendent-of-test
   (testing "descendent-of filter excludes the root"
-    (let [result (protos/cs-find-matches hier-fcs
-                   {:filters [{:property "concept" :op "descendent-of" :value "A"}]})
+    (let [result (find-matches hier-fcs
+                   {:system "http://example.com/test-cs"
+                    :filters [{:property "concept" :op "descendent-of" :value "A"}]})
           codes (set (map :code result))]
       (is (not (contains? codes "A")))
       (is (contains? codes "A1"))
@@ -269,8 +276,9 @@
 
 (deftest cs-find-matches-is-not-a-test
   (testing "is-not-a filter"
-    (let [result (protos/cs-find-matches hier-fcs
-                   {:filters [{:property "concept" :op "is-not-a" :value "A"}]})
+    (let [result (find-matches hier-fcs
+                   {:system "http://example.com/test-cs"
+                    :filters [{:property "concept" :op "is-not-a" :value "A"}]})
           codes (set (map :code result))]
       (is (contains? codes "B"))
       (is (not (contains? codes "A")))
@@ -278,22 +286,25 @@
 
 (deftest cs-find-matches-equals-test
   (testing "= filter on property"
-    (let [result (protos/cs-find-matches hier-fcs
-                   {:filters [{:property "status" :op "=" :value "active"}]})
+    (let [result (find-matches hier-fcs
+                   {:system "http://example.com/test-cs"
+                    :filters [{:property "status" :op "=" :value "active"}]})
           codes (set (map :code result))]
       (is (contains? codes "B")))))
 
 (deftest cs-find-matches-equals-code-test
   (testing "= filter on code property"
-    (let [result (protos/cs-find-matches hier-fcs
-                   {:filters [{:property "code" :op "=" :value "B"}]})
+    (let [result (find-matches hier-fcs
+                   {:system "http://example.com/test-cs"
+                    :filters [{:property "code" :op "=" :value "B"}]})
           codes (set (map :code result))]
       (is (= #{"B"} codes)))))
 
 (deftest cs-find-matches-multiple-filters-test
   (testing "multiple filters are ANDed"
-    (let [result (protos/cs-find-matches hier-fcs
-                   {:filters [{:property "concept" :op "is-a" :value "A"}
+    (let [result (find-matches hier-fcs
+                   {:system "http://example.com/test-cs"
+                    :filters [{:property "concept" :op "is-a" :value "A"}
                               {:property "code" :op "=" :value "A1"}]})
           codes (set (map :code result))]
       (is (= #{"A1"} codes)))))

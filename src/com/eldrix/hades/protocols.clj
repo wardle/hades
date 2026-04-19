@@ -157,6 +157,43 @@
   (s/keys :opt-un [::url ::version ::name ::title ::status
                    ::description ::experimental]))
 
+;; Query — the unified request passed to cs-find-matches. Carries every
+;; constraint a provider must honour: concept-level filters, request
+;; text, display language, requested properties, pagination and active
+;; scope. Providers MUST return concepts that satisfy the ENTIRE query
+;; (delegating what they can't do natively to the shared defaults in
+;; `com.eldrix.hades.cs-defaults`). No partial handling, no :applied
+;; signalling — compose trusts the return value.
+;;
+;; Spec names live under the :query/ keyword namespace to avoid
+;; colliding with CS result-field specs (e.g. ::text on an issue).
+(s/def :query/filter-entry
+  (s/keys :req-un [:query/property :query/op :query/value]))
+(s/def :query/property string?)
+(s/def :query/op string?)
+(s/def :query/value string?)
+(s/def :query/filters (s/nilable (s/coll-of :query/filter-entry)))
+(s/def :query/text (s/nilable string?))
+(s/def :query/max-hits (s/nilable nat-int?))
+(s/def :query/active-only (s/nilable boolean?))
+;; Note: offset/skip is deliberately NOT part of the Query. Lucene (via
+;; Hermes) currently lacks efficient search-after pagination, so emulating
+;; skip in a provider means materialising the discarded prefix. Compose
+;; applies offset itself after dedup/exclude, which is also the only
+;; place it can be correct for multi-include expansions. When Hermes
+;; gains native search-after, reintroduce :skip in the Query.
+(s/def ::query
+  (s/keys :req-un [::system]
+          :opt-un [::version ::displayLanguage ::properties
+                   :query/filters :query/text :query/max-hits
+                   :query/active-only]))
+
+;; Match result — returned by cs-find-matches. Always a map; :total is
+;; optional and populated only when cheaply knowable by the provider.
+(s/def ::match-result
+  (s/keys :req-un [::concepts]
+          :opt-un [::total ::issues]))
+
 
 
 (defprotocol CodeSystem
@@ -179,9 +216,13 @@
   (cs-subsumes [this params]
     "Test the subsumption relationship between code/Coding A and code/Coding B
     given the semantics of subsumption in the underlying code system")
-  (cs-find-matches [this params]
-    "Given a set of properties (and text), return one or more possible matching
-    codes"))
+  (cs-find-matches [this query]
+    "Return the concepts that satisfy the ENTIRE query (::query). Providers
+    must honour every supplied constraint — filters, text, bounds, properties,
+    activeOnly, displayLanguage — either natively or by delegating to the
+    shared helpers in `com.eldrix.hades.cs-defaults`. Returns a ::match-result
+    `{:concepts [...]  :total? (optional)}`. Returning a lazy seq for
+    :concepts is fine; only :total needs to be computed eagerly when known."))
 
 (defprotocol ValueSet
   "A value set is selection of codes for use in a particular context."
