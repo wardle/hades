@@ -20,7 +20,6 @@
             [com.eldrix.hades.registry :as registry]
             [com.eldrix.hades.wire :as wire]
             [io.pedestal.connector :as conn]
-            [io.pedestal.http.cors :as cors]
             [io.pedestal.http.jetty :as jetty])
   (:import (java.net URLDecoder)
            (java.nio.charset StandardCharsets)))
@@ -28,6 +27,15 @@
 ;; ---------------------------------------------------------------------------
 ;; Query-string parsing
 ;; ---------------------------------------------------------------------------
+
+(def ^:private json-write-opts
+  "Charred JSON writer options for FHIR responses. Both escapes default
+  to true but are unnecessary here: FHIR payloads are parsed, not eval'd
+  as JavaScript (so U+2028/U+2029 escaping is wasted scan work), and
+  escape-slash bloats every CodeSystem/ValueSet URL with `\\/` pairs
+  that every conforming JSON parser would unescape anyway."
+  {:escape-js-separators false
+   :escape-slash         false})
 
 (defn- decode [^String s]
   (when s (URLDecoder/decode s StandardCharsets/UTF_8)))
@@ -106,7 +114,8 @@
   "Return the first value for parameter `nm` from GET query or POST body."
   [{:keys [query-params post-params] :as _params} nm]
   (or (first (get query-params nm))
-      (first (keep param-value-str (entries post-params nm)))))
+      (when (seq post-params)
+        (first (keep param-value-str (entries post-params nm))))))
 
 (defn- get-bool [params nm]
   (let [v (get-first params nm)]
@@ -127,31 +136,38 @@
   "Return all values for parameter `nm` from GET query or POST body.
   For POST, only string-typed values are returned."
   [{:keys [query-params post-params]} nm]
-  (let [from-query (get query-params nm [])
-        from-post  (keep param-value-str (entries post-params nm))]
-    (into (vec from-query) from-post)))
+  (let [from-query (vec (get query-params nm []))]
+    (if (seq post-params)
+      (into from-query (keep param-value-str (entries post-params nm)))
+      from-query)))
 
 (defn- post-coding
   "Extract a Coding-valued parameter from POST. Returns a string-keyed map or
   nil. Handles both `valueCoding` and `part` structures."
   [params nm]
-  (when-let [p (first (entries (:post-params params) nm))]
-    (or (get p "valueCoding")
-        ;; FHIR allows Coding to be represented as parts too, but the HAPI-
-        ;; native form is valueCoding. Only this is surfaced currently.
-        nil)))
+  (let [ps (:post-params params)]
+    (when (seq ps)
+      (when-let [p (first (entries ps nm))]
+        (or (get p "valueCoding")
+            ;; FHIR allows Coding to be represented as parts too, but the HAPI-
+            ;; native form is valueCoding. Only this is surfaced currently.
+            nil)))))
 
 (defn- post-codeable-concept
   "Extract a CodeableConcept-valued parameter from POST. Returns a
   string-keyed map or nil."
   [params nm]
-  (when-let [p (first (entries (:post-params params) nm))]
-    (get p "valueCodeableConcept")))
+  (let [ps (:post-params params)]
+    (when (seq ps)
+      (when-let [p (first (entries ps nm))]
+        (get p "valueCodeableConcept")))))
 
 (defn- post-resources
   "Return all `resource` entries for parameter `nm` from POST."
   [params nm]
-  (keep #(get % "resource") (entries (:post-params params) nm)))
+  (let [ps (:post-params params)]
+    (when (seq ps)
+      (keep #(get % "resource") (entries ps nm)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Request context assembly
@@ -298,7 +314,7 @@
               (if (map? body)
                 (-> context
                     (assoc-in [:response :body]
-                              (charred/write-json-str body))
+                              (charred/write-json-str body json-write-opts))
                     (assoc-in [:response :headers "Content-Type"]
                               "application/fhir+json; charset=utf-8"))
                 context)))})
@@ -891,7 +907,7 @@
                 (assoc context :response
                        {:status  404
                         :headers {"Content-Type" "application/fhir+json; charset=utf-8"}
-                        :body    (charred/write-json-str body)}))
+                        :body    (charred/write-json-str body json-write-opts)}))
               context))})
 
 (defn make-server
@@ -905,9 +921,7 @@
   [opts]
   (let [opts (merge {:port 8080 :host "0.0.0.0" :max-expansion-size 10000} opts)]
     (-> (conn/default-connector-map (:host opts) (:port opts))
-        (conn/with-interceptors
-          [fhir-not-found
-           (cors/allow-origin {:creds true :allowed-origins (constantly true)})])
+        (conn/with-interceptors [fhir-not-found])
         (conn/with-routes (routes opts))
         (jetty/create-connector {:join? false}))))
 
