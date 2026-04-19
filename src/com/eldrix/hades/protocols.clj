@@ -194,6 +194,28 @@
   (s/keys :req-un [::concepts]
           :opt-un [::total ::issues]))
 
+;; ConceptMap $translate — a single match entry plus the overall result.
+;; :equivalence uses the FHIR R4 ConceptMapEquivalence value set; R5
+;; servers may downstream-translate to the newer :relationship codes.
+(s/def ::equivalence
+  #{"relatedto" "equivalent" "equal" "wider" "subsumes"
+    "narrower" "specializes" "inexact" "unmatched" "disjoint"})
+(s/def ::match
+  (s/keys :req-un [::equivalence ::system ::code]
+          :opt-un [::display ::version]))
+(s/def ::matches (s/coll-of ::match))
+(s/def ::translate-result
+  (s/keys :req-un [::result]
+          :opt-un [::message ::matches ::issues]))
+
+;; ConceptMap description — a provider-advertised ConceptMap. Providers
+;; may expose multiple ConceptMaps (e.g. forward + reverse of a SNOMED
+;; map refset); each tuple gets indexed by both url and (source, target)
+;; system pair so callers can $translate with either shape of params.
+(s/def ::cm-description
+  (s/keys :req-un [::url ::system ::target]
+          :opt-un [::title ::description ::version]))
+
 
 
 (defprotocol CodeSystem
@@ -237,8 +259,21 @@
     ctx is the overlay/request context (::registry/ctx), or nil."))
 
 (defprotocol ConceptMap
+  "A ConceptMap resource describes mappings between concepts in
+  different CodeSystems or ValueSets."
   :extend-via-metadata true
+  (cm-describe [this]
+    "Return a seq of ::cm-description maps — one per ConceptMap this
+    provider exposes. The registry uses these to build its url-based
+    and (source, target) system-pair indices. A provider handling both
+    directions of a map must emit two descriptions. Called at
+    registration time; impls should cache any expensive introspection.")
   (cm-resource [this params])
-  (cm-translate [this params]))
+  (cm-translate [this params]
+    "Given a source Coding, return a ::translate-result. Params carry
+    :url (the ConceptMap canonical, possibly with implicit-form query
+    parameters), :system, :code, and optionally :target and :version.
+    Impls must return a complete ::translate-result — no downstream
+    patching."))
 
 

@@ -222,6 +222,27 @@
   [{:keys [outcome]}]
   (parameters [(param-auto "outcome" outcome)]))
 
+(defn- translate-match-param
+  "Build a single $translate match entry as a Parameters.parameter part."
+  [{:keys [equivalence system code display version]}]
+  {"name" "match"
+   "part" (cond-> []
+            equivalence (conj (named "equivalence" {"valueCode" equivalence}))
+            :always (conj (named "concept"
+                                 {"valueCoding" (coding-map
+                                                  (cond-> {:system system :code code}
+                                                    display (assoc :display display)
+                                                    version (assoc :version version)))})))})
+
+(defn translate->parameters
+  "Convert a ::protos/translate-result to a FHIR Parameters map."
+  [{:keys [result message matches issues]}]
+  (parameters
+    (cond-> [(param-boolean "result" (boolean result))]
+      message        (conj (param-string "message" message))
+      (seq matches)  (into (map translate-match-param matches))
+      (seq issues)   (conj (param-resource "issues" (operation-outcome issues))))))
+
 ;; ---------------------------------------------------------------------------
 ;; ValueSet expansion
 ;; ---------------------------------------------------------------------------

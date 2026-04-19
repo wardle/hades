@@ -721,16 +721,59 @@
   {:name ::vs-expand-response :leave vs-expand-leave})
 
 ;; ---------------------------------------------------------------------------
-;; ConceptMap $translate (stub)
+;; ConceptMap $translate
 ;; ---------------------------------------------------------------------------
 
 (defn- cm-translate-enter [context]
-  (assoc context :response
-         {:status 200
-          :body   (wire/lookup->parameters {:system nil :code nil :display nil})}))
+  (let [request (:request context)
+        params  (:hades/params request)
+        ctx     (:hades/ctx request)
+        coding  (post-coding params "coding")
+        url     (get-first params "url")
+        system  (or (get-first params "system")
+                    (get coding "system"))
+        code    (or (get-first params "code")
+                    (get coding "code"))
+        version (or (get-first params "version")
+                    (get coding "version"))
+        target  (or (get-first params "target")
+                    (get-first params "targetsystem"))
+        tparams (cond-> {}
+                  url     (assoc :url url)
+                  system  (assoc :system system)
+                  code    (assoc :code code)
+                  version (assoc :version version)
+                  target  (assoc :target target))
+        result  (when (and code (or url system))
+                  (registry/conceptmap-translate ctx tparams))]
+    (-> context
+        (assoc-in [:request :hades/translate-params] tparams)
+        (assoc :response {:status 200 :body result}))))
+
+(defn- cm-translate-leave [context]
+  (let [response (:response context)]
+    (cond
+      (not= 200 (:status response)) context
+
+      (nil? (:body response))
+      (let [{:keys [url system]} (get-in context [:request :hades/translate-params])
+            target (or url system)
+            msg (str "A definition for ConceptMap '" target "' could not be found")]
+        (assoc context :response
+               {:status 404
+                :body   (wire/operation-outcome
+                          [{:severity "error" :type "not-found" :text msg}])}))
+
+      (map? (:body response))
+      (update-in context [:response :body] wire/translate->parameters)
+
+      :else context)))
 
 (def cm-translate-handler
   {:name ::cm-translate-handler :enter cm-translate-enter})
+
+(def cm-translate-response
+  {:name ::cm-translate-response :leave cm-translate-leave})
 
 ;; ---------------------------------------------------------------------------
 ;; Metadata endpoints
@@ -788,8 +831,8 @@
       ["/fhir/ValueSet/$expand"           :get  (wrap-handler [max-inj vs-expand-response vs-expand-handler])             :route-name ::vs-expand-get]
       ["/fhir/ValueSet/$expand"           :post (wrap-handler [max-inj vs-expand-response vs-expand-handler])             :route-name ::vs-expand-post]
 
-      ["/fhir/ConceptMap/$translate"      :get  (wrap-handler [cm-translate-handler])                                     :route-name ::cm-translate-get]
-      ["/fhir/ConceptMap/$translate"      :post (wrap-handler [cm-translate-handler])                                     :route-name ::cm-translate-post]}))
+      ["/fhir/ConceptMap/$translate"      :get  (wrap-handler [cm-translate-response cm-translate-handler])                                     :route-name ::cm-translate-get]
+      ["/fhir/ConceptMap/$translate"      :post (wrap-handler [cm-translate-response cm-translate-handler])                                     :route-name ::cm-translate-post]}))
 
 ;; ---------------------------------------------------------------------------
 ;; Server

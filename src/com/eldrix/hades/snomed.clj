@@ -95,6 +95,154 @@
   [code]
   (and code (or (str/includes? code ":") (str/includes? code "{"))))
 
+;; FHIR R4 ConceptMap equivalence codes for the SNOMED historical
+;; association reference sets. See
+;; https://confluence.ihtsdotools.org/display/DOCRELFMT/5.2.5.1
+(def ^:private historical-association-maps
+  "SNOMED→SNOMED forward-only ConceptMaps based on the historical
+  association reference sets. Entries are filtered by what Hermes
+  actually has installed at registration time."
+  [{:refset-id snomed/SameAsReferenceSet
+    :title       "SNOMED CT SAME AS association"
+    :equivalence "equal"}
+   {:refset-id snomed/ReplacedByReferenceSet
+    :title       "SNOMED CT REPLACED BY association"
+    :equivalence "equivalent"}
+   {:refset-id snomed/PossiblyEquivalentToReferenceSet
+    :title       "SNOMED CT POSSIBLY EQUIVALENT TO association"
+    :equivalence "inexact"}
+   {:refset-id snomed/PartiallyEquivalentToReferenceSet
+    :title       "SNOMED CT PARTIALLY EQUIVALENT TO association"
+    :equivalence "inexact"}
+   {:refset-id snomed/WasAReferenceSet
+    :title       "SNOMED CT WAS A association"
+    :equivalence "specializes"}
+   {:refset-id snomed/MovedToReferenceSet
+    :title       "SNOMED CT MOVED TO association"
+    :equivalence "equal"}
+   {:refset-id snomed/SimilarToReferenceSet
+    :title       "SNOMED CT SIMILAR TO association"
+    :equivalence "inexact"}
+   {:refset-id snomed/AlternativeReferenceSet
+    :title       "SNOMED CT ALTERNATIVE association"
+    :equivalence "inexact"}
+   {:refset-id snomed/RefersToReferenceSet
+    :title       "SNOMED CT REFERS TO association"
+    :equivalence "relatedto"}])
+
+(def ^:private historical-refset->equivalence
+  (into {} (map (juxt :refset-id :equivalence) historical-association-maps)))
+
+(def ^:private external-map-refsets
+  "SNOMED map reference sets that target an external CodeSystem. The
+  implicit SNOMED→external url is the canonical; the reverse
+  (external→SNOMED) is advertised at the same url with `reverse=true`
+  so both directions resolve through the same provider."
+  [{:refset-id   446608001  ;; SNOMED CT to ICD-O simple map
+    :target      "http://hl7.org/fhir/sid/icd-o"
+    :title       "SNOMED CT to ICD-O simple map"
+    :equivalence "equivalent"}
+   {:refset-id   447562003  ;; SNOMED CT to ICD-10 extended map
+    :target      "http://hl7.org/fhir/sid/icd-10"
+    :title       "SNOMED CT to ICD-10 extended map"
+    :equivalence "relatedto"}
+   {:refset-id   6011000124106 ;; US edition SNOMED→ICD-10-CM
+    :target      "http://hl7.org/fhir/sid/icd-10-cm"
+    :title       "SNOMED CT (US) to ICD-10-CM extended map"
+    :equivalence "relatedto"}])
+
+(def ^:private external-refset->entry
+  (into {} (map (juxt :refset-id identity) external-map-refsets)))
+
+(defn- implicit-cm-url
+  ([refset-id] (str snomed-system-uri "?fhir_cm=" refset-id))
+  ([refset-id reverse?]
+   (cond-> (implicit-cm-url refset-id)
+     reverse? (str "&reverse=true"))))
+
+(defn- installed-refset-ids [svc]
+  (set (hermes/installed-reference-sets svc)))
+
+(defn- parse-cm-url
+  "Extract `{:refset-id :reverse?}` from an implicit SNOMED ConceptMap url.
+  Returns nil when the url is not of the expected shape."
+  [url]
+  (when url
+    (let [q   (:query (parse-snomed-uri url))
+          rid (parse-long (str (:fhir_cm q)))
+          rev (:reverse q)]
+      (when rid
+        {:refset-id rid
+         :reverse?  (or (= "true" rev) (= "1" rev))}))))
+
+(defn- resolve-cm
+  "Given request params, work out which of our known ConceptMaps applies.
+  Returns `{:refset-id :direction :kind :target}` where :kind is
+  `:historical` or `:external` and :direction is `:forward` or `:reverse`.
+  Prefers the explicit url; falls back to the (system, target) pair."
+  [{:keys [url system target]}]
+  (if-let [{:keys [refset-id reverse?]} (parse-cm-url url)]
+    (cond
+      (historical-refset->equivalence refset-id)
+      {:refset-id refset-id :direction :forward :kind :historical}
+
+      (external-refset->entry refset-id)
+      (let [{ext-target :target} (external-refset->entry refset-id)]
+        {:refset-id refset-id
+         :direction (if reverse? :reverse :forward)
+         :kind      :external
+         :target    ext-target}))
+    ;; No usable url — try the (system, target) pair
+    (some (fn [{:keys [refset-id] ext-target :target}]
+            (cond
+              (and (= system snomed-system-uri) (= target ext-target))
+              {:refset-id refset-id :direction :forward :kind :external
+               :target ext-target}
+              (and (= target snomed-system-uri) (= system ext-target))
+              {:refset-id refset-id :direction :reverse :kind :external
+               :target ext-target}))
+          external-map-refsets)))
+
+(defn- translate-historical
+  "SNOMED→SNOMED historical-association forward translation."
+  [svc refset-id code-id]
+  (let [items (get (hermes/historical-associations svc code-id) refset-id)
+        eq    (historical-refset->equivalence refset-id)
+        matches (vec (for [item items
+                           :when (:active item)
+                           :let [target-id (:targetComponentId item)]]
+                       {:equivalence eq
+                        :system      snomed-system-uri
+                        :code        (str target-id)
+                        :display     (:term (hermes/preferred-synonym svc target-id))}))]
+    {:result (boolean (seq matches)) :matches matches}))
+
+(defn- translate-external-forward
+  "SNOMED→external translation. `code-id` is a SNOMED concept id; we
+  return the external codes it maps to via the map refset."
+  [svc refset-id code-id target-system equivalence]
+  (let [items  (hermes/component-refset-items svc code-id refset-id)
+        matches (vec (for [item items
+                           :let [t (:mapTarget item)]
+                           :when (and t (not= "" t))]
+                       {:equivalence equivalence
+                        :system      target-system
+                        :code        t}))]
+    {:result (boolean (seq matches)) :matches matches}))
+
+(defn- translate-external-reverse
+  "external→SNOMED translation for a given map refset. `code` is the
+  external (target) code string; we emit matching SNOMED concepts."
+  [svc refset-id code equivalence]
+  (let [snomed-ids (hermes/member-field svc refset-id "mapTarget" code)
+        matches (vec (for [sid snomed-ids
+                           :let [pref (hermes/preferred-synonym svc sid)]]
+                       {:equivalence equivalence
+                        :system      snomed-system-uri
+                        :code        (str sid)
+                        :display     (:term pref)}))]
+    {:result (boolean (seq matches)) :matches matches}))
+
 (deftype HermesService
   [svc]
   protos/CodeSystem
@@ -409,5 +557,56 @@
                           :text         msg
                           :expression   ["url"]}]}))))))
   protos/ConceptMap
+  (cm-describe
+    [_]
+    (let [installed (installed-refset-ids svc)]
+      (concat
+        (for [{:keys [refset-id title]} historical-association-maps
+              :when (installed refset-id)]
+          {:url    (implicit-cm-url refset-id)
+           :system snomed-system-uri
+           :target snomed-system-uri
+           :title  title})
+        (mapcat
+          (fn [{:keys [refset-id target title]}]
+            (when (installed refset-id)
+              [{:url    (implicit-cm-url refset-id)
+                :system snomed-system-uri
+                :target target
+                :title  (str title " (SNOMED CT → target)")}
+               {:url    (implicit-cm-url refset-id true)
+                :system target
+                :target snomed-system-uri
+                :title  (str title " (target → SNOMED CT)")}]))
+          external-map-refsets))))
   (cm-resource [_ _params])
-  (cm-translate [_ _params]))
+  (cm-translate
+    [_ {:keys [code] :as params}]
+    (let [resolved (resolve-cm params)
+          code-id  (when code (parse-long code))
+          unmapped (fn [msg] {:result false :message msg})]
+      (cond
+        (nil? resolved)
+        (unmapped "No mapping available for this source/target combination")
+
+        (nil? code)
+        (unmapped "No source code provided")
+
+        (= :historical (:kind resolved))
+        (if code-id
+          (translate-historical svc (:refset-id resolved) code-id)
+          (unmapped (str "SNOMED CT historical associations require a numeric code, got '" code "'")))
+
+        (and (= :external (:kind resolved)) (= :forward (:direction resolved)))
+        (if code-id
+          (translate-external-forward svc (:refset-id resolved) code-id
+                                      (:target resolved)
+                                      (:equivalence (external-refset->entry (:refset-id resolved))))
+          (unmapped (str "SNOMED CT forward map requires a numeric source code, got '" code "'")))
+
+        (and (= :external (:kind resolved)) (= :reverse (:direction resolved)))
+        (translate-external-reverse svc (:refset-id resolved) code
+                                    (:equivalence (external-refset->entry (:refset-id resolved))))
+
+        :else
+        (unmapped (str "Cannot translate — unsupported ConceptMap " (or (:url params) "")))))))

@@ -42,7 +42,14 @@
 ;; TODO: switch to simply using immutable data on startup?
 (def codesystems (atom {}))
 (def valuesets (atom {}))
-(def conceptmaps (atom {}))
+
+;; ConceptMap registry: a seq of `{:impl :description}` entries. A
+;; ConceptMap has identity in several axes (canonical url, source/target
+;; system pair, eventually source/target ValueSet pair) — rather than
+;; maintaining one index per axis, we keep the raw catalogue and select
+;; matching entries at lookup time. A single provider may contribute
+;; multiple entries (one per advertised ConceptMap direction).
+(def conceptmaps (atom []))
 
 
 (s/def ::uri string?)
@@ -217,20 +224,66 @@
   (^ValueSet [ctx uri-or-logical-id]
    (lookup-impl (:valuesets ctx) valuesets uri-or-logical-id)))
 
-(defn register-concept-map
-  [source-uri target-uri ^ConceptMap impl]
-  (swap! conceptmaps assoc (vector source-uri target-uri) impl))
+(defn register-concept-map-provider
+  "Register a ConceptMap provider. Pulls descriptions via
+  `protos/cm-describe` and appends each as a `{:impl :description}`
+  entry in the global catalogue. Safe to call multiple times."
+  [^ConceptMap impl]
+  (let [descs (protos/cm-describe impl)]
+    (assert (s/valid? (s/coll-of ::protos/cm-description) descs)
+            (str "cm-describe returned invalid descriptions: "
+                 (s/explain-str (s/coll-of ::protos/cm-description) descs)))
+    (swap! conceptmaps into (map (fn [d] {:impl impl :description d})) descs)))
+
+(defn- matches-request?
+  "Does this description answer the caller's request? The caller supplies
+  one of: `:url` (exact or query-stripped), or both `:system` and
+  `:target` (code-system canonicals)."
+  [{desc-url :url desc-sys :system desc-tgt :target}
+   {req-url :url req-sys :system req-tgt :target}]
+  (cond
+    req-url (or (= req-url desc-url)
+                (and desc-url (= (uri-without-query req-url) desc-url)))
+    (and req-sys req-tgt) (and (= req-sys desc-sys)
+                               (= req-tgt desc-tgt))
+    :else   false))
+
+(defn- candidate-impls
+  "All provider impls whose description matches the request. Includes
+  overlay entries (tx-resource ConceptMaps registered for this request)
+  before the global catalogue. Returns a vector of distinct impls in
+  registration order — caller decides how to handle >1."
+  [ctx request]
+  (let [overlay (for [[url impl] (:conceptmaps ctx)]
+                  {:impl impl :description {:url url}})]
+    (vec (distinct
+           (for [{:keys [impl description]} (concat overlay @conceptmaps)
+                 :when (matches-request? description request)]
+             impl)))))
+
+(defn concept-map-for
+  "Resolve a ConceptMap provider for a $translate request. `request` may
+  contain `:url`, or a `:system`/`:target` pair. Returns the matching
+  impl, or nil when no match — or more than one — can be chosen
+  unambiguously."
+  (^ConceptMap [request] (concept-map-for nil request))
+  (^ConceptMap [ctx request]
+   (let [hits (candidate-impls ctx request)]
+     (when (= 1 (count hits)) (first hits)))))
 
 (defn concept-map
+  "Legacy lookup by url or logical id. Prefer `concept-map-for` for new
+  code — this exists only for tx-resource ConceptMap overlays where we
+  still look up by url string."
   (^ConceptMap [uri-or-logical-id] (concept-map nil uri-or-logical-id))
   (^ConceptMap [ctx uri-or-logical-id]
-   (or (get (:conceptmaps ctx) uri-or-logical-id)
-       (if-let [cm (get @conceptmaps uri-or-logical-id)]
-         cm
-         (when-let [uri (uri-without-query uri-or-logical-id)]
-           (when (not= uri-or-logical-id uri)
-             (or (get (:conceptmaps ctx) uri)
-                 (get @conceptmaps uri))))))))
+   (concept-map-for ctx {:url uri-or-logical-id})))
+
+(defn conceptmap-descriptions
+  "Return all registered ::protos/cm-description tuples. Used by
+  metadata/CapabilityStatement emission and for introspection."
+  []
+  (mapv :description @conceptmaps))
 
 
 
@@ -388,6 +441,21 @@
                               system "': required to be '" check-pattern
                               "' by a version-check parameter")
            :expression   ["Coding.version"]})))))
+
+(defn conceptmap-translate
+  "Dispatch a ConceptMap $translate request. Resolves a provider first
+  by `url` (exact match, then query-stripped), then by the
+  (source-system, target-system) pair when no url was supplied.
+  Returns a ::protos/translate-result, or nil if no provider can serve
+  this request."
+  ([params] (conceptmap-translate nil params))
+  ([ctx {:keys [url system target] :as params}]
+   (when-let [cm (concept-map-for ctx {:url url :system system :target target})]
+     (let [result (protos/cm-translate cm params)]
+       (assert (s/valid? ::protos/translate-result result)
+               (str "cm-translate returned invalid ::translate-result: "
+                    (s/explain-str ::protos/translate-result result)))
+       result))))
 
 (defn valueset-expand
   ([params] (valueset-expand nil params))

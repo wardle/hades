@@ -20,6 +20,7 @@
       (registry/register-valueset "http://snomed.info/sct" snomed)
       (registry/register-valueset "http://snomed.info/sct|*" snomed)
       (registry/register-valueset "sct" snomed)
+      (registry/register-concept-map-provider snomed)
       (server/start! (server/make-server {:port port})))))
 
 (comment

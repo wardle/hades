@@ -34,6 +34,7 @@
       (registry/register-valueset "http://snomed.info/sct" snomed-svc)
       (registry/register-valueset "http://snomed.info/sct|*" snomed-svc)
       (registry/register-valueset "sct" snomed-svc)
+      (registry/register-concept-map-provider snomed-svc)
       (server/start! srv)
       (reset! test-state {:port port :svc svc :server srv})
       (try (f)
@@ -176,6 +177,71 @@
             {:keys [status body]} (http-post-json "/ValueSet/$expand" payload)]
         (is (= 200 status))
         (is (= "ValueSet" (get body "resourceType")))))))
+
+(deftest translate-snomed-replaced-by
+  (when @test-state
+    (testing "$translate resolves SNOMED REPLACED BY for a retired code"
+      (let [{:keys [status body]} (http-get (str "/ConceptMap/$translate"
+                                                 "?url=http%3A%2F%2Fsnomed.info%2Fsct%3Ffhir_cm%3D900000000000526001"
+                                                 "&system=http%3A%2F%2Fsnomed.info%2Fsct&code=225983005"
+                                                 "&target=http%3A%2F%2Fsnomed.info%2Fsct"))]
+        (is (= 200 status))
+        (is (= "Parameters" (get body "resourceType")))
+        (is (true? (get (get-param body "result") "valueBoolean")))
+        (let [match (get-param body "match")
+              parts (->> (get match "part") (map (juxt #(get % "name") identity)) (into {}))]
+          (is (= "equivalent" (get-in parts ["equivalence" "valueCode"])))
+          (is (= "441207001" (get-in parts ["concept" "valueCoding" "code"])))
+          (is (= "http://snomed.info/sct" (get-in parts ["concept" "valueCoding" "system"]))))))))
+
+(deftest translate-snomed-active-code-unmapped
+  (when @test-state
+    (testing "$translate returns result=false for a code with no historical association"
+      (let [{:keys [status body]} (http-get (str "/ConceptMap/$translate"
+                                                 "?url=http%3A%2F%2Fsnomed.info%2Fsct%3Ffhir_cm%3D900000000000526001"
+                                                 "&system=http%3A%2F%2Fsnomed.info%2Fsct&code=73211009"
+                                                 "&target=http%3A%2F%2Fsnomed.info%2Fsct"))]
+        (is (= 200 status))
+        (is (false? (get (get-param body "result") "valueBoolean")))
+        (is (nil? (get-param body "match")))))))
+
+(defn- conceptmap-registered-for? [source target]
+  (some (fn [d] (and (= source (:system d)) (= target (:target d))))
+        (registry/conceptmap-descriptions)))
+
+(deftest translate-pair-lookup-dispatches-to-provider
+  (when @test-state
+    (let [sct "http://snomed.info/sct"
+          icd-o "http://hl7.org/fhir/sid/icd-o"]
+      (when (conceptmap-registered-for? sct icd-o)
+        (testing "(system,target) pair resolves to the right provider without a url"
+          (let [{:keys [status]} (http-get (str "/ConceptMap/$translate"
+                                                "?system=" sct "&code=000&target=" icd-o))]
+            (is (= 200 status)
+                "Registry should route pair requests to the SNOMED provider"))))
+      (when (conceptmap-registered-for? icd-o sct)
+        (testing "Reverse pair (external → SCT) resolves to the same provider"
+          (let [{:keys [status]} (http-get (str "/ConceptMap/$translate"
+                                                "?system=" icd-o "&code=FAKE&target=" sct))]
+            (is (= 200 status))))))))
+
+(deftest cm-describe-lists-installed-refsets
+  (when @test-state
+    (testing "cm-describe emits SCT→SCT historical maps + pairs for any installed external maps"
+      (let [descs (registry/conceptmap-descriptions)
+            snomed "http://snomed.info/sct"]
+        (is (seq (filter #(= [snomed snomed] [(:system %) (:target %)]) descs))
+            "at least one SCT→SCT historical association should be registered")
+        (is (every? :url descs)
+            "every description carries a canonical url for direct $translate dispatch")))))
+
+(deftest translate-unknown-conceptmap-url
+  (when @test-state
+    (testing "$translate with unknown url returns 404 OperationOutcome"
+      (let [{:keys [status body]} (http-get "/ConceptMap/$translate?url=http://example.com/fake&system=http://snomed.info/sct&code=225983005")]
+        (is (= 404 status))
+        (is (= "OperationOutcome" (get body "resourceType")))
+        (is (= "not-found" (get-in body ["issue" 0 "code"])))))))
 
 (deftest unrouted-path-returns-fhir-404
   (when @test-state

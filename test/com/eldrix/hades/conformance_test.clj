@@ -117,6 +117,7 @@
     (registry/register-valueset "http://snomed.info/sct" snomed-svc)
     (registry/register-valueset "http://snomed.info/sct|*" snomed-svc)
     (registry/register-valueset "sct" snomed-svc)
+    (registry/register-concept-map-provider snomed-svc)
     (server/start! srv)
     (let [url (str "http://localhost:" port "/fhir")]
       (reset! state {:server srv :port port :svc svc
