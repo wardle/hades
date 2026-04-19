@@ -58,6 +58,28 @@
     {:status (.statusCode response)
      :body (json/read-str (.body response))}))
 
+(defn- http-get-raw [path]
+  (let [client (HttpClient/newHttpClient)
+        request (-> (HttpRequest/newBuilder (URI. (str (base-url) path)))
+                    (.GET)
+                    (.build))
+        response (.send client request (HttpResponse$BodyHandlers/ofString))]
+    {:status       (.statusCode response)
+     :content-type (.orElse (.firstValue (.headers response) "content-type") "")
+     :raw          (.body response)}))
+
+(defn- http-post-json [path body-map]
+  (let [client (HttpClient/newHttpClient)
+        payload (json/write-str body-map)
+        request (-> (HttpRequest/newBuilder (URI. (str (base-url) path)))
+                    (.header "Accept" "application/fhir+json")
+                    (.header "Content-Type" "application/fhir+json")
+                    (.POST (java.net.http.HttpRequest$BodyPublishers/ofString payload))
+                    (.build))
+        response (.send client request (HttpResponse$BodyHandlers/ofString))]
+    {:status (.statusCode response)
+     :body (json/read-str (.body response))}))
+
 (defn- get-param [body name]
   (some (fn [p] (when (= name (get p "name")) p))
         (get body "parameter")))
@@ -113,3 +135,55 @@
       (let [{:keys [status body]} (http-get "/CodeSystem/$validate-code?system=http://example.com/fake&code=123")]
         (is (= 200 status))
         (is (false? (get (get-param body "result") "valueBoolean")))))))
+
+(deftest expand-inline-valueset-descendent-of
+  (when @test-state
+    (testing "POST $expand with inline valueSet (descendent-of filter) expands without a url"
+      (let [payload {:resourceType "Parameters"
+                     :parameter    [{:name "valueSet"
+                                     :resource
+                                     {:resourceType "ValueSet"
+                                      :compose
+                                      {:include
+                                       [{:system "http://snomed.info/sct"
+                                         :filter [{:property "concept"
+                                                   :op       "descendent-of"
+                                                   :value    "64572001"}]}]}}}
+                                    {:name "count" :valueInteger 10}]}
+            {:keys [status body]} (http-post-json "/ValueSet/$expand" payload)]
+        (is (= 200 status))
+        (is (= "ValueSet" (get body "resourceType")))
+        (let [expansion (get body "expansion")]
+          (is (pos? (get expansion "total" 0)))
+          (is (<= (count (get expansion "contains" [])) 10)))))))
+
+(deftest expand-inline-valueset-multifilter
+  (when @test-state
+    (testing "POST $expand with inline valueSet and multiple filters"
+      (let [payload {:resourceType "Parameters"
+                     :parameter    [{:name "valueSet"
+                                     :resource
+                                     {:resourceType "ValueSet"
+                                      :compose
+                                      {:include
+                                       [{:system "http://snomed.info/sct"
+                                         :filter [{:property "concept"
+                                                   :op       "is-a"
+                                                   :value    "195967001"}
+                                                  {:property "363698007"
+                                                   :op       "="
+                                                   :value    "89187006"}]}]}}}
+                                    {:name "count" :valueInteger 10}]}
+            {:keys [status body]} (http-post-json "/ValueSet/$expand" payload)]
+        (is (= 200 status))
+        (is (= "ValueSet" (get body "resourceType")))))))
+
+(deftest unrouted-path-returns-fhir-404
+  (when @test-state
+    (testing "GET on an unrouted path returns a FHIR OperationOutcome 404"
+      (let [{:keys [status content-type raw]} (http-get-raw "/ValueSet?url=http://example.com")]
+        (is (= 404 status))
+        (is (re-find #"application/fhir\+json" content-type))
+        (let [body (json/read-str raw)]
+          (is (= "OperationOutcome" (get body "resourceType")))
+          (is (= "not-found" (get-in body ["issue" 0 "code"]))))))))

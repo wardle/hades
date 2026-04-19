@@ -21,8 +21,7 @@
             [com.eldrix.hades.wire :as wire]
             [io.pedestal.connector :as conn]
             [io.pedestal.http.cors :as cors]
-            [io.pedestal.http.jetty :as jetty]
-            [io.pedestal.service.interceptors :as interceptors])
+            [io.pedestal.http.jetty :as jetty])
   (:import (java.net URLDecoder)
            (java.nio.charset StandardCharsets)))
 
@@ -571,12 +570,32 @@
 ;; ValueSet $expand
 ;; ---------------------------------------------------------------------------
 
+(defn- inline-valueset-overlay
+  "When a POST `$expand` request carries an inline `valueSet` parameter and no
+  `url`, wrap the resource via `fhir-vs/make-fhir-value-set` and return an
+  updated ctx + synthetic URL. Returns `[ctx url]` (unchanged + nil when no
+  inline resource applies)."
+  [ctx params url-param]
+  (if url-param
+    [ctx nil]
+    (if-let [inline-vs (first (post-resources params "valueSet"))]
+      (let [synth-url (or (get inline-vs "url")
+                          (str "urn:hades:inline:" (java.util.UUID/randomUUID)))
+            vs-map    (cond-> inline-vs
+                        (nil? (get inline-vs "url")) (assoc "url" synth-url))]
+        [(assoc-in ctx [:valuesets synth-url]
+                   (fhir-vs/make-fhir-value-set vs-map))
+         synth-url])
+      [ctx nil])))
+
 (defn- vs-expand-enter [context]
-  (let [request  (:request context)
-        params   (:hades/params request)
-        ctx      (:hades/ctx request)
-        url      (get-first params "url")
-        vs-impl  (when url (registry/valueset ctx url))]
+  (let [request        (:request context)
+        params         (:hades/params request)
+        base-ctx       (:hades/ctx request)
+        url-param      (get-first params "url")
+        [ctx synth-url] (inline-valueset-overlay base-ctx params url-param)
+        url            (or url-param synth-url)
+        vs-impl        (when url (registry/valueset ctx url))]
     (if-let [supp-err (supplements-missing-response ctx vs-impl)]
       (assoc context :response supp-err)
       (let [active-only? (get-bool params "activeOnly")
@@ -596,6 +615,7 @@
                              (seq req-properties) (assoc :properties req-properties))
             result (registry/valueset-expand ctx expand-params)]
         (-> context
+            (assoc-in [:request :hades/ctx] ctx)
             (assoc-in [:request :hades/expand-context]
                       {:url url
                        :active-only? active-only?
@@ -775,6 +795,23 @@
 ;; Server
 ;; ---------------------------------------------------------------------------
 
+(def fhir-not-found
+  "Leave interceptor: if no downstream handler set a response body, return a
+  FHIR OperationOutcome 404. Runs at connector scope so it applies to every
+  unrouted path, replacing Pedestal's plain-text default."
+  {:name  ::fhir-not-found
+   :leave (fn [context]
+            (if (nil? (get-in context [:response :body]))
+              (let [path (get-in context [:request :uri])
+                    body (wire/operation-outcome
+                           [{:severity "error" :type "not-found"
+                             :text (str "No endpoint matches path '" path "'")}])]
+                (assoc context :response
+                       {:status  404
+                        :headers {"Content-Type" "application/fhir+json; charset=utf-8"}
+                        :body    (charred/write-json-str body)}))
+              context))})
+
 (defn make-server
   "Create an unstarted Hades FHIR server connector. Use `start!` and `stop!`
   to control the lifecycle.
@@ -787,7 +824,7 @@
   (let [opts (merge {:port 8080 :host "0.0.0.0" :max-expansion-size 10000} opts)]
     (-> (conn/default-connector-map (:host opts) (:port opts))
         (conn/with-interceptors
-          [interceptors/not-found
+          [fhir-not-found
            (cors/allow-origin {:creds true :allowed-origins (constantly true)})])
         (conn/with-routes (routes opts))
         (jetty/create-connector {:join? false}))))
