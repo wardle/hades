@@ -7,7 +7,8 @@ pom.xml.asc
 /classes/
 /target/
 /checkouts/
-/.clj-kondo/
+/.clj-kondo/.cache/
+.eastwood
 .lein-deps-sum
 .lein-repl-history
 .lein-plugins/

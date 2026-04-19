@@ -27,18 +27,18 @@
     (let [port (free-port)
           svc (hermes/open snomed-path)
           snomed-svc (snomed/->HermesService svc)
-          srv (server/make-server svc {:port port})]
+          srv (server/make-server {:port port})]
       (registry/register-codesystem "http://snomed.info/sct" snomed-svc)
       (registry/register-codesystem "http://snomed.info/sct|*" snomed-svc)
       (registry/register-codesystem "sct" snomed-svc)
       (registry/register-valueset "http://snomed.info/sct" snomed-svc)
       (registry/register-valueset "http://snomed.info/sct|*" snomed-svc)
       (registry/register-valueset "sct" snomed-svc)
-      (.start srv)
+      (server/start! srv)
       (reset! test-state {:port port :svc svc :server srv})
       (try (f)
            (finally
-             (.stop srv)
+             (server/stop! srv)
              (.close svc)
              (reset! test-state nil))))
     (f)))
@@ -80,10 +80,9 @@
       (let [{:keys [status body]} (http-get "/CodeSystem/$lookup?system=http://snomed.info/sct&code=999999999")]
         (is (= 404 status))
         (is (= "OperationOutcome" (get body "resourceType")))
-        ;; should say "Unknown code" not "Unknown code system"
-        (let [diag (get-in body ["issue" 0 "diagnostics"])]
-          (is (re-find #"(?i)unknown code" diag))
-          (is (not (re-find #"(?i)unknown code system" diag))))))))
+        (let [text (get-in body ["issue" 0 "details" "text"])]
+          (is (re-find #"(?i)unknown code" text))
+          (is (not (re-find #"(?i)unknown code system" text))))))))
 
 (deftest lookup-unknown-system
   (when @test-state

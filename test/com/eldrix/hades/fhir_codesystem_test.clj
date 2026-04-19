@@ -257,10 +257,10 @@
       (is (contains? codes "A2a"))
       (is (not (contains? codes "B"))))))
 
-(deftest cs-find-matches-descendant-of-test
-  (testing "descendant-of filter excludes the root"
+(deftest cs-find-matches-descendent-of-test
+  (testing "descendent-of filter excludes the root"
     (let [result (protos/cs-find-matches hier-fcs
-                   {:filters [{:property "concept" :op "descendant-of" :value "A"}]})
+                   {:filters [{:property "concept" :op "descendent-of" :value "A"}]})
           codes (set (map :code result))]
       (is (not (contains? codes "A")))
       (is (contains? codes "A1"))

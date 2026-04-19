@@ -15,8 +15,10 @@ clj -M:test/cloverage                    # test coverage
 clj -M:check                             # compilation check
 clj -M:nrepl                             # start nREPL server (test paths included)
 
-# conformance tests (both args required)
-clj -X:conformance :snomed '"path/to/snomed.db"' :output-dir '"test/resources/conformance"'
+# conformance tests — auto-builds a SNOMED subset from the tx-ecosystem RF2 data
+clj -X:conformance
+clj -X:conformance :snomed '"path/to/snomed.db"'        # use an existing snomed.db
+clj -X:conformance :url '"http://localhost:8080/fhir"'   # test an already-running server
 ```
 
 ### Interactive development via nREPL
@@ -40,8 +42,7 @@ clj-nrepl-eval -p <port> '
 (def snomed-svc (snomed/->HermesService svc))
 (registry/register-codesystem "http://snomed.info/sct" snomed-svc)
 (registry/register-valueset "http://snomed.info/sct" snomed-svc)
-(def srv (server/make-server svc {:port 8080}))
-(.start srv)
+(def srv (server/start! (server/make-server {:port 8080})))
 '
 
 # Test an endpoint via HTTP
@@ -53,7 +54,7 @@ clj-nrepl-eval -p <port> '
 '
 
 # Stop
-clj-nrepl-eval -p <port> '(.stop srv) (.close svc)'
+clj-nrepl-eval -p <port> '(server/stop! srv) (.close svc)'
 ```
 
 ### REPL-driven conformance testing (the default workflow)
@@ -76,8 +77,14 @@ clj -M:nrepl:conformance
 | `(restart!)` | Stop, reload all Hades namespaces, restart. |
 | `(run-tests)` | Run all conformance tests. Optional `:filter`, `:modes`. |
 | `(print-suites r)` | Per-suite pass/fail table. |
-| `(print-failures r)` | All failures with messages. |
+| `(print-failures r)` | All failures with parsed expected/actual. |
 | `(print-failures r "suite")` | Failures in one suite. |
+| `(print-clusters r)` | Group failures by (path, expected, actual); biggest cluster first — your highest-leverage fix candidate. |
+| `(print-clusters r "suite")` | Same, restricted to one suite. |
+| `(print-detail r "suite/test")` | Full detail for one test, including expected response JSON. |
+| `(replay-test "test")` | Replay one test through the live HTTP server; returns `{:request :expected :actual :status}`. (Test name only — no suite prefix.) |
+| `(list-tests)` / `(list-tests "suite")` | List test cases with operation + expected http-code. Use this instead of grepping `test-cases.json`. |
+| `(test-info "test")` | Return `{:name :suite :operation :http-code :request :expected :setup-files :setup-resources}` for one test. Use this instead of `cat`-ing fixture files. |
 | `(print-diff old new)` | Gained/lost tests between two runs. |
 | `(save-results! r)` | Timestamped archive + latest.json. |
 | `(save-baseline! r)` | Update baseline (intentional only). |
@@ -118,65 +125,70 @@ clj-nrepl-eval -p $(cat .nrepl-port) "(ct/stop!)"
 ## Architecture
 
 ```
-server.clj / fhir.clj    HAPI FHIR layer — HTTP, serialisation
-        │
-   registry.clj           Lookup & dispatch — routes requests to implementations
-        │
-   protocols.clj           Abstract interfaces (CodeSystem, ValueSet, ConceptMap)
-        │
-   snomed.clj              SNOMED CT via Hermes
-   fhir_codesystem.clj     File-backed CodeSystem/ValueSet (Phase 2.3+)
-   fhir_conceptmap.clj     File-backed ConceptMap (Phase 6+)
+http.clj                  Pedestal HTTP layer — routes, interceptors,
+                          Parameters parsing, content negotiation
+    │
+wire.clj / metadata.clj   Pure FHIR JSON map builders (string-keyed)
+    │
+registry.clj              Lookup & dispatch — routes requests to implementations
+    │
+protocols.clj             Abstract interfaces (CodeSystem, ValueSet, ConceptMap)
+    │
+snomed.clj                SNOMED CT via Hermes
+fhir_codesystem.clj       File-backed CodeSystem (+ ValueSet impl for CS-backed VS)
+fhir_valueset.clj         File-backed ValueSet (compose expansion + validate)
+compose.clj               ValueSet compose engine (include/exclude, filter, etc.)
+
+server.clj                Thin façade that exposes `make-server` over http.clj
+core.clj                  CLI entry point
 ```
 
 ### Layering rules (strict)
 
-- **HAPI stays in `server.clj` and `fhir.clj` only.** No HAPI imports anywhere else.
-  Protocol implementations work with plain Clojure maps.
-- **Registry mediates all access.** `server.clj` calls registry functions, not protocol
-  methods directly.
-- **Implementations are HAPI-free.** They return plain maps. The server layer converts
-  to HAPI model objects via `fhir.clj`.
+- **HTTP concerns live in `http.clj` only.** Pedestal interceptors, request
+  parsing, routing, content negotiation, and response-shape decisions all
+  stay there. No HTTP details leak into the registry or protocol impls.
+- **Wire-format shaping lives in `wire.clj` / `metadata.clj` only.** They are
+  pure functions that produce string-keyed FHIR JSON maps. Charred serialises
+  those maps in the content-negotiation interceptor.
+- **Registry mediates all access.** `http.clj` handlers call registry
+  functions, not protocol methods directly.
 
 ### Layer responsibilities (strict)
 
-- **Protocol impls** (snomed.clj, fhir_codesystem.clj, fhir_valueset.clj) know their
-  domain. They return **complete, self-describing results** that match the specs in
-  `protocols.clj` (e.g. `::protos/validate-result`, `::protos/expansion-result`).
-  No downstream layer should need to patch, enrich, or re-derive fields.
-- **Registry** dispatches to the right impl by URL/version and handles version
-  resolution (`force-system-version` / `system-version` / `check-system-version`).
-  It does **not** patch results, add issues retroactively, look up other resources
-  to fill gaps, or fix FHIRPath expressions. If the registry is doing post-call
-  surgery on a result, the impl's return value is incomplete — fix the impl.
-- **Server** translates between HAPI types and keyword-keyed Clojure maps. Each
-  operation method should be ~30 lines: extract HAPI params → call registry →
-  convert result via `fhir.clj`. If a server method contains terminology logic
-  (version checking, status warnings, compose inspection), that logic belongs in
-  a lower layer or in the result map itself.
-- **No secret channels.** Data flows through explicit function parameters and return
-  values. No smuggling data through metadata maps, dynamic vars (except `*tx-ctx*`
-  for the HAPI reflection bridge), or by reaching back through `vs-resource` /
-  `cs-resource` to get data that should have been in the result.
+- **Protocol impls** (snomed.clj, fhir_codesystem.clj, fhir_valueset.clj) know
+  their domain. They return **complete, self-describing results** that match
+  the specs in `protocols.clj` (e.g. `::protos/validate-result`,
+  `::protos/expansion-result`). No downstream layer should need to patch,
+  enrich, or re-derive fields.
+- **Registry** dispatches to the right impl by URL/version and handles
+  version resolution (`force-system-version` / `system-version` /
+  `check-system-version`). It does **not** patch results, add issues
+  retroactively, look up other resources to fill gaps, or fix FHIRPath
+  expressions. If the registry is doing post-call surgery on a result, the
+  impl's return value is incomplete — fix the impl.
+- **HTTP handlers are thin.** Each operation handler parses its parameters
+  (from GET query or POST `Parameters`), calls the registry, and stores the
+  result on the Pedestal context. The per-operation response interceptor
+  (`:leave`) inspects the result and determines HTTP status / response shape
+  (Parameters, ValueSet, or OperationOutcome). Handlers don't transform data,
+  don't decide HTTP status, and don't build wire types directly.
+- **Wire builders are pure.** `wire.clj` takes internal keyword-keyed result
+  maps and returns string-keyed FHIR maps. No HTTP, no dispatch, no state.
+- **No secret channels.** Data flows through explicit function parameters and
+  return values — never through metadata maps, dynamic vars, or by reaching
+  back through `vs-resource` / `cs-resource` to get data that should have
+  been in the result.
 
 ### Request-scoped overlays (`tx-resource`)
 
-FHIR operations accept `tx-resource` parameters — temporary CodeSystem/ValueSet
-resources scoped to a single request. The overlay mechanism has two parts:
-
-1. **HAPI bridge (dynamic var).** HAPI invokes `@Operation` methods via reflection,
-   so we cannot add parameters to those signatures. `server.clj` defines
-   `^:dynamic *tx-ctx*`, bound per-request in the servlet `service` method. Each
-   operation method reads it via `(let [ctx *tx-ctx*] ...)`. The dynamic var is
-   confined to `server.clj` — it exists solely to cross the HAPI reflection
-   boundary.
-
-2. **Explicit `ctx` parameter.** From the operation methods onward, `ctx` flows as
-   an ordinary function argument: operation → registry → protocol impl. Registry
-   lookup functions accept an optional first argument `ctx` — a map that may
-   contain `:codesystems`, `:valuesets`, and/or `:conceptmaps` overlay maps.
-   Overlays are checked before global atoms. The shape is specified by
-   `::registry/ctx` in `registry.clj`.
+FHIR operations accept `tx-resource` parameters — temporary CodeSystem /
+ValueSet resources scoped to a single request. The overlay is built by the
+`tx-ctx` interceptor and attached to the Pedestal request as `:hades/ctx`.
+From there `ctx` flows as an ordinary function argument: handler → registry
+→ protocol impl. Registry lookup functions accept an optional first argument
+`ctx` — a map that may contain `:codesystems`, `:valuesets`, and/or
+`:conceptmaps` overlay maps. Overlays are checked before global atoms.
 
 When `ctx` is nil or absent, only global registrations are consulted.
 
@@ -222,10 +234,12 @@ the `:request` map and update `::registry/request` spec.
 - **Keyword keys everywhere inside Clojure** (`:code`, `:system`, `:display`,
   `:result`, `:version`). This applies to protocol return values, registry
   results, compose output, and all internal data.
-- **String keys only at serialisation boundaries**: when parsing FHIR JSON
-  input (`clojure.data.json/read-str` produces string keys — convert to
-  keywords at ingestion) and when building HAPI types in `fhir.clj`.
-- Parse FHIR JSON with `clojure.data.json`, not HAPI parsers.
+- **String keys only at serialisation boundaries**: in `wire.clj` /
+  `metadata.clj` (FHIR JSON output — string keys match FHIR property names)
+  and when parsing inbound FHIR JSON resources (`tx-resource` bodies and
+  file-backed ingest).
+- Parse FHIR JSON with `charred` (for HTTP body parsing) or
+  `clojure.data.json` (for file-backed ingest and tests).
 
 ### Specs
 - Use `clojure.spec.alpha` for all public API boundaries: protocol parameters,
@@ -283,13 +297,14 @@ place and flows data correctly.
    this behaviour? If you can't point to a spec section, you may be solving the
    wrong problem or optimising for a test rather than the specification.
 2. **Identify which layer owns this change.** Is it domain logic (protocol impl),
-   dispatch/version resolution (registry), or HAPI translation (server/fhir)?
-   If the answer is "a bit of each," reconsider — the design may be unclear.
+   dispatch/version resolution (registry), HTTP handling (http.clj), or wire
+   shaping (wire.clj / metadata.clj)? If the answer is "a bit of each,"
+   reconsider — the design may be unclear.
 3. **Trace the data flow.** For the inputs this change needs: where do they
    originate and how do they reach this layer? For the outputs: who consumes
-   them and what shape do they expect? Draw the path: server → registry → impl
-   → registry → server. If data needs to flow backwards (server reaching back
-   into impl metadata), the return value is incomplete.
+   them and what shape do they expect? Draw the path: http → registry → impl
+   → registry → http → wire. If data needs to flow backwards (handler reaching
+   back into impl metadata), the return value is incomplete.
 4. **Check the spec.** Does a spec exist in `protocols.clj` for the return value
    this change produces? If not, define it before writing the implementation.
    The spec is the contract — write the contract first.
@@ -307,7 +322,7 @@ Run after every task. All items must pass.
 3. `clj -M:lint/eastwood` — clean
 
 #### Architectural checks (read back every changed file)
-4. **No HAPI imports outside `server.clj` / `fhir.clj`.**
+4. **No HAPI imports anywhere in `src/`.** Runtime code is HAPI-free.
 5. **No new atoms or mutable state** without justification.
 6. **No secret channels introduced.** Data flows through explicit params/returns.
    No compose-in-metadata, no reaching back through `vs-resource`/`cs-resource`
@@ -318,12 +333,14 @@ Run after every task. All items must pass.
 8. **Registry is not patching results.** If you added logic to the registry that
    modifies a result after the protocol call (adding issues, filling in missing
    fields, fixing expressions), the impl's return is incomplete — fix the impl.
-9. **Server methods are mechanical translation.** If a server method grew beyond
-   ~30 lines or contains terminology logic (version checking, status warnings,
-   compose inspection, code existence checks), push that logic down.
-10. **Keyword keys used internally.** No string-keyed maps in protocol returns,
-    registry results, or compose output. String keys only in `fhir.clj` at the
-    HAPI serialisation boundary.
+9. **Handlers are thin.** If an operation handler grew beyond ~30 lines or
+   contains terminology logic (version checking, status warnings, compose
+   inspection, code existence checks), push that logic into a lower layer
+   or into the result map.
+10. **Keyword keys used internally.** Protocol returns, registry results,
+    and compose output all use keyword keys. String keys appear only in
+    `wire.clj` / `metadata.clj` (wire output) and in parsed input
+    (`tx-resource` bodies, file-backed ingest).
 
 #### Completeness checks
 11. **New public functions have tests.**
@@ -335,9 +352,9 @@ Run after every task. All items must pass.
 | Dep | Purpose |
 |-----|---------|
 | `com.eldrix/hermes` | SNOMED CT terminology engine |
-| `ca.uhn.hapi.fhir/*` 8.0.0 | FHIR R4 REST server + model |
-| `io.pedestal/pedestal.jetty` | Jetty HTTP server |
-| `org.clojure/data.json` | JSON parsing (HAPI-free layer) |
+| `io.pedestal/pedestal.jetty` | Pedestal routes + Jetty HTTP server |
+| `com.cnuernber/charred` | JSON serialisation on the wire |
+| `org.clojure/data.json` | JSON parsing (file-backed ingest, tests) |
 | `lambdaisland/uri` | URI parsing |
 
 ## Known bugs

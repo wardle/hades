@@ -9,11 +9,11 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.compose :as compose]
-            [com.eldrix.hades.fhir :as fhir]
             [com.eldrix.hades.fhir-codesystem :as fhir-cs]
             [com.eldrix.hades.fhir-valueset :as fhir-vs]
             [com.eldrix.hades.protocols :as protos]
-            [com.eldrix.hades.registry :as registry]))
+            [com.eldrix.hades.registry :as registry]
+            [com.eldrix.hades.wire :as wire]))
 
 ;; ---------------------------------------------------------------------------
 ;; Test data — mirrors the HL7 tx-ecosystem "simple" and "version" test suites
@@ -176,33 +176,33 @@
   (testing "code mode strips Coding. prefix"
     (let [issues [{:severity "error" :type "invalid" :details-code "invalid-display"
                    :text "wrong" :expression ["Coding.display"]}]
-          adjusted (fhir/adjust-issue-expressions issues :code nil)]
+          adjusted (wire/adjust-issue-expressions issues :code nil)]
       (is (= ["display"] (:expression (first adjusted))))))
 
   (testing "code mode converts bare Coding to code"
     (let [issues [{:severity "warning" :type "business-rule" :details-code "code-comment"
                    :text "inactive" :expression ["Coding"]}]
-          adjusted (fhir/adjust-issue-expressions issues :code nil)]
+          adjusted (wire/adjust-issue-expressions issues :code nil)]
       (is (= ["code"] (:expression (first adjusted))))))
 
   (testing "code mode leaves already-bare paths unchanged"
     (let [issues [{:severity "error" :type "not-found" :details-code "not-found"
                    :text "missing" :expression ["system"]}]
-          adjusted (fhir/adjust-issue-expressions issues :code nil)]
+          adjusted (wire/adjust-issue-expressions issues :code nil)]
       (is (= ["system"] (:expression (first adjusted)))))))
 
 (deftest adjust-expressions-coding-mode-test
   (testing "coding mode keeps Coding.* paths as-is"
     (let [issues [{:severity "error" :type "invalid" :details-code "invalid-display"
                    :text "wrong" :expression ["Coding.display"]}]
-          adjusted (fhir/adjust-issue-expressions issues :coding nil)]
+          adjusted (wire/adjust-issue-expressions issues :coding nil)]
       (is (= ["Coding.display"] (:expression (first adjusted)))))))
 
 (deftest adjust-expressions-cc-mode-test
   (testing "CC mode replaces Coding.* with CodeableConcept.coding[N].*"
     (let [issues [{:severity "error" :type "invalid" :details-code "invalid-display"
                    :text "wrong" :expression ["Coding.display"] :coding-index 0}]
-          adjusted (fhir/adjust-issue-expressions issues :codeableConcept nil)]
+          adjusted (wire/adjust-issue-expressions issues :codeableConcept nil)]
       (is (= ["CodeableConcept.coding[0].display"] (:expression (first adjusted))))
       (is (nil? (:coding-index (first adjusted))) "coding-index stripped after adjustment")))
 
@@ -211,14 +211,14 @@
                    :text "a" :expression ["Coding.code"] :coding-index 0}
                   {:severity "error" :type "code-invalid" :details-code "not-in-vs"
                    :text "b" :expression ["Coding.code"] :coding-index 1}]
-          adjusted (fhir/adjust-issue-expressions issues :codeableConcept nil)]
+          adjusted (wire/adjust-issue-expressions issues :codeableConcept nil)]
       (is (= ["CodeableConcept.coding[0].code"] (:expression (first adjusted))))
       (is (= ["CodeableConcept.coding[1].code"] (:expression (second adjusted))))))
 
   (testing "CC mode leaves already-adjusted paths unchanged"
     (let [issues [{:severity "error" :type "invalid" :details-code "vs-invalid"
                    :text "ver" :expression ["CodeableConcept.coding[0].version"]}]
-          adjusted (fhir/adjust-issue-expressions issues :codeableConcept nil)]
+          adjusted (wire/adjust-issue-expressions issues :codeableConcept nil)]
       (is (= ["CodeableConcept.coding[0].version"] (:expression (first adjusted)))))))
 
 ;; ---------------------------------------------------------------------------
@@ -422,32 +422,33 @@
       (is (true? (:inactive result))))))
 
 ;; ---------------------------------------------------------------------------
-;; 8. Explicit HAPI converters — only spec'd fields are serialized
+;; 8. Wire-format converters — only spec'd fields are serialised
 ;; ---------------------------------------------------------------------------
 
+(defn- param-names [params]
+  (set (map #(get % "name") (get params "parameter"))))
+
 (deftest validate-result-parameters-test
-  (testing "validate-result->parameters includes only FHIR fields"
+  (testing "validate->parameters includes only FHIR fields"
     (let [result {:result true :display "Alpha" :code :A
                   :system "http://example.com" :version "1.0"
-                  ;; Internal keys that should NOT appear in output
                   :not-found nil :coding-index 0 :input-mode :coding}
-          params (fhir/validate-result->parameters result)]
-      (is (some? params))
-      (let [names (set (map #(.getName %) (.getParameter params)))]
-        (is (contains? names "result"))
-        (is (contains? names "display"))
-        (is (contains? names "system"))
-        (is (not (contains? names "not-found")))
-        (is (not (contains? names "coding-index")))
-        (is (not (contains? names "input-mode"))))))
+          params (wire/validate->parameters result)
+          names (param-names params)]
+      (is (= "Parameters" (get params "resourceType")))
+      (is (contains? names "result"))
+      (is (contains? names "display"))
+      (is (contains? names "system"))
+      (is (not (contains? names "not-found")))
+      (is (not (contains? names "coding-index")))
+      (is (not (contains? names "input-mode")))))
 
-  (testing "validate-result->parameters omits nil optional fields"
+  (testing "validate->parameters omits nil optional fields"
     (let [result {:result false :code :X :system "http://example.com"
                   :message "not found"
                   :issues [{:severity "error" :type "not-found"
                             :details-code "not-found" :text "not found"}]}
-          params (fhir/validate-result->parameters result)
-          names (set (map #(.getName %) (.getParameter params)))]
+          names (param-names (wire/validate->parameters result))]
       (is (contains? names "result"))
       (is (contains? names "message"))
       (is (contains? names "issues"))
@@ -455,14 +456,14 @@
       (is (not (contains? names "version"))))))
 
 (deftest lookup-result-parameters-test
-  (testing "lookup-result->parameters serializes properties and designations"
+  (testing "lookup->parameters serialises properties and designations"
     (let [result {:name "TestCS" :version "1.0" :display "Alpha"
                   :system "http://example.com" :code :A
                   :properties [{:code :inactive :value false}
                                {:code :parent :value :B :description "Beta"}]
                   :designations [{:language :en :value "Alpha"}]}
-          params (fhir/lookup-result->parameters result)
-          names (vec (map #(.getName %) (.getParameter params)))]
+          params (wire/lookup->parameters result)
+          names (vec (map #(get % "name") (get params "parameter")))]
       (is (= "name" (first names)))
-      (is (some #(= "property" %) names))
-      (is (some #(= "designation" %) names)))))
+      (is (some #{"property"} names))
+      (is (some #{"designation"} names)))))

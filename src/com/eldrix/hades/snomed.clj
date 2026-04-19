@@ -5,8 +5,7 @@
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hermes.core :as hermes]
             [com.eldrix.hermes.snomed :as snomed]
-            [lambdaisland.uri :as uri]
-            [lambdaisland.uri.normalize :as normalize])
+            [lambdaisland.uri :as uri])
   (:import (com.eldrix.hermes.snomed Description)
            (java.time.format DateTimeFormatter)))
 
@@ -99,7 +98,7 @@
 (deftype HermesService
   [svc]
   protos/CodeSystem
-  (cs-resource [this params])
+  (cs-resource [_ _params])
   (cs-lookup
     [_ {:keys [code version displayLanguage]}]
     (if (expression? code)
@@ -255,7 +254,7 @@
                           :expression   ["code"]}]}))))))
 
   (cs-subsumes
-    [this {:keys [systemA codeA systemB codeB]}]
+    [_ {:keys [systemA codeA systemB codeB]}]
     (let [codeA' (Long/parseLong codeA)
           codeB' (Long/parseLong codeB)]
       {:outcome
@@ -275,7 +274,9 @@
                              (when (= property "concept")
                                (case op
                                  "is-a" (str "<< " value)
-                                 "descendant-of" (str "< " value)
+                                 ;; FHIR spec code is "descendent-of" (with 'e');
+                                 ;; "descendant-of" accepted for natural-spelling clients.
+                                 ("descendent-of" "descendant-of") (str "< " value)
                                  "is-not-a" (str "* MINUS << " value)
                                  "generalizes" (str ">> " value)
                                  nil))))
@@ -289,8 +290,8 @@
                      :version ver
                      :display preferredTerm}))))))
   protos/ValueSet
-  (vs-resource [this params])
-  (vs-expand [this _ctx {:keys [url filter activeOnly]}]
+  (vs-resource [_ _params])
+  (vs-expand [_ _ctx {:keys [url filter activeOnly]}]
     (when-let [{:keys [ecl error message]} (parse-implicit-value-set url)]
       (if error
         {:concepts [] :total 0
@@ -302,7 +303,7 @@
                                          :system snomed-system-uri
                                          :version ver
                                          :display preferredTerm
-                                         :designations [term]))
+                                         :designations [{:value term}]))
                              (hermes/search svc (cond-> {:constraint         ecl
                                                          :inactive-concepts? (if (false? activeOnly) true false)}
                                                   filter (assoc :s filter))))]
@@ -396,5 +397,5 @@
                           :text         msg
                           :expression   ["url"]}]}))))))
   protos/ConceptMap
-  (cm-resource [this params])
-  (cm-translate [this params]))
+  (cm-resource [_ _params])
+  (cm-translate [_ _params]))

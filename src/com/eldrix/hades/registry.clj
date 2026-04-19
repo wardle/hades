@@ -33,8 +33,7 @@
             [clojure.string :as str]
             [com.eldrix.hades.protocols :as protos]
             [lambdaisland.uri :as uri])
-  (:import (com.eldrix.hades.protocols CodeSystem ConceptMap ValueSet)
-           (java.net URI URISyntaxException)))
+  (:import (com.eldrix.hades.protocols CodeSystem ConceptMap ValueSet)))
 
 
 ;; registered codesystems, valuesets and concept map providers
@@ -236,10 +235,6 @@
 
 
 
-(defn codesystem-resource
-  ([params] (codesystem-resource nil params))
-  ([ctx params]))
-
 (s/fdef codesystem-lookup
   :args (s/cat :ctx ::ctx :params ::protos/codesystem-lookup))
 (defn codesystem-lookup
@@ -393,10 +388,6 @@
                               system "': required to be '" check-pattern
                               "' by a version-check parameter")
            :expression   ["Coding.version"]})))))
-
-(defn valueset-resource
-  ([params] (valueset-resource nil params))
-  ([ctx params]))
 
 (defn valueset-expand
   ([params] (valueset-expand nil params))
@@ -552,10 +543,3 @@
                  :message combined-msg
                  :issues  (into [no-valid-issue] all-issues)}))))))))
 
-(defn conceptmap-resource
-  ([params] (conceptmap-resource nil params))
-  ([ctx params]))
-
-(defn conceptmap-translate
-  ([params] (conceptmap-translate nil params))
-  ([ctx params]))

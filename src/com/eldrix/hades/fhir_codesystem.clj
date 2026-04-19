@@ -164,7 +164,9 @@
   (case op
     "is-a" (or (= (:code concept) value)
                (ancestor? parents-map (:code concept) value))
-    "descendant-of" (ancestor? parents-map (:code concept) value)
+    ;; FHIR spec uses "descendent-of" (with 'e') in http://hl7.org/fhir/filter-operator;
+    ;; accept "descendant-of" too for clients that use the natural English spelling.
+    ("descendent-of" "descendant-of") (ancestor? parents-map (:code concept) value)
     "is-not-a" (not (or (= (:code concept) value)
                         (ancestor? parents-map (:code concept) value)))
     "generalizes" (or (= (:code concept) value)
@@ -195,7 +197,12 @@
                  (not= pv ::not-found)
                  (= pv ::not-found)))
     (throw (ex-info (str "The filter operation '" op "' is not supported")
-                    {:type :invalid}))))
+                    {:type         :not-supported
+                     :details-code "not-supported"
+                     :issues       [{:severity     "error"
+                                     :type         "not-supported"
+                                     :details-code "not-supported"
+                                     :text         (str "The filter operation '" op "' is not supported")}]}))))
 
 (defn- concept-inactive?
   "Check whether a concept is inactive based on its properties.
@@ -364,35 +371,35 @@
                               :version version}
                        inactive? (assoc :inactive true
                                         :inactive-status (concept-inactive-status concept))
-                       case-differs? (assoc :normalized-code (keyword actual-code)))]
-          (let [case-issue (when case-differs?
-                             {:severity     "information"
-                              :type         "business-rule"
-                              :details-code "code-rule"
-                              :text         (str "The code '" code "' differs from the correct code '"
-                                                 actual-code "' by case. Although the code system '"
-                                                 url "|" version "' is case insensitive, implementers "
-                                                 "are strongly encouraged to use the correct case anyway")
-                              :expression   ["Coding.code"]})
-                display-issue (when (and display (not (display/display-matches? concept display display-langs)))
-                                (let [msg (format-display-mismatch display url code
-                                            (:display concept) (:designations concept) displayLanguage
-                                            (get metadata "language"))]
-                                  {:severity     "error"
-                                   :type         "invalid"
-                                   :details-code "invalid-display"
-                                   :text         msg
-                                   :expression   ["Coding.display"]}))
-                issues (filterv some? [case-issue display-issue])]
-            (cond-> result
-              display-issue (assoc :result false :message (:text display-issue))
-              (seq issues) (assoc :issues issues))))
+                       case-differs? (assoc :normalized-code (keyword actual-code)))
+              case-issue (when case-differs?
+                           {:severity     "information"
+                            :type         "business-rule"
+                            :details-code "code-rule"
+                            :text         (str "The code '" code "' differs from the correct code '"
+                                               actual-code "' by case. Although the code system '"
+                                               url "|" version "' is case insensitive, implementers "
+                                               "are strongly encouraged to use the correct case anyway")
+                            :expression   ["Coding.code"]})
+              display-issue (when (and display (not (display/display-matches? concept display display-langs)))
+                              (let [msg (format-display-mismatch display url code
+                                          (:display concept) (:designations concept) displayLanguage
+                                          (get metadata "language"))]
+                                {:severity     "error"
+                                 :type         "invalid"
+                                 :details-code "invalid-display"
+                                 :text         msg
+                                 :expression   ["Coding.display"]}))
+              issues (filterv some? [case-issue display-issue])]
+          (cond-> result
+            display-issue (assoc :result false :message (:text display-issue))
+            (seq issues) (assoc :issues issues)))
         (let [fragment? (= "fragment" (get metadata "content"))
               msg (if fragment?
                     (str "Unknown Code '" code "' in the CodeSystem '" url "' version '" version
                          "' - note that the code system is labeled as a fragment, so the code may be valid in some other fragment")
                     (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'"))]
-          (cond-> {:result  (boolean fragment?)
+          (cond-> {:result  fragment?
                    :code    (keyword code)
                    :system  url
                    :version version
@@ -526,7 +533,7 @@
                     (str "Unknown Code '" code "' in the CodeSystem '" url "' version '" version
                          "' - note that the code system is labeled as a fragment, so the code may be valid in some other fragment")
                     (str "Unknown code '" code "' in the CodeSystem '" url "' version '" version "'"))]
-          (cond-> {:result  (boolean fragment?)
+          (cond-> {:result  fragment?
                    :code    (keyword code)
                    :system  url
                    :version version

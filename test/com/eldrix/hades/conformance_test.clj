@@ -110,14 +110,14 @@
         port (if (zero? port) (free-port) port)
         svc (hermes/open snomed-db-path)
         snomed-svc (snomed/->HermesService svc)
-        srv (server/make-server svc {:port port :max-expansion-size 1000})]
+        srv (server/make-server {:port port :max-expansion-size 1000})]
     (registry/register-codesystem "http://snomed.info/sct" snomed-svc)
     (registry/register-codesystem "http://snomed.info/sct|*" snomed-svc)
     (registry/register-codesystem "sct" snomed-svc)
     (registry/register-valueset "http://snomed.info/sct" snomed-svc)
     (registry/register-valueset "http://snomed.info/sct|*" snomed-svc)
     (registry/register-valueset "sct" snomed-svc)
-    (.start srv)
+    (server/start! srv)
     (let [url (str "http://localhost:" port "/fhir")]
       (reset! state {:server srv :port port :svc svc
                      :snomed-db-path snomed-db-path :url url})
@@ -128,7 +128,7 @@
   "Stop the running test server and close Hermes."
   []
   (when-let [{:keys [server svc]} @state]
-    (when server (.stop server))
+    (when server (server/stop! server))
     (when svc (.close svc))
     (reset! state nil)
     (println "Server stopped.")))
@@ -141,12 +141,14 @@
       (throw (ex-info "No server to restart. Call (start!) first." {})))
     (stop!)
     (doseq [ns-sym '[com.eldrix.hades.protocols
-                     com.eldrix.hades.fhir
+                     com.eldrix.hades.wire
+                     com.eldrix.hades.metadata
                      com.eldrix.hades.snomed
                      com.eldrix.hades.compose
                      com.eldrix.hades.fhir-codesystem
                      com.eldrix.hades.fhir-valueset
                      com.eldrix.hades.registry
+                     com.eldrix.hades.http
                      com.eldrix.hades.server]]
       (require ns-sym :reload))
     (start! :snomed snomed-db-path :port port)))
@@ -336,19 +338,22 @@
       (JsonParser/parseObject f))))
 
 (defn run-tests
-  "Run conformance tests against the running server.
+  "Run conformance tests against a Hades server.
   Options:
     :filter — test name filter pattern (e.g. \"language\")
-    :modes  — set of mode strings (default #{\"general\" \"snomed\" \"flat\"})"
-  [& {:keys [filter modes] :or {modes #{"general" "snomed" "flat"}}}]
-  (when-not (server-url)
-    (throw (ex-info "No server running. Call (start! path) first." {})))
-  (let [folder (.getCanonicalPath (io/file test-data-dir "tests"))
-        loader (TxTester$InternalTxLoader. folder)
-        externals (load-externals externals-path)
-        tester (TxTester. loader (server-url) true externals "4.0.1")]
-    (.execute tester (set modes) filter)
-    (parse-test-report (.getTestReport tester))))
+    :modes  — set of mode strings (default #{\"general\" \"snomed\" \"flat\"})
+    :url    — server URL to test (default: the server started with `start!`)"
+  [& {:keys [filter modes url] :or {modes #{"general" "snomed" "flat"}}}]
+  (let [tx-url (or url (server-url))]
+    (when-not tx-url
+      (throw (ex-info "No server URL. Call (start!) first or pass :url." {})))
+    (ensure-test-data!)
+    (let [folder (.getCanonicalPath (io/file test-data-dir "tests"))
+          loader (TxTester$InternalTxLoader. folder)
+          externals (load-externals externals-path)
+          tester (TxTester. loader tx-url true externals "4.0.1")]
+      (.execute tester (set modes) filter)
+      (parse-test-report (.getTestReport tester)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Result querying — pure functions on results data
@@ -602,37 +607,43 @@
   "Run conformance tests. Intended as an exec-fn for clj -X:conformance.
 
   Optional:
+    :url              — run tests against a Hades server already running at this URL
+                        (e.g. \"http://localhost:8080/fhir\"). When set, no local
+                        server is started and :snomed is ignored.
     :snomed           — path to pre-existing Hermes snomed.db (default: auto-build)
     :update-baseline  — when true, updates the baseline file (default false)
 
   Examples:
     clj -X:conformance
     clj -X:conformance :snomed '\"path/to/snomed.db\"'
+    clj -X:conformance :url '\"http://localhost:8080/fhir\"'
     clj -X:conformance :update-baseline true"
-  [{:keys [snomed update-baseline]
+  [{:keys [snomed update-baseline url]
     :or   {update-baseline false}}]
-  (when (and snomed (not (s/valid? ::snomed snomed)))
+  (when (and snomed (not url) (not (s/valid? ::snomed snomed)))
     (println (format "SNOMED database not found: %s" snomed))
     (System/exit 1))
-  (start! :snomed snomed)
-  (try
-    (let [results (run-tests)
-          prev (load-latest)
-          baseline (load-baseline)]
-      (print-suites results)
-      (println)
-      (print-failures results)
-      (when prev (print-diff prev results))
-      (save-results! results)
-      (when baseline
-        (println (format "\nBaseline: %d passed" (:passed baseline)))
-        (when (< (:passed results) (:passed baseline))
-          (println "REGRESSION: pass count decreased!")
-          (System/exit 1)))
-      (when update-baseline
-        (save-baseline! results)))
-    (finally
-      (stop!))))
+  (let [owns-server? (not url)]
+    (when owns-server?
+      (start! :snomed snomed))
+    (try
+      (let [results (run-tests :url url)
+            prev (load-latest)
+            baseline (load-baseline)]
+        (print-suites results)
+        (println)
+        (print-failures results)
+        (when prev (print-diff prev results))
+        (save-results! results)
+        (when baseline
+          (println (format "\nBaseline: %d passed" (:passed baseline)))
+          (when (< (:passed results) (:passed baseline))
+            (println "REGRESSION: pass count decreased!")
+            (System/exit 1)))
+        (when update-baseline
+          (save-baseline! results)))
+      (finally
+        (when owns-server? (stop!))))))
 
 ;; ---------------------------------------------------------------------------
 ;; REPL testing with overlays
