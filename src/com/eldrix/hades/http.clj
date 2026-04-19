@@ -335,21 +335,60 @@
       (accept-language request)
       (get-in ctx [:request :display-language])))
 
+(def ^:private overlay-param-markers
+  "Raw query-string substrings that flag a GET as needing the full overlay/
+  version/display context. Any match forces the slow path through
+  `params-for-request` + `request-flags` + `build-tx-ctx`. The markers
+  include the `=` so `useSupplement` also matches `useSupplements=` via
+  the shared `useSupplement` prefix."
+  ["system-version="
+   "force-system-version="
+   "check-system-version="
+   "useSupplement"
+   "property="
+   "displayLanguage="
+   "valueSetVersion="
+   "lenient-display-validation="])
+
+(defn- needs-full-ctx?
+  "Return true when the request must build the full tx-ctx. POST always
+  takes the slow path (the Parameters body may carry tx-resource / version
+  overrides); GETs take it only when a version/display/supplement query
+  param is present."
+  [request]
+  (or (= :post (:request-method request))
+      (let [^String qs (:query-string request)]
+        (and qs (boolean (some #(.contains qs ^String %) overlay-param-markers))))))
+
+(def ^:private fast-path-ctx
+  "Pre-built ctx reused by the fast path. Equivalent to what the slow path
+  produces when no overlay/version/display params are supplied: empty
+  overlay, default `:request` with no-op flags."
+  {:request (merge registry/default-request
+                   (request-flags {:query-params {} :post-params []}))})
+
 (def tx-ctx
-  "Build the overlay ctx from the request and attach it (and the parameter
-  structure) to the request map."
+  "Attach `:hades/params` and `:hades/ctx` to the request. Fast path (GET
+  with no overlay/version/display params) reuses `fast-path-ctx`; slow
+  path builds the full overlay + request-flags map."
   {:name  ::tx-ctx
    :enter (fn [context]
-            (let [request  (:request context)
-                  params   (params-for-request request)
-                  tx-res   (post-resources params "tx-resource")
-                  overlay  (build-tx-ctx tx-res)
-                  req-map  (merge registry/default-request
-                                   (request-flags params))
-                  ctx      (assoc overlay :request req-map)]
-              (-> context
-                  (assoc-in [:request :hades/params] params)
-                  (assoc-in [:request :hades/ctx] ctx))))})
+            (let [request (:request context)]
+              (if (needs-full-ctx? request)
+                (let [params   (params-for-request request)
+                      tx-res   (post-resources params "tx-resource")
+                      overlay  (build-tx-ctx tx-res)
+                      req-map  (merge registry/default-request
+                                       (request-flags params))
+                      ctx      (assoc overlay :request req-map)]
+                  (-> context
+                      (assoc-in [:request :hades/params] params)
+                      (assoc-in [:request :hades/ctx] ctx)))
+                (-> context
+                    (assoc-in [:request :hades/params]
+                              {:query-params (parse-query (:query-string request))
+                               :post-params  []})
+                    (assoc-in [:request :hades/ctx] fast-path-ctx)))))})
 
 ;; ---------------------------------------------------------------------------
 ;; CodeSystem $lookup
