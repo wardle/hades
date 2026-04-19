@@ -699,6 +699,7 @@
                                      (into (wire/build-cs-warning-params used-cs))
                                      (into (wire/build-vs-warning-params vs-meta vs-version-uri))
                                      (into (wire/build-used-codesystem-params used-cs))
+                                     (into (wire/build-issues-param (:issues result)))
                                      (into (wire/build-echo-params
                                              (assoc exp-ctx :display-language effective-lang))))
                 {:keys [count-value offset-value include-designations?]} exp-ctx

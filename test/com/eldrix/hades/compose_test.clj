@@ -162,6 +162,25 @@
       (is (= 5 (count concepts)))
       (is (some #(= "B" (:code %)) concepts)))))
 
+(deftest expand-compose-unknown-system-warning-test
+  (testing "multi-system include with unknown CS emits warning (expand purpose)"
+    (let [compose {"include" [{"system" "http://example.com/cs"}
+                              {"system" "http://unknown.example.com/loinc"}
+                              {"system" "http://unknown.example.com/rxnorm"}]}
+          {:keys [concepts issues]} (compose/expand-compose nil compose {:purpose :expand})]
+      (is (= 5 (count concepts)))
+      (is (= 2 (count issues)))
+      (is (every? #(= "warning" (:severity %)) issues))
+      (is (every? #(= "not-found" (:details-code %)) issues))
+      (is (some #(re-find #"loinc" (:text %)) issues))
+      (is (some #(re-find #"rxnorm" (:text %)) issues))))
+  (testing "validate purpose does not emit unknown-system warnings"
+    (let [compose {"include" [{"system" "http://unknown.example.com/loinc"}]}
+          {:keys [issues]} (compose/expand-compose nil compose {})]
+      (is (empty? (filter #(and (= "warning" (:severity %))
+                                (re-find #"loinc" (:text %)))
+                          issues))))))
+
 (deftest expand-compose-check-system-version-test
   (testing "check-system-version passes when version matches"
     (let [ctx {:request {:check-system-version {"http://example.com/cs" "1.0"}}}

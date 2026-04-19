@@ -183,6 +183,21 @@
                    (registry/codesystem ctx system)
                    (not (registry/codesystem ctx (registry/versioned-uri system version))))
           (registry/unknown-version-issue ctx system version (:purpose params :validate)))
+        ;; When the include references a CodeSystem we don't know about at
+        ;; all, $expand should warn rather than silently drop the branch
+        ;; (FHIR $expand: include a warning issue when part of the compose
+        ;; cannot be satisfied). Limited to the expand purpose so that
+        ;; validate-code continues to rely on its own unknown-system path.
+        unknown-system-issue
+        (when (and system (= :expand (:purpose params))
+                   (not (registry/codesystem ctx system))
+                   (not (and version
+                             (registry/codesystem ctx (registry/versioned-uri system version)))))
+          {:severity     "warning"
+           :type         "not-found"
+           :details-code "not-found"
+           :text         (str "A definition for CodeSystem '" system
+                              "' could not be found, so the value set cannot be fully expanded")})
         bad-filter-issue (when (seq filters) (broken-filter-issue system filters))
         system-results (cond
                          concepts (expand-include-concepts ctx system version concepts params)
@@ -195,6 +210,7 @@
         vs-issues (:issues vs-ref)]
     {:issues (cond-> (vec vs-issues)
                unknown-version-issue (conj unknown-version-issue)
+               unknown-system-issue (conj unknown-system-issue)
                bad-filter-issue (conj bad-filter-issue))
      :concepts (if (and (some? system-results) (seq vs-concepts))
                  (let [vs-set (set (map concept-key vs-concepts))]

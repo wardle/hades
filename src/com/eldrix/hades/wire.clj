@@ -327,6 +327,15 @@
           (exp-param "used-codesystem" {"valueUri" uri}))
         used-codesystems))
 
+(defn build-issues-param
+  "Build an expansion 'issues' parameter wrapping an OperationOutcome when
+  issues are present; otherwise an empty vector."
+  [issues]
+  (if (seq issues)
+    [{"name"     "issues"
+      "resource" (operation-outcome issues)}]
+    []))
+
 (defn build-echo-params
   "Build echo expansion parameters (displayLanguage, excludeNested, etc.).
   :exclude-nested-present? indicates whether the caller supplied excludeNested
