@@ -39,7 +39,7 @@
              "kind"         "instance"
              "software"     {"name"        "Hades"
                              "version"     hades-version
-                             "releaseDate" ts}
+                             "releaseDate" ts}   ;; TODO: use a proper release date from build
              "fhirVersion"  fhir-version
              "format"       ["application/fhir+json" "json"]
              "rest"         [{"mode" "server"
@@ -66,7 +66,7 @@
   []
   {"resourceType" "TerminologyCapabilities"
    "status"       "active"
-   "date"         (now-iso)
+   "date"         (now-iso)  ;; TODO: use proper release date from build metadata
    "version"      hades-version
    "name"         "Hades"
    "title"        "Hades FHIR Terminology Server"
