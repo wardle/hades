@@ -6,10 +6,15 @@
            com.cnuernber/charred          {:mvn/version "1.034"}
            ch.qos.logback/logback-classic {:mvn/version "1.5.16"}
 
-           com.eldrix/hermes              {:mvn/version "1.4.1548"}
+           com.eldrix/hermes              {:mvn/version "1.4.1607"}
            io.pedestal/pedestal.service   {:mvn/version "0.8.1"}
            io.pedestal/pedestal.jetty     {:mvn/version "0.8.1"}
-           lambdaisland/uri               {:mvn/version "1.19.155"}}
+           lambdaisland/uri               {:mvn/version "1.19.155"}
+
+           ;; Lucene 10 overrides Hermes' transitive Lucene 9. Requires Java 21+.
+           org.apache.lucene/lucene-core            {:mvn/version "10.4.0"}
+           org.apache.lucene/lucene-queries         {:mvn/version "10.4.0"}
+           org.apache.lucene/lucene-backward-codecs {:mvn/version "10.4.0"}}
 
  :aliases {:build
            {:deps       {io.github.clojure/tools.build          {:git/tag "v0.10.7" :git/sha "573711e"}
