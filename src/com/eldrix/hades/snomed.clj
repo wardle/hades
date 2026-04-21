@@ -292,18 +292,34 @@
                :target ext-target}))
           external-map-refsets)))
 
+(defn- preferred-terms
+  "Resolve preferred synonyms for concept ids in one pass. Returns a map
+  of concept-id → preferred term (or nil for concepts whose preferred
+  synonym can't be resolved in the given locale). Returns nil when
+  `lang-refset-ids` is empty. Deduplicates via the accumulating map, so
+  repeats in `concept-ids` cost only one LMDB call."
+  [svc lang-refset-ids concept-ids]
+  (when (seq lang-refset-ids)
+    (persistent!
+      (reduce (fn [m cid]
+                (if (contains? m cid)
+                  m
+                  (assoc! m cid (:term (hermes/preferred-synonym* svc cid lang-refset-ids)))))
+              (transient {})
+              concept-ids))))
+
 (defn- translate-historical
   "SNOMED→SNOMED historical-association forward translation."
   [svc refset-id code-id]
-  (let [items (get (hermes/historical-associations svc code-id) refset-id)
-        eq    (historical-refset->equivalence refset-id)
-        matches (vec (for [item items
-                           :when (:active item)
-                           :let [target-id (:targetComponentId item)]]
-                       {:equivalence eq
-                        :system      snomed-system-uri
-                        :code        (str target-id)
-                        :display     (:term (hermes/preferred-synonym svc target-id))}))]
+  (let [items      (get (hermes/historical-associations svc code-id) refset-id)
+        eq         (historical-refset->equivalence refset-id)
+        target-ids (into [] (comp (filter :active) (map :targetComponentId)) items)
+        displays   (preferred-terms svc (hermes/match-locale svc) target-ids)
+        matches    (mapv (fn [tid] {:equivalence eq
+                                    :system      snomed-system-uri
+                                    :code        (str tid)
+                                    :display     (get displays tid)})
+                         target-ids)]
     {:result (boolean (seq matches)) :matches matches}))
 
 (defn- translate-external-forward
@@ -324,12 +340,12 @@
   external (target) code string; we emit matching SNOMED concepts."
   [svc refset-id code equivalence]
   (let [snomed-ids (hermes/member-field svc refset-id "mapTarget" code)
-        matches (vec (for [sid snomed-ids
-                           :let [pref (hermes/preferred-synonym svc sid)]]
-                       {:equivalence equivalence
-                        :system      snomed-system-uri
-                        :code        (str sid)
-                        :display     (:term pref)}))]
+        displays   (preferred-terms svc (hermes/match-locale svc) snomed-ids)
+        matches    (mapv (fn [sid] {:equivalence equivalence
+                                    :system      snomed-system-uri
+                                    :code        (str sid)
+                                    :display     (get displays sid)})
+                         snomed-ids)]
     {:result (boolean (seq matches)) :matches matches}))
 
 (deftype HermesService
@@ -353,16 +369,21 @@
       (when-let [code' (parse-long code)]
         (when-let [ec (hermes/extended-concept svc code')]
           (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
-                preferred (:term (hermes/preferred-synonym* svc code' lang-refset-ids))
-                usage {snomed/Synonym            (hermes/preferred-synonym* svc snomed/Synonym lang-refset-ids)
-                       snomed/FullySpecifiedName (hermes/preferred-synonym* svc snomed/FullySpecifiedName lang-refset-ids)}
-                ver (or version (version-uri svc))
-                parents (get-in ec [:directParentRelationships snomed/IsA])
-                children (hermes/child-relationships-of-type svc code' snomed/IsA)
-                attrs (dissoc (:directParentRelationships ec) snomed/IsA)]
+                ver             (or version (version-uri svc))
+                parents         (get-in ec [:directParentRelationships snomed/IsA])
+                children        (hermes/child-relationships-of-type svc code' snomed/IsA)
+                attrs           (dissoc (:directParentRelationships ec) snomed/IsA)
+                concrete        (hermes/concrete-values svc code')
+                display-ids     (-> #{code' snomed/Synonym snomed/FullySpecifiedName}
+                                    (into parents)
+                                    (into children)
+                                    (into (keys attrs))
+                                    (into (mapcat val) attrs)
+                                    (into (map :typeId) concrete))
+                displays        (preferred-terms svc lang-refset-ids display-ids)]
             {:name         "SNOMED CT"
              :version      ver
-             :display      preferred
+             :display      (get displays code')
              :system       snomed-system-uri
              :code         (keyword code)
              :properties   (concat
@@ -370,28 +391,28 @@
                               {:code :sufficientlyDefined :value (= snomed/Defined (get-in ec [:concept :definitionStatusId]))}]
                              (map (fn [pid] {:code        :parent
                                              :value       (keyword (str pid))
-                                             :description (:term (hermes/preferred-synonym* svc pid lang-refset-ids))})
+                                             :description (get displays pid)})
                                   parents)
                              (map (fn [cid] {:code        :child
                                              :value       (keyword (str cid))
-                                             :description (:term (hermes/preferred-synonym* svc cid lang-refset-ids))})
+                                             :description (get displays cid)})
                                   children)
                              (mapcat (fn [[type-id target-ids]]
                                        (map (fn [tid] {:code         (keyword (str type-id))
-                                                       :code-display (:term (hermes/preferred-synonym* svc type-id lang-refset-ids))
+                                                       :code-display (get displays type-id)
                                                        :value        (keyword (str tid))
-                                                       :description  (:term (hermes/preferred-synonym* svc tid lang-refset-ids))})
+                                                       :description  (get displays tid)})
                                             target-ids))
                                      attrs)
                              (map (fn [{:keys [typeId value]}]
                                     {:code         (keyword (str typeId))
-                                     :code-display (:term (hermes/preferred-synonym* svc typeId lang-refset-ids))
+                                     :code-display (get displays typeId)
                                      :value        value})
-                                  (hermes/concrete-values svc code')))
+                                  concrete))
              :designations (map (fn [d] {:language (keyword (:languageCode d))
                                          :use      {:system  snomed-system-uri
                                                     :code    (str (:typeId d))
-                                                    :display (:term (get usage (:typeId d)))}
+                                                    :display (get displays (:typeId d))}
                                          :value    (:term d)})
                                 (:descriptions ec))})))))
 
@@ -501,18 +522,19 @@
          (hermes/subsumed-by? svc codeA' codeB') "subsumed-by" ;; A is subsumed by B
          (hermes/subsumed-by? svc codeB' codeA') "subsumes" ;; A subsumes B
          ;; look up historical associations, and check for equivalence  - this catches SAME-AS and REPLACED-BY etc.
-         (and (= systemA systemB) ((hermes/with-historical svc codeA') codeB')) "equivalent"
+         (and (= systemA systemB) ((hermes/with-historical svc [codeA']) codeB')) "equivalent"
          :else "not-subsumed")}))
   (cs-find-matches [_ query]
-    (let [{:keys [version filters max-hits text active-only]} query
+    (let [{:keys [version filters max-hits text active-only displayLanguage]} query
           ver (or version (version-uri svc))
           {:keys [ecl issues]} (compose-filters->ecl filters)]
       (if (seq issues)
         {:concepts [] :issues issues}
         (let [search-params (cond-> {:constraint ecl}
-                              max-hits                (assoc :max-hits max-hits)
-                              (not (str/blank? text)) (assoc :s text)
-                              (not active-only)       (assoc :inactive-concepts? true))
+                              max-hits                       (assoc :max-hits max-hits)
+                              (not (str/blank? text))        (assoc :s text)
+                              (not active-only)              (assoc :inactive-concepts? true)
+                              (not (str/blank? displayLanguage)) (assoc :accept-language displayLanguage))
               concepts (map (fn [{:keys [conceptId preferredTerm]}]
                               {:code    (str conceptId)
                                :system  snomed-system-uri
