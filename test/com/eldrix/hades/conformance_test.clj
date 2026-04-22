@@ -327,6 +327,7 @@
        :failed failed
        :skipped skipped
        :timestamp (str (Instant/now))
+       :tx-ecosystem-rev (tx-ecosystem-rev)
        :tests tests})))
 
 ;; ---------------------------------------------------------------------------
@@ -534,11 +535,12 @@
 (defn- results->json
   "Convert results to a JSON-serializable map, preserving full failure detail."
   [results]
-  {:timestamp (:timestamp results)
-   :total     (:total results)
-   :passed    (:passed results)
-   :failed    (:failed results)
-   :skipped   (or (:skipped results) 0)
+  {:timestamp        (:timestamp results)
+   :total            (:total results)
+   :passed           (:passed results)
+   :failed           (:failed results)
+   :skipped          (or (:skipped results) 0)
+   :tx-ecosystem-rev (:tx-ecosystem-rev results)
    :tests     (mapv (fn [{:keys [name suite status operation actions expected-response]}]
                       (cond-> {:name name :suite suite :status status}
                         operation (assoc :operation operation)
@@ -588,11 +590,12 @@
   "Save results as the new baseline."
   [results]
   (let [skipped (or (:skipped results) 0)]
-    (spit baseline-path (json/write-str {:total   (:total results)
-                                          :passed  (:passed results)
-                                          :failed  (:failed results)
-                                          :skipped skipped}
-                                         :indent true))
+    (spit baseline-path (json/write-str {:total            (:total results)
+                                         :passed           (:passed results)
+                                         :failed           (:failed results)
+                                         :skipped          skipped
+                                         :tx-ecosystem-rev (:tx-ecosystem-rev results)}
+                                        :indent true))
     (println (format "Baseline updated: %d/%d passed." (:passed results) (- (:total results) skipped)))))
 
 ;; ---------------------------------------------------------------------------
@@ -637,10 +640,18 @@
         (when prev (print-diff prev results))
         (save-results! results)
         (when baseline
-          (println (format "\nBaseline: %d passed" (:passed baseline)))
-          (when (< (:passed results) (:passed baseline))
-            (println "REGRESSION: pass count decreased!")
-            (System/exit 1)))
+          (let [base-rev (:tx-ecosystem-rev baseline)
+                cur-rev  (:tx-ecosystem-rev results)
+                fmt-rev  (fn [r] (if r (subs (str r) 0 (min 8 (count (str r)))) "unknown"))]
+            (println (format "\nBaseline: %d passed (tx-ecosystem %s)"
+                             (:passed baseline) (fmt-rev base-rev)))
+            (println (format "Current:  %d passed (tx-ecosystem %s)"
+                             (:passed results) (fmt-rev cur-rev)))
+            (when (and base-rev cur-rev (not= base-rev cur-rev))
+              (println "  NOTE: tx-ecosystem differs from baseline — upstream changes may explain any delta"))
+            (when (< (:passed results) (:passed baseline))
+              (println "REGRESSION: pass count decreased!")
+              (System/exit 1))))
         (when update-baseline
           (save-baseline! results)))
       (finally
