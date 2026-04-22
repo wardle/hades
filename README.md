@@ -157,9 +157,7 @@ Planned work, in rough priority order:
 - **Resource read and search** — `GET /fhir/CodeSystem/{id}`,
   `GET /fhir/ValueSet?url=…`, and search by common parameters.
 - **Conformance coverage** — drive the HL7 FHIR Terminology Ecosystem IG
-  pass rate above 80% (currently 473/603). See
-  [`plan/conformance-next-steps.md`](plan/conformance-next-steps.md) for
-  the active work queue.
+  pass rate above 80% (currently 473/603).
 - **CI/CD and health endpoints** — GitHub Actions for test/lint/conformance
   on every push, tagged releases that publish the uberjar, and a
   `/health` endpoint for orchestration.
