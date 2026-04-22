@@ -2,11 +2,13 @@
 
 [![Scc Count Badge](https://sloc.xyz/github/wardle/hades)](https://github.com/wardle/hades/)
 [![Scc Cocomo Badge](https://sloc.xyz/github/wardle/hades?category=cocomo&avg-wage=100000)](https://github.com/wardle/hades/)
+[![Conformance](https://img.shields.io/badge/conformance-473%2F603%20(78.4%25)-blue)](https://github.com/HL7/fhir-tx-ecosystem-ig)
 
-A lightweight HL7 FHIR terminology server. Hades currently wraps
-[hermes](https://github.com/wardle/hermes) as a SNOMED CT provider and is
-evolving into a general-purpose FHIR terminology server with a pluggable
-backend for additional codesystems, implicit value sets and concept maps.
+A lightweight HL7 FHIR terminology server for SNOMED CT. Hades exposes
+`CodeSystem`, `ValueSet`, and `ConceptMap` FHIR operations (`$lookup`,
+`$validate-code`, `$subsumes`, `$expand`, `$translate`) over HTTP,
+backed by the [hermes](https://github.com/wardle/hermes) SNOMED CT
+terminology engine.
 
 Hades passes **473 / 603 (78.4%)** of the HL7 FHIR Terminology Ecosystem
 IG conformance tests.
@@ -15,23 +17,80 @@ Hades requires Java 21 or above.
 
 # Quickstart
 
-Run from source with the Clojure CLI:
+Hades handles the full SNOMED CT lifecycle: download a distribution,
+build a database, serve it over FHIR.
+
+Every example below uses `clj -M:run` to run from source; with the pre-built
+uberjar, replace that with `java -jar hades-<version>.jar`.
+
+## 1. Build a SNOMED database
+
+Pick whichever path matches your source. All three end with a `snomed.db`
+directory ready for `serve`.
+
+### a) UK edition from TRUD
+
+Save your TRUD API key in a file (e.g. `trud-api-key.txt`), then:
 
 ```shell
-clj -M:run /path/to/snomed.db 8080
+clj -M:run install index compact \
+    --db snomed.db \
+    --dist uk.nhs/sct-clinical \
+    --api-key trud-api-key.txt
 ```
 
-Or run the pre-built uberjar:
+Commands execute in the order given — download + import, then build indices,
+then compact. Add more `--dist` flags (e.g. `--dist uk.nhs/sct-drug-ext`) to
+layer additional UK distributions into the same database before indexing.
+
+### b) SNOMED CT International from MLDS
+
+Save your MLDS password in a file, then:
 
 ```shell
-java -jar hades-<version>.jar /path/to/snomed.db 8080
+clj -M:run install index compact \
+    --db snomed.db \
+    --dist ihtsdo.mlds/167 \
+    --username you@example.com \
+    --password mlds-password.txt
 ```
 
-# How do I create a SNOMED database file?
+Run `clj -M:run available` to browse all MLDS distributions and their IDs.
 
-Use [`hermes`](https://github.com/wardle/hermes) to download and index a
-SNOMED CT distribution. Use the matching major version — for `hades` v1.4
-use `hermes` v1.4.
+### c) A distribution you downloaded manually
+
+Unzip the RF2 release, then point `import` at the unzipped directory:
+
+```shell
+clj -M:run list /path/to/unzipped-rf2/              # inspect what hades will import
+clj -M:run import index compact \
+    --db snomed.db \
+    /path/to/unzipped-rf2/
+```
+
+## 2. Serve
+
+```shell
+clj -M:run serve --db snomed.db --port 8080
+```
+
+Use `clj -M:run --help <command>` for full per-command options.
+
+## Command reference
+
+| Command | Purpose |
+|---------|---------|
+| `serve --db PATH [--port N] [--bind-address A] [--locale L]` | Start the FHIR server |
+| `install --db PATH --dist D …` | Download and import a distribution (run `index` + `compact` afterwards) |
+| `import --db PATH [paths…]` | Import RF2 files from local disk |
+| `list [paths…]` | List importable files under given paths |
+| `available [--dist D]` | List distribution providers / releases for a given distribution |
+| `index --db PATH` | Build search indices |
+| `compact --db PATH` | Compact the LMDB store |
+| `status --db PATH [--format json\|edn] [--modules] [--refsets]` | Show database status |
+
+Commands can be chained on a single command line and execute in the order
+given, sharing flags — for example `install index compact` above.
 
 # Example usage
 
@@ -82,3 +141,28 @@ curl -H "Accept: application/json" 'localhost:8080/fhir/ValueSet/$expand?url=htt
   }
 }
 ```
+
+# Roadmap
+
+Planned work, in rough priority order:
+
+- **File-backed code systems and value sets** — load FHIR JSON (`CodeSystem`,
+  `ValueSet`, `Bundle`) from a `--resources` directory at startup, so you can
+  serve non-SNOMED terminologies (LOINC, ICD-10, locally-authored
+  `ValueSet`s) alongside SNOMED. The underlying providers already exist
+  internally; this wires them into the CLI.
+- **`$translate`** — ConceptMap translation, including SNOMED CT map
+  reference sets (ICD-10, CTV3, ICD-O) auto-discovered from Hermes and
+  file-backed `ConceptMap` JSON.
+- **Resource read and search** — `GET /fhir/CodeSystem/{id}`,
+  `GET /fhir/ValueSet?url=…`, and search by common parameters.
+- **Conformance coverage** — drive the HL7 FHIR Terminology Ecosystem IG
+  pass rate above 80% (currently 473/603). See
+  [`plan/conformance-next-steps.md`](plan/conformance-next-steps.md) for
+  the active work queue.
+- **CI/CD and health endpoints** — GitHub Actions for test/lint/conformance
+  on every push, tagged releases that publish the uberjar, and a
+  `/health` endpoint for orchestration.
+
+The full roadmap, including completed phases and per-test-suite gap
+analysis, lives in [`plan/roadmap.md`](plan/roadmap.md).
