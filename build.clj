@@ -73,12 +73,13 @@
   "Build an executable uberjar file for hermes HTTP server"
   [_]
   (clean nil)
-  (b/copy-dir {:src-dirs   ["src" "resources"]
-               :target-dir class-dir})
+  (println "Building" lib version)
   (b/compile-clj {:basis      uber-basis
                   :src-dirs   ["src"]
                   :ns-compile ['com.eldrix.hades.core]
                   :class-dir  class-dir})
+  (b/copy-dir {:src-dirs   ["src" "resources"]
+               :target-dir class-dir})
   (b/uber {:class-dir class-dir
            :uber-file uber-file
            :basis     uber-basis
