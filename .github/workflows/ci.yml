@@ -61,24 +61,24 @@ jobs:
         if: steps.snomed-cache.outputs.cache-hit != 'true'
         run: |
           mkdir -p trud-cache
-          clj -M:run install --db snomed.db --dist uk.nhs/sct-clinical --api-key api-key.txt --cache-dir trud-cache
+          clojure -M:run install --db snomed.db --dist uk.nhs/sct-clinical --api-key api-key.txt --cache-dir trud-cache
           rm -rf trud-cache api-key.txt
 
       - name: Index database
         if: steps.snomed-cache.outputs.cache-hit != 'true'
-        run: clj -M:run index --db snomed.db
+        run: clojure -M:run index --db snomed.db
 
       - name: Compact database
         if: steps.snomed-cache.outputs.cache-hit != 'true'
-        run: clj -M:run compact --db snomed.db
+        run: clojure -M:run compact --db snomed.db
 
       - name: Compile check
-        run: clj -M:check
+        run: clojure -M:check
 
       - name: Lint
-        run: clj -M:lint/kondo
+        run: clojure -M:lint/kondo
 
       - name: Tests
         env:
           SNOMED_DB: ${{ github.workspace }}/snomed.db
-        run: clj -M:test
+        run: clojure -M:test

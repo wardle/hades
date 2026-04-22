@@ -50,7 +50,7 @@ jobs:
           key: conformance-${{ steps.txrev.outputs.sha }}
 
       - name: Run conformance suite
-        run: clj -X:conformance
+        run: clojure -X:conformance
 
       - name: Upload results
         if: always()
