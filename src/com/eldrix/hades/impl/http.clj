@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.http
+(ns com.eldrix.hades.impl.http
   "Pedestal HTTP layer for the Hades FHIR terminology server.
 
   Responsibilities:
@@ -13,12 +13,12 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
-            [com.eldrix.hades.fhir-codesystem :as fhir-cs]
-            [com.eldrix.hades.fhir-valueset :as fhir-vs]
-            [com.eldrix.hades.metadata :as metadata]
-            [com.eldrix.hades.protocols :as protos]
-            [com.eldrix.hades.registry :as registry]
-            [com.eldrix.hades.wire :as wire]
+            [com.eldrix.hades.impl.fhir-codesystem :as fhir-cs]
+            [com.eldrix.hades.impl.fhir-valueset :as fhir-vs]
+            [com.eldrix.hades.impl.metadata :as metadata]
+            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.impl.registry :as registry]
+            [com.eldrix.hades.impl.wire :as wire]
             [io.pedestal.connector :as conn]
             [io.pedestal.http.jetty :as jetty])
   (:import (java.net URLDecoder)

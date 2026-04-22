@@ -1,25 +1,23 @@
-(ns com.eldrix.hades.display
+(ns com.eldrix.hades.impl.display
   "Shared display + language helpers for FHIR terminology operations.
   Used by CodeSystem and ValueSet implementations for language-aware
   display validation and selection."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str])
+  (:import (java.util Locale$LanguageRange)))
 
 (defn parse-display-language
-  "Parse a displayLanguage string into a seq of language codes ordered by preference."
+  "Parse a displayLanguage (RFC 4647 / Accept-Language) string into a seq of
+  `{:lang :q}` maps sorted by quality descending. The wildcard `*` is dropped.
+  Returns nil for nil/blank input and for inputs the JDK rejects as malformed."
   [s]
-  (when s
-    (let [parts (str/split s #",")]
-      (keep (fn [p]
-              (let [trimmed (str/trim p)
-                    [lang q] (str/split trimmed #";")
-                    lang (str/trim lang)]
-                (when (and (seq lang) (not= lang "*"))
-                  {:lang lang
-                   :q (if q
-                        (let [m (re-find #"q\s*=\s*([0-9.]+)" q)]
-                          (if m (Double/parseDouble (second m)) 1.0))
-                        1.0)})))
-            parts))))
+  (when (and s (not (str/blank? s)))
+    (let [ranges (try (Locale$LanguageRange/parse ^String s) (catch Exception _ nil))]
+      (->> ranges
+           (keep (fn [^Locale$LanguageRange r]
+                   (let [range (.getRange r)]
+                     (when (not= range "*")
+                       {:lang range :q (.getWeight r)}))))
+           (sort-by :q #(compare %2 %1))))))
 
 (defn language-matches?
   "Check if a designation language matches a requested language using prefix matching."

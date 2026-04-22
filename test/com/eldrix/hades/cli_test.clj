@@ -1,7 +1,7 @@
 (ns com.eldrix.hades.cli-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [com.eldrix.hades.cli :as cli]))
+            [com.eldrix.hades.cmd.impl.cli :as cli]))
 
 (def cli-tests
   [{:s    "Legacy download command line arguments (pair form)"

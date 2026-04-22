@@ -1,9 +1,9 @@
-(ns com.eldrix.hades.snomed
+(ns com.eldrix.hades.impl.snomed
   "Implementation of Hades protocols for SNOMED CT.
   A thin wrapper around the Hermes SNOMED terminology service"
   (:require [clojure.string :as str]
-            [com.eldrix.hades.protocols :as protos]
-            [com.eldrix.hades.snomed.expansion :as expansion]
+            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.impl.snomed.expansion :as expansion]
             [com.eldrix.hermes.core :as hermes]
             [com.eldrix.hermes.impl.lmdb :as lmdb]
             [com.eldrix.hermes.impl.store :as hstore]

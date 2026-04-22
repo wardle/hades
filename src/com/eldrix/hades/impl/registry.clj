@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.registry
+(ns com.eldrix.hades.impl.registry
   "Dynamic registration of HL7 FHIR terminology services.
 
   Each codesystem and valueset is registered using id or uri.
@@ -31,9 +31,9 @@
   code system, though this is not always possible."
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
-            [com.eldrix.hades.protocols :as protos]
+            [com.eldrix.hades.impl.protocols :as protos]
             [lambdaisland.uri :as uri])
-  (:import (com.eldrix.hades.protocols CodeSystem ConceptMap ValueSet)))
+  (:import (com.eldrix.hades.impl.protocols CodeSystem ConceptMap ValueSet)))
 
 
 ;; registered codesystems, valuesets and concept map providers

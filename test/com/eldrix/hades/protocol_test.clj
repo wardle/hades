@@ -11,10 +11,10 @@
             [clojure.spec.test.alpha :as stest]
             [clojure.string]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [com.eldrix.hades.fhir-codesystem :as fhir-cs]
-            [com.eldrix.hades.fhir-valueset :as fhir-vs]
-            [com.eldrix.hades.protocols :as protos]
-            [com.eldrix.hades.registry :as registry]))
+            [com.eldrix.hades.impl.fhir-codesystem :as fhir-cs]
+            [com.eldrix.hades.impl.fhir-valueset :as fhir-vs]
+            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.impl.registry :as registry]))
 
 ;; ---------------------------------------------------------------------------
 ;; Spec instrumentation — validate inputs at boundaries during test runs

@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.wire
+(ns com.eldrix.hades.impl.wire
   "Pure FHIR JSON map builders. Outputs are string-keyed maps matching FHIR
   JSON property names; they serialise directly via `charred/write-json-str`.
 

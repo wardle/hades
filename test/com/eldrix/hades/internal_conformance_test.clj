@@ -8,12 +8,12 @@
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [com.eldrix.hades.compose :as compose]
-            [com.eldrix.hades.fhir-codesystem :as fhir-cs]
-            [com.eldrix.hades.fhir-valueset :as fhir-vs]
-            [com.eldrix.hades.protocols :as protos]
-            [com.eldrix.hades.registry :as registry]
-            [com.eldrix.hades.wire :as wire]))
+            [com.eldrix.hades.impl.compose :as compose]
+            [com.eldrix.hades.impl.fhir-codesystem :as fhir-cs]
+            [com.eldrix.hades.impl.fhir-valueset :as fhir-vs]
+            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.impl.registry :as registry]
+            [com.eldrix.hades.impl.wire :as wire]))
 
 ;; ---------------------------------------------------------------------------
 ;; Test data — mirrors the HL7 tx-ecosystem "simple" and "version" test suites

@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.cli
+(ns com.eldrix.hades.cmd.impl.cli
   "Command-line option parsing for the Hades FHIR terminology server."
   (:require [clojure.core.match :as match]
             [clojure.string :as str]

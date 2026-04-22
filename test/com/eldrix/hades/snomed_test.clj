@@ -2,7 +2,7 @@
   (:require [clojure.set :as set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [com.eldrix.hades.snomed :as snomed]))
+            [com.eldrix.hades.impl.snomed :as snomed]))
 
 
 (def implicit-value-sets

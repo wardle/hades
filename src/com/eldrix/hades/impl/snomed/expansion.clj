@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.snomed.expansion
+(ns com.eldrix.hades.impl.snomed.expansion
   "SNOMED concept-level $expand for Hades.
 
   Dispatches on `:limit`:

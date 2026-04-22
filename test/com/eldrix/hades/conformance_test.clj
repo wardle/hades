@@ -5,9 +5,9 @@
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [com.eldrix.hades.registry :as registry]
-            [com.eldrix.hades.server :as server]
-            [com.eldrix.hades.snomed :as snomed]
+            [com.eldrix.hades.impl.registry :as registry]
+            [com.eldrix.hades.impl.server :as server]
+            [com.eldrix.hades.impl.snomed :as snomed]
             [com.eldrix.hermes.core :as hermes])
   (:import (java.net ServerSocket)
            (java.time Instant LocalDateTime ZoneId)
@@ -141,16 +141,16 @@
     (when-not snomed-db-path
       (throw (ex-info "No server to restart. Call (start!) first." {})))
     (stop!)
-    (doseq [ns-sym '[com.eldrix.hades.protocols
-                     com.eldrix.hades.wire
-                     com.eldrix.hades.metadata
-                     com.eldrix.hades.snomed
-                     com.eldrix.hades.compose
-                     com.eldrix.hades.fhir-codesystem
-                     com.eldrix.hades.fhir-valueset
-                     com.eldrix.hades.registry
-                     com.eldrix.hades.http
-                     com.eldrix.hades.server]]
+    (doseq [ns-sym '[com.eldrix.hades.impl.protocols
+                     com.eldrix.hades.impl.wire
+                     com.eldrix.hades.impl.metadata
+                     com.eldrix.hades.impl.snomed
+                     com.eldrix.hades.impl.compose
+                     com.eldrix.hades.impl.fhir-codesystem
+                     com.eldrix.hades.impl.fhir-valueset
+                     com.eldrix.hades.impl.registry
+                     com.eldrix.hades.impl.http
+                     com.eldrix.hades.impl.server]]
       (require ns-sym :reload))
     (start! :snomed snomed-db-path :port port)))
 

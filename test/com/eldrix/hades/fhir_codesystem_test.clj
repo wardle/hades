@@ -1,8 +1,8 @@
 (ns com.eldrix.hades.fhir-codesystem-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [com.eldrix.hades.fhir-codesystem :as fhir-cs]
-            [com.eldrix.hades.protocols :as protos]))
+            [com.eldrix.hades.impl.fhir-codesystem :as fhir-cs]
+            [com.eldrix.hades.impl.protocols :as protos]))
 
 (def hierarchical-cs
   {"resourceType"     "CodeSystem"

@@ -4,9 +4,9 @@
   Tests are skipped when SNOMED index is not available."
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [com.eldrix.hades.registry :as registry]
-            [com.eldrix.hades.server :as server]
-            [com.eldrix.hades.snomed :as snomed]
+            [com.eldrix.hades.impl.registry :as registry]
+            [com.eldrix.hades.impl.server :as server]
+            [com.eldrix.hades.impl.snomed :as snomed]
             [com.eldrix.hermes.core :as hermes])
   (:import (java.net ServerSocket URI)
            (java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers)))

@@ -1,12 +1,13 @@
-(ns com.eldrix.hades.compose
+(ns com.eldrix.hades.impl.compose
   "Pure compose expansion engine for FHIR ValueSet compose definitions.
 
   Evaluates include/exclude/filter/valueSet-import to produce an expanded
   set of concepts. No HAPI, no atoms, no mutable state."
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
-            [com.eldrix.hades.protocols :as protos]
-            [com.eldrix.hades.registry :as registry]))
+            [com.eldrix.hades.impl.display :as display]
+            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.impl.registry :as registry]))
 
 (s/def ::filter (s/nilable string?))
 (s/def ::activeOnly (s/nilable boolean?))
@@ -14,37 +15,6 @@
 (s/def ::count (s/nilable nat-int?))
 (s/def ::expanding (s/nilable set?))
 (s/def ::expand-params (s/keys :opt-un [::filter ::activeOnly ::offset ::count ::expanding]))
-
-(defn- parse-display-language
-  "Parse displayLanguage (Accept-Language format) into preferred language codes."
-  [s]
-  (when s
-    (let [parts (str/split s #",")]
-      (->> parts
-           (keep (fn [p]
-                   (let [trimmed (str/trim p)
-                         [lang q] (str/split trimmed #";")
-                         lang (str/trim lang)]
-                     (when (and (seq lang) (not= lang "*"))
-                       {:lang lang
-                        :q (if q
-                             (let [m (re-find #"q\s*=\s*([0-9.]+)" q)]
-                               (if m (Double/parseDouble (second m)) 1.0))
-                             1.0)}))))
-           (sort-by :q #(compare %2 %1))
-           (map :lang)))))
-
-(defn- language-matches? [d-lang r-lang]
-  (when (and d-lang r-lang)
-    (let [d (str/lower-case (if (keyword? d-lang) (name d-lang) (str d-lang)))
-          r (str/lower-case r-lang)]
-      (or (= d r) (str/starts-with? d (str r "-"))))))
-
-(defn- find-display-for-language [designations display-langs]
-  (some (fn [lang]
-          (some (fn [d] (when (language-matches? (:language d) lang) (:value d)))
-                designations))
-        display-langs))
 
 (defn- resolve-effective-version
   "Determine the effective version for a system in compose expansion.
@@ -100,9 +70,9 @@
                               (registry/codesystem-lookup ctx (cond-> {:system system :code code}
                                                                 version (assoc :version version))))]
               (when (or looked-up (nil? system))
-                (let [display-langs (parse-display-language (:displayLanguage params))
+                (let [display-langs (display/parse-display-language (:displayLanguage params))
                       lang-display (when (and (seq display-langs) looked-up)
-                                     (find-display-for-language (:designations looked-up) display-langs))
+                                     (display/find-display-for-language (:designations looked-up) display-langs))
                       display (or provided-display lang-display (:display looked-up))
                       result-version (or (:version looked-up) version)
                       inactive? (when looked-up

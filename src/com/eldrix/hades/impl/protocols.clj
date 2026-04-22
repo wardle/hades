@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.protocols
+(ns com.eldrix.hades.impl.protocols
   "Protocols defining a terminology service.
 
   These definitions decouple the web server (currently using HAPI) from the

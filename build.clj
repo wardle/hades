@@ -1,5 +1,6 @@
 (ns build
-  (:require [clojure.tools.build.api :as b]
+  (:require [clojure.java.io :as io]
+            [clojure.tools.build.api :as b]
             [deps-deploy.deps-deploy :as dd]
             [borkdude.gh-release-artifact :as gh]))
 
@@ -19,6 +20,11 @@
 
 (defn clean [_]
   (b/delete {:path "target"}))
+
+(defn- write-version-edn! []
+  (let [path (str class-dir "/com/eldrix/hades/version.edn")]
+    (io/make-parents path)
+    (spit path (pr-str {:version version}))))
 
 (defn jar [_]
   (clean nil)
@@ -44,6 +50,7 @@
                               [:distribution "repo"]]]]})
   (b/copy-dir {:src-dirs   ["src" "resources"]
                :target-dir class-dir})
+  (write-version-edn!)
   (b/jar {:class-dir class-dir
           :jar-file  jar-file}))
 
@@ -76,14 +83,15 @@
   (println "Building" lib version)
   (b/compile-clj {:basis      uber-basis
                   :src-dirs   ["src"]
-                  :ns-compile ['com.eldrix.hades.core]
+                  :ns-compile ['com.eldrix.hades.cmd.core]
                   :class-dir  class-dir})
   (b/copy-dir {:src-dirs   ["src" "resources"]
                :target-dir class-dir})
+  (write-version-edn!)
   (b/uber {:class-dir class-dir
            :uber-file uber-file
            :basis     uber-basis
-           :main      'com.eldrix.hades.core}))
+           :main      'com.eldrix.hades.cmd.core}))
 
 (defn release
   "Deploy release to github. Requires valid token in GITHUB_TOKEN environmental

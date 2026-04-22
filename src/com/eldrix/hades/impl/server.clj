@@ -1,6 +1,6 @@
-(ns com.eldrix.hades.server
+(ns com.eldrix.hades.impl.server
   "Public entry point for the Hades FHIR terminology server."
-  (:require [com.eldrix.hades.http :as http]))
+  (:require [com.eldrix.hades.impl.http :as http]))
 
 (defn make-server
   "Create an unstarted Hades FHIR server connector. Use `start!` and `stop!`

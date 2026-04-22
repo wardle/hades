@@ -24,7 +24,7 @@
             :ns-default build}
 
            :run
-           {:main-opts ["-m" "com.eldrix.hades.core"]}
+           {:main-opts ["-m" "com.eldrix.hades.cmd.core"]}
 
            :socket
            {:jvm-opts ["-Dclojure.server.repl={:port,50505,:accept,clojure.core.server/repl}"]}

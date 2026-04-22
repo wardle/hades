@@ -1,8 +1,8 @@
 (ns com.eldrix.hades.compose-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
-            [com.eldrix.hades.compose :as compose]
-            [com.eldrix.hades.fhir-codesystem :as fhir-cs]
-            [com.eldrix.hades.registry :as registry]))
+            [com.eldrix.hades.impl.compose :as compose]
+            [com.eldrix.hades.impl.fhir-codesystem :as fhir-cs]
+            [com.eldrix.hades.impl.registry :as registry]))
 
 (def test-cs-map
   {"resourceType" "CodeSystem"

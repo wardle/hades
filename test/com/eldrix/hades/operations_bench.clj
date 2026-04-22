@@ -18,10 +18,10 @@
      to run one by id. `close-snomed!` when done."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest use-fixtures]]
-            [com.eldrix.hades.compose :as compose]
-            [com.eldrix.hades.registry :as registry]
-            [com.eldrix.hades.snomed :as snomed]
-            [com.eldrix.hades.snomed.expansion :as expansion]
+            [com.eldrix.hades.impl.compose :as compose]
+            [com.eldrix.hades.impl.registry :as registry]
+            [com.eldrix.hades.impl.snomed :as snomed]
+            [com.eldrix.hades.impl.snomed.expansion :as expansion]
             [com.eldrix.hermes.core :as hermes]
             [criterium.core :as crit]))
 

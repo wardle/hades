@@ -1,12 +1,12 @@
-(ns com.eldrix.hades.fhir-codesystem
+(ns com.eldrix.hades.impl.fhir-codesystem
   "Generic file-backed CodeSystem and ValueSet provider.
 
   Creates providers from FHIR CodeSystem JSON (as Clojure maps). Used both for
   loading code systems from the filesystem and for the tx-resource mechanism."
   (:require [clojure.string :as str]
-            [com.eldrix.hades.display :as display]
-            [com.eldrix.hades.protocols :as protos]
-            [com.eldrix.hades.registry :as registry]))
+            [com.eldrix.hades.impl.display :as display]
+            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.impl.registry :as registry]))
 
 (def ^:private value-keys
   ["valueCode" "valueCoding" "valueString" "valueInteger"

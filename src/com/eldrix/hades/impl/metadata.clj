@@ -1,7 +1,7 @@
-(ns com.eldrix.hades.metadata
+(ns com.eldrix.hades.impl.metadata
   "Build CapabilityStatement and TerminologyCapabilities resources as
   string-keyed maps ready for FHIR JSON serialisation."
-  (:require [com.eldrix.hades.registry :as registry]))
+  (:require [com.eldrix.hades.impl.registry :as registry]))
 
 (def ^:private hades-version "1.4.0-SNAPSHOT")
 

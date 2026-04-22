@@ -1,14 +1,14 @@
-(ns com.eldrix.hades.fhir-valueset
+(ns com.eldrix.hades.impl.fhir-valueset
   "FhirValueSet — a ValueSet backed by a compose definition (FHIR JSON).
 
   Implements the ValueSet protocol by delegating to the compose expansion
   engine. Used for tx-resource ValueSets and file-backed ValueSets."
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
-            [com.eldrix.hades.compose :as compose]
-            [com.eldrix.hades.display :as display]
-            [com.eldrix.hades.protocols :as protos]
-            [com.eldrix.hades.registry :as registry]))
+            [com.eldrix.hades.impl.compose :as compose]
+            [com.eldrix.hades.impl.display :as display]
+            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.impl.registry :as registry]))
 
 (def ^:private standards-status-ext
   "http://hl7.org/fhir/StructureDefinition/structuredefinition-standards-status")
