@@ -77,6 +77,18 @@
             :exec-fn     com.eldrix.hades.conformance-test/run
             :exec-args   {}}
 
+           :bench
+           {:extra-paths ["test" "test/resources"]
+            :extra-deps  {com.cognitect/test-runner
+                          {:git/url "https://github.com/cognitect-labs/test-runner.git"
+                           :sha     "3f288f1f16d167723ad87cc35b1dfee3c1681e10"}
+                          criterium/criterium                     {:mvn/version "0.4.6"}
+                          ca.uhn.hapi.fhir/org.hl7.fhir.validation {:mvn/version "6.8.2"}
+                          com.squareup.okhttp3/okhttp             {:mvn/version "4.12.0"}}
+            :main-opts   ["-m" "cognitect.test-runner" "-d" "test" "-r" ".*-bench$"]
+            :exec-fn     cognitect.test-runner.api/test
+            :exec-args   {:patterns [".*-bench$"]}}
+
            :lint/kondo
            {:extra-deps {clj-kondo/clj-kondo {:mvn/version "RELEASE"}}
             :main-opts  ["-m" "clj-kondo.main" "--lint" "src"]}

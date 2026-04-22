@@ -3,10 +3,14 @@
   A thin wrapper around the Hermes SNOMED terminology service"
   (:require [clojure.string :as str]
             [com.eldrix.hades.protocols :as protos]
+            [com.eldrix.hades.snomed.expansion :as expansion]
             [com.eldrix.hermes.core :as hermes]
+            [com.eldrix.hermes.impl.lmdb :as lmdb]
+            [com.eldrix.hermes.impl.store :as hstore]
             [com.eldrix.hermes.snomed :as snomed]
             [lambdaisland.uri :as uri])
-  (:import (com.eldrix.hermes.snomed Description)
+  (:import (com.eldrix.hermes.impl.lmdb LmdbStore)
+           (com.eldrix.hermes.snomed Description)
            (java.time.format DateTimeFormatter)))
 
 (def snomed-system-uri "http://snomed.info/sct")
@@ -148,6 +152,19 @@
       (if (contains? #{"=" "in"} op)
         {:hierarchy value}
         {:unsupported (str "filter property=expression op=" op " not supported")})
+
+      ;; `expressions` (plural) signals whether an enumeration should
+      ;; include post-coordinated expression codes. Hermes validates
+      ;; post-coordinated expressions via SCG + MRCM (see
+      ;; `hermes/validate-expression`), but the description index is
+      ;; pre-coordinated only — there is no finite enumeration of
+      ;; post-coord expressions for a `<<` filter. No-op for both
+      ;; true/false.
+      (= property "expressions")
+      (if (and (= op "=") (contains? #{"true" "false"} (str value)))
+        {}
+        {:unsupported (str "filter property=expressions op=" op
+                           " value=" value " not supported")})
 
       (numeric-property-id? property)
       (if (= op "=")
@@ -292,21 +309,57 @@
                :target ext-target}))
           external-map-refsets)))
 
+;; Hermes exposes `preferred-synonym*` only as a one-concept-at-a-time public
+;; API, and internally each call opens its own pair of LMDB transactions
+;; (`:core` + `:refsets`). A single `$lookup` needs synonyms for ~15–40 related
+;; concepts, so the naive loop pays N pairs of txn-open/close just to iterate
+;; — dominant under concurrency. We reach into Hermes' (currently private)
+;; `preferred-description*` so we can run the whole batch under one shared
+;; txn pair. Move to a public Hermes helper once one exists.
+(def ^:private preferred-description-fn
+  (delay @#'hstore/preferred-description*))
+
 (defn- preferred-terms
-  "Resolve preferred synonyms for concept ids in one pass. Returns a map
-  of concept-id → preferred term (or nil for concepts whose preferred
-  synonym can't be resolved in the given locale). Returns nil when
-  `lang-refset-ids` is empty. Deduplicates via the accumulating map, so
-  repeats in `concept-ids` cost only one LMDB call."
+  "Resolve preferred synonyms for a collection of concept-ids under a single
+  pair of LMDB transactions. Returns `{concept-id preferred-term-string}`;
+  concepts with no preferred synonym in `lang-refset-ids` are recorded as
+  nil-valued so repeat ids don't re-query. Returns nil when either collection
+  is empty.
+
+  See also: hermes `preferred-synonym*` for the single-id API."
   [svc lang-refset-ids concept-ids]
-  (when (seq lang-refset-ids)
-    (persistent!
-      (reduce (fn [m cid]
-                (if (contains? m cid)
-                  m
-                  (assoc! m cid (:term (hermes/preferred-synonym* svc cid lang-refset-ids)))))
-              (transient {})
-              concept-ids))))
+  (when (and (seq lang-refset-ids) (seq concept-ids))
+    (let [^LmdbStore store (:store svc)
+          pd-fn   @preferred-description-fn
+          synonym snomed/Synonym
+          miss    ::miss]
+      (lmdb/with-txn [core-txn store :core]
+        (lmdb/with-txn [refsets-txn store :refsets]
+          (persistent!
+            (reduce (fn [m cid]
+                      (if (identical? miss (get m cid miss))
+                        (assoc! m cid
+                                (:term (loop [rids lang-refset-ids]
+                                         (when-let [rid (first rids)]
+                                           (or (pd-fn store core-txn refsets-txn
+                                                      cid synonym rid)
+                                               (recur (rest rids)))))))
+                        m))
+                    (transient {})
+                    concept-ids)))))))
+
+(defn- expansion->concepts
+  "Shape `expansion/expand` rows into the protocol's expansion-concept map.
+  The expansion engine emits only `:conceptId`, `:display` and an optional
+  `:inactive` flag — no designations."
+  [rows ver]
+  (mapv (fn [{:keys [conceptId display inactive]}]
+          (cond-> {:code    (str conceptId)
+                   :system  snomed-system-uri
+                   :version ver
+                   :display display}
+            inactive (assoc :inactive true)))
+        rows))
 
 (defn- translate-historical
   "SNOMED→SNOMED historical-association forward translation."
@@ -409,12 +462,14 @@
                                      :code-display (get displays typeId)
                                      :value        value})
                                   concrete))
-             :designations (map (fn [d] {:language (keyword (:languageCode d))
-                                         :use      {:system  snomed-system-uri
-                                                    :code    (str (:typeId d))
-                                                    :display (get displays (:typeId d))}
-                                         :value    (:term d)})
-                                (:descriptions ec))})))))
+             :designations (into []
+                                   (comp (filter :active)
+                                         (map (fn [d] {:language (keyword (:languageCode d))
+                                                       :use      {:system  snomed-system-uri
+                                                                  :code    (str (:typeId d))
+                                                                  :display (get displays (:typeId d))}
+                                                       :value    (:term d)})))
+                                   (:descriptions ec))})))))
 
   (cs-validate-code [_ {:keys [code display version displayLanguage]}]
     (let [ver (or version (version-uri svc))]
@@ -530,18 +585,14 @@
           {:keys [ecl issues]} (compose-filters->ecl filters)]
       (if (seq issues)
         {:concepts [] :issues issues}
-        (let [search-params (cond-> {:constraint ecl}
-                              max-hits                       (assoc :max-hits max-hits)
-                              (not (str/blank? text))        (assoc :s text)
-                              (not active-only)              (assoc :inactive-concepts? true)
-                              (not (str/blank? displayLanguage)) (assoc :accept-language displayLanguage))
-              concepts (map (fn [{:keys [conceptId preferredTerm]}]
-                              {:code    (str conceptId)
-                               :system  snomed-system-uri
-                               :version ver
-                               :display preferredTerm})
-                            (hermes/search svc search-params))]
-          {:concepts concepts}))))
+        (let [{:keys [concepts]}
+              (expansion/expand {:svc            svc
+                                 :ecl            ecl
+                                 :filter         (when-not (str/blank? text) text)
+                                 :active-only?   (boolean active-only)
+                                 :limit          max-hits
+                                 :language-range (when-not (str/blank? displayLanguage) displayLanguage)})]
+          {:concepts (expansion->concepts concepts ver)}))))
   protos/ValueSet
   (vs-resource [_ _params])
   (vs-expand [_ _ctx {:keys [url filter activeOnly] cnt :count ofs :offset}]
@@ -550,26 +601,18 @@
         {:concepts [] :total 0
          :issues   [{:severity     "error" :type "not-supported"
                      :details-code "not-implemented" :text message}]}
-        (let [ver      (version-uri svc)
-              ofs'     (or ofs 0)
-              max-hits (when cnt (+ cnt ofs'))
-              search-params (cond-> {:constraint         ecl
-                                     :inactive-concepts? (if (false? activeOnly) true false)}
-                              filter   (assoc :s filter)
-                              max-hits (assoc :max-hits max-hits))
-              results  (cond->> (hermes/search svc search-params)
-                         (pos? ofs') (drop ofs'))
-              concepts (mapv (fn [{:keys [conceptId term preferredTerm]}]
-                               {:code         (str conceptId)
-                                :system       snomed-system-uri
-                                :version      ver
-                                :display      preferredTerm
-                                :designations [{:value term}]})
-                             results)]
-          (cond-> {:concepts         concepts
-                   :used-codesystems [{:uri (str snomed-system-uri "|" ver) :status "active"}]
-                   :compose-pins     []}
-            (nil? cnt) (assoc :total (count concepts)))))))
+        (let [ver (version-uri svc)
+              {:keys [concepts total]}
+              (expansion/expand {:svc          svc
+                                 :ecl          ecl
+                                 :filter       filter
+                                 :active-only? (true? activeOnly)
+                                 :offset       (or ofs 0)
+                                 :limit        cnt})]
+          {:concepts         (expansion->concepts concepts ver)
+           :total            total
+           :used-codesystems [{:uri (str snomed-system-uri "|" ver) :status "active"}]
+           :compose-pins     []}))))
   (vs-validate-code [_ _ctx {:keys [url code system display displayLanguage]}]
     (when (= system snomed-system-uri)
       (let [code' (parse-long code)

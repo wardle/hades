@@ -1,3 +1,4 @@
-{:linters
+{:hooks {:analyze-call {com.eldrix.hermes.impl.lmdb/with-txn hooks.hermes-with-txn/with-txn}}
+ :linters
  {:unresolved-var
   {:exclude [io.pedestal.http.jetty/create-connector]}}}
