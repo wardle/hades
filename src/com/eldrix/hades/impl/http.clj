@@ -854,11 +854,6 @@
 ;; Routes
 ;; ---------------------------------------------------------------------------
 
-(def ^:private common-in  [content-negotiation catch-all-error tx-ctx])
-
-(defn- wrap-handler [op-interceptors]
-  (into [] (concat common-in op-interceptors)))
-
 (defn- with-max-expansion
   "Inject the server-level max-expansion-size into the Pedestal request.
   This lets `vs-expand-leave` see the limit without global state."
@@ -869,25 +864,25 @@
 
 (defn routes [{:keys [max-expansion-size]}]
   (let [max-inj (with-max-expansion max-expansion-size)]
-    #{["/fhir/metadata"                   :get  (wrap-handler [metadata-handler])                                         :route-name ::metadata]
+    #{["/fhir/metadata"                   :get  [metadata-handler]                                         :route-name ::metadata]
 
-      ["/fhir/CodeSystem/$lookup"         :get  (wrap-handler [cs-lookup-response cs-lookup-handler])                     :route-name ::cs-lookup-get]
-      ["/fhir/CodeSystem/$lookup"         :post (wrap-handler [cs-lookup-response cs-lookup-handler])                     :route-name ::cs-lookup-post]
+      ["/fhir/CodeSystem/$lookup"         :get  [cs-lookup-response cs-lookup-handler]                     :route-name ::cs-lookup-get]
+      ["/fhir/CodeSystem/$lookup"         :post [cs-lookup-response cs-lookup-handler]                     :route-name ::cs-lookup-post]
 
-      ["/fhir/CodeSystem/$validate-code"  :get  (wrap-handler [cs-validate-response cs-validate-handler])                 :route-name ::cs-validate-get]
-      ["/fhir/CodeSystem/$validate-code"  :post (wrap-handler [cs-validate-response cs-validate-handler])                 :route-name ::cs-validate-post]
+      ["/fhir/CodeSystem/$validate-code"  :get  [cs-validate-response cs-validate-handler]                 :route-name ::cs-validate-get]
+      ["/fhir/CodeSystem/$validate-code"  :post [cs-validate-response cs-validate-handler]                 :route-name ::cs-validate-post]
 
-      ["/fhir/CodeSystem/$subsumes"       :get  (wrap-handler [cs-subsumes-response cs-subsumes-handler])                 :route-name ::cs-subsumes-get]
-      ["/fhir/CodeSystem/$subsumes"       :post (wrap-handler [cs-subsumes-response cs-subsumes-handler])                 :route-name ::cs-subsumes-post]
+      ["/fhir/CodeSystem/$subsumes"       :get  [cs-subsumes-response cs-subsumes-handler]                 :route-name ::cs-subsumes-get]
+      ["/fhir/CodeSystem/$subsumes"       :post [cs-subsumes-response cs-subsumes-handler]                 :route-name ::cs-subsumes-post]
 
-      ["/fhir/ValueSet/$validate-code"    :get  (wrap-handler [vs-validate-response vs-validate-handler])                 :route-name ::vs-validate-get]
-      ["/fhir/ValueSet/$validate-code"    :post (wrap-handler [vs-validate-response vs-validate-handler])                 :route-name ::vs-validate-post]
+      ["/fhir/ValueSet/$validate-code"    :get  [vs-validate-response vs-validate-handler]                 :route-name ::vs-validate-get]
+      ["/fhir/ValueSet/$validate-code"    :post [vs-validate-response vs-validate-handler]                 :route-name ::vs-validate-post]
 
-      ["/fhir/ValueSet/$expand"           :get  (wrap-handler [max-inj vs-expand-response vs-expand-handler])             :route-name ::vs-expand-get]
-      ["/fhir/ValueSet/$expand"           :post (wrap-handler [max-inj vs-expand-response vs-expand-handler])             :route-name ::vs-expand-post]
+      ["/fhir/ValueSet/$expand"           :get  [max-inj vs-expand-response vs-expand-handler]             :route-name ::vs-expand-get]
+      ["/fhir/ValueSet/$expand"           :post [max-inj vs-expand-response vs-expand-handler]             :route-name ::vs-expand-post]
 
-      ["/fhir/ConceptMap/$translate"      :get  (wrap-handler [cm-translate-response cm-translate-handler])                                     :route-name ::cm-translate-get]
-      ["/fhir/ConceptMap/$translate"      :post (wrap-handler [cm-translate-response cm-translate-handler])                                     :route-name ::cm-translate-post]}))
+      ["/fhir/ConceptMap/$translate"      :get  [cm-translate-response cm-translate-handler]               :route-name ::cm-translate-get]
+      ["/fhir/ConceptMap/$translate"      :post [cm-translate-response cm-translate-handler]               :route-name ::cm-translate-post]}))
 
 ;; ---------------------------------------------------------------------------
 ;; Server
@@ -921,7 +916,7 @@
   [opts]
   (let [opts (merge {:port 8080 :host "0.0.0.0" :max-expansion-size 10000} opts)]
     (-> (conn/default-connector-map (:host opts) (:port opts))
-        (conn/with-interceptors [fhir-not-found])
+        (conn/with-interceptors [content-negotiation catch-all-error tx-ctx fhir-not-found])
         (conn/with-routes (routes opts))
         (jetty/create-connector {:join? false}))))
 

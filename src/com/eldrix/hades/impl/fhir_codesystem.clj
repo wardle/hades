@@ -454,12 +454,12 @@
                                               (display/find-display-for-language (:designations c) display-langs))
                                             (:display c))
                                 selected-props (when want-props
-                                                 (vec (keep (fn [prop]
-                                                              (let [pc (get prop "code")
-                                                                    v (typed-property-value prop)]
-                                                                (when (and pc (some? v) (contains? want-props pc))
-                                                                  {:code (keyword pc) :value v})))
-                                                            (:properties c))))]
+                                                 (keep (fn [prop]
+                                                         (let [pc (get prop "code")
+                                                               v (typed-property-value prop)]
+                                                           (when (and pc (some? v) (contains? want-props pc))
+                                                             {:code (keyword pc) :value v})))
+                                                       (:properties c)))]
                             (cond-> {:code    (:code c)
                                      :system  url
                                      :version version
@@ -611,9 +611,9 @@
                            (assoc idx (:code sc)
                              (cond-> existing
                                (seq (:designations sc))
-                               (update :designations (fn [d] (into (or d []) (:designations sc))))
+                               (update :designations (fnil into []) (:designations sc))
                                (seq (:properties sc))
-                               (update :properties (fn [p] (into (or p []) (:properties sc))))))
+                               (update :properties (fnil into []) (:properties sc))))
                            idx))
                        base-idx supp-concepts)]
     (->FhirCodeSystem (.-url base) (.-version base) (.-metadata base)

@@ -160,7 +160,7 @@
         pa (parse a)
         pb (parse b)
         max-len (max (count pa) (count pb))
-        pad (fn [v] (into (vec v) (repeat (- max-len (count v)) 0)))]
+        pad (fn [v] (into v (repeat (- max-len (count v)) 0)))]
     (compare (pad pa) (pad pb))))
 
 (defn find-matching-version
@@ -575,17 +575,18 @@
         first-not-found (first (filter :not-found per-coding))]
     (if first-not-found
       first-not-found
-      (let [valid (last (filter :result per-coding))
-            invalid (remove :result per-coding)
-            all-issues (vec (mapcat :issues invalid))
-            cs-error-msgs (distinct (keep (fn [i] (when (= "invalid-code" (:details-code i)) (:text i)))
-                                         all-issues))
-            error-msg (first cs-error-msgs)]
+      (let [valid         (last (filter :result per-coding))
+            invalid       (remove :result per-coding)
+            all-issues    (into [] (mapcat :issues) invalid)
+            cs-error-msgs (into [] (comp (keep #(when (= "invalid-code" (:details-code %)) (:text %)))
+                                         (distinct))
+                                all-issues)
+            error-msg     (first cs-error-msgs)]
         (if valid
           (cond-> valid
-            (seq invalid) (assoc :result false)
+            (seq invalid)    (assoc :result false)
             (seq all-issues) (update :issues (fnil into []) all-issues)
-            error-msg (assoc :message error-msg))
+            error-msg        (assoc :message error-msg))
           ;; No valid coding — check for version-issue results
           (let [version-issue-codes #{"vs-invalid" "version-error" "version-mismatch"}
                 best-invalid (last (filter (fn [r]

@@ -189,11 +189,12 @@
                  (expand-valueset-refs ctx vs-urls expanding))
         vs-concepts (:concepts vs-ref)
         vs-issues (:issues vs-ref)]
-    {:issues (cond-> (vec vs-issues)
+    {:issues (cond-> []
+               (seq vs-issues)       (into vs-issues)
                unknown-version-issue (conj unknown-version-issue)
-               unknown-system-issue (conj unknown-system-issue)
-               bad-filter-issue (conj bad-filter-issue)
-               (seq match-issues) (into match-issues))
+               unknown-system-issue  (conj unknown-system-issue)
+               bad-filter-issue      (conj bad-filter-issue)
+               (seq match-issues)    (into match-issues))
      :total (:total match-result)
      :concepts (if (and (some? system-results) (seq vs-concepts))
                  (let [vs-set (set (map concept-key vs-concepts))]
@@ -270,9 +271,9 @@
                  params)
         ;; Request-level filter is a free-text search; rename to :text
         ;; for the provider query so it's not confused with include.filter.
-        params (cond-> params
-                 (:filter params) (-> (assoc :text (:filter params))
-                                      (dissoc :filter)))
+        params (if-let [text (:filter params)]
+                 (-> params (dissoc :filter) (assoc :text text))
+                 params)
         includes (get compose "include")
         excludes (get compose "exclude")
         inactive-allowed (get compose "inactive" true)
@@ -285,7 +286,7 @@
                          (:count params)
                          (assoc :max-hits (+ (:count params) (or (:offset params) 0))))
         include-results (mapv #(expand-include ctx % include-params) includes)
-        include-issues (vec (mapcat :issues include-results))
+        include-issues (mapcat :issues include-results)
         included (into {} (map (fn [c] [(concept-key c) c]))
                         (mapcat :concepts include-results))
         excluded (when (seq excludes)
@@ -294,7 +295,7 @@
         after-exclude (if excluded
                         (remove (fn [[k _]] (contains? excluded k)) included)
                         included)
-        merged-concepts (vec (map second after-exclude))
+        merged-concepts (map second after-exclude)
         used-cs (collect-used-codesystems ctx compose merged-concepts)
         sys->versions (reduce (fn [acc c]
                                 (if-let [sys (:system c)]
@@ -307,23 +308,21 @@
         offset' (or (:offset params) 0)
         paged (cond->> merged-concepts
                 (pos? offset')  (drop offset')
-                (:count params) (take (:count params)))]
+                (:count params) (take (:count params)))
+        ;; :total — prefer a value the provider already computed (cheap for
+        ;; in-memory CSes; Hermes will follow once ecl-count lands). For a
+        ;; single-include expansion that's the authoritative total; for
+        ;; multi-include the dedup across sources makes the sum unreliable,
+        ;; so we only emit total when the caller didn't bound the expansion.
+        singleton-total (when (and (= 1 (count include-results)) (empty? excludes))
+                          (:total (first include-results)))
+        total (cond
+                singleton-total        singleton-total
+                (nil? (:count params)) (count merged-concepts))]
     (cond-> {:concepts              (vec paged)
              :used-codesystems      used-cs
              :compose-pins          (extract-compose-pins compose)
              :multi-version-systems multi-version}
-      ;; :total — prefer a value the provider already computed (cheap for
-      ;; in-memory CSes; Hermes will follow once ecl-count lands). For a
-      ;; single-include expansion that's the authoritative total; for
-      ;; multi-include the dedup across sources makes the sum unreliable,
-      ;; so we only emit total when the caller didn't bound the expansion.
-      true (as-> r
-             (let [singleton-total (when (and (= 1 (count include-results))
-                                              (empty? excludes))
-                                     (:total (first include-results)))]
-               (cond-> r
-                 singleton-total              (assoc :total singleton-total)
-                 (and (nil? singleton-total)
-                      (nil? (:count params))) (assoc :total (count merged-concepts)))))
+      total                     (assoc :total total)
       (:displayLanguage params) (assoc :display-language (:displayLanguage params))
       (seq include-issues)      (assoc :issues include-issues))))
