@@ -24,7 +24,8 @@
 (defn- write-version-edn! []
   (let [path (str class-dir "/com/eldrix/hades/version.edn")]
     (io/make-parents path)
-    (spit path (pr-str {:version version}))))
+    (spit path (pr-str {:version    version
+                        :build-date (str (java.time.Instant/now))}))))
 
 (defn jar [_]
   (clean nil)
