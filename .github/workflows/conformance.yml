@@ -1,0 +1,61 @@
+name: Conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+          key: deps-${{ hashFiles('deps.edn') }}
+          restore-keys: deps-
+
+      - name: Read tx-ecosystem SHA from baseline
+        id: txrev
+        run: |
+          SHA=$(jq -r '."tx-ecosystem-rev" // empty' test/resources/conformance-baseline.json)
+          echo "sha=${SHA:-unpinned}" >> "$GITHUB_OUTPUT"
+
+      # Cache the tx-ecosystem clone and the built Hermes db together. Keyed
+      # on the baseline's tx-ecosystem SHA: bumping the baseline (which is how
+      # we intentionally move to a new upstream) invalidates the cache and
+      # forces a fresh clone + rebuild on the first run.
+      - uses: actions/cache@v4
+        with:
+          path: .hades
+          key: conformance-${{ steps.txrev.outputs.sha }}
+
+      - name: Run conformance suite
+        run: clj -X:conformance
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-results
+          path: test/resources/conformance/latest.json
+          retention-days: 30

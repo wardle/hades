@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: DeLaGuardo/setup-clojure@13.0
+        with:
+          cli: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+          key: deps-${{ hashFiles('deps.edn') }}
+          restore-keys: deps-
+
+      # Cache the built SNOMED database. Key is bumped via
+      # ci/snomed-version.txt when we want CI to pick up a new TRUD release;
+      # otherwise every PR restores the same db and skips the ~20 min install.
+      - name: Read SNOMED cache version
+        id: snomed-ver
+        run: echo "ver=$(cat ci/snomed-version.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache SNOMED database
+        id: snomed-cache
+        uses: actions/cache@v4
+        with:
+          path: snomed.db
+          key: snomed-uk-${{ steps.snomed-ver.outputs.ver }}
+
+      - name: Write TRUD API key
+        if: steps.snomed-cache.outputs.cache-hit != 'true'
+        run: |
+          if [ -z "${{ secrets.TRUD_API_KEY }}" ]; then
+            echo "::error::TRUD_API_KEY secret is not set. Add it in repo Settings → Secrets → Actions."
+            exit 1
+          fi
+          printf '%s' "${{ secrets.TRUD_API_KEY }}" > api-key.txt
+
+      - name: Install UK SNOMED distribution
+        if: steps.snomed-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p trud-cache
+          clj -M:run install --db snomed.db --dist uk.nhs/sct-clinical --api-key api-key.txt --cache-dir trud-cache
+          rm -rf trud-cache api-key.txt
+
+      - name: Index database
+        if: steps.snomed-cache.outputs.cache-hit != 'true'
+        run: clj -M:run index --db snomed.db
+
+      - name: Compact database
+        if: steps.snomed-cache.outputs.cache-hit != 'true'
+        run: clj -M:run compact --db snomed.db
+
+      - name: Compile check
+        run: clj -M:check
+
+      - name: Lint
+        run: clj -M:lint/kondo
+
+      - name: Tests
+        env:
+          SNOMED_DB: ${{ github.workspace }}/snomed.db
+        run: clj -M:test
