@@ -205,12 +205,12 @@
       (if-let [vs-invalid-issue (first (filter #(= "vs-invalid" (:details-code %)) compose-issues))]
         ;; The VS itself is broken (e.g. malformed filter) — surface as a
         ;; not-found / 4xx result rather than continuing to look for a code.
-        {:result    false
-         :not-found true
-         :code      (when code (keyword code))
-         :system    system
-         :message   (:text vs-invalid-issue)
-         :issues    (vec compose-issues)}
+        (cond-> {:result    false
+                 :not-found true
+                 :code      (when code (keyword code))
+                 :message   (:text vs-invalid-issue)
+                 :issues    (vec compose-issues)}
+          system (assoc :system system))
         (if-let [not-found-issue (first (filter #(= "not-found" (:details-code %)) compose-issues))]
         (let [include-ver (compose-version-for-system compose-def system)
               include-ver-unknown? (and system include-ver
@@ -237,9 +237,9 @@
                         vs-invalid-issue (str "; " (:text vs-invalid-issue)))]
           (cond-> {:result  false
                    :code    (when code (keyword code))
-                   :system  system
                    :message message
                    :issues  issues}
+            system (assoc :system system)
             include-ver-unknown?
             (assoc :x-caused-by-unknown-system (registry/versioned-uri system include-ver))
             (and cs-result (:result cs-result) (:display cs-result))
@@ -400,9 +400,9 @@
                   cs-unknown-sys (:x-unknown-system cs-result)]
               (-> (cond-> {:result  false
                            :code    (keyword code)
-                           :system  system
                            :message combined-msg
                            :issues  all-issues}
+                    system (assoc :system system)
                     cs-unknown-sys (assoc :x-unknown-system cs-unknown-sys)
                     cs-display (assoc :display cs-display)
                     cs-version (assoc :version cs-version))
