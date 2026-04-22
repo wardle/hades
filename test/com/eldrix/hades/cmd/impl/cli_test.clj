@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.cli-test
+(ns com.eldrix.hades.cmd.impl.cli-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [com.eldrix.hades.cmd.impl.cli :as cli]))

@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.snomed-test
+(ns com.eldrix.hades.impl.snomed-test
   (:require [clojure.set :as set]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]

@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.server-test
+(ns com.eldrix.hades.impl.server-test
   "Integration tests for the Hades FHIR server endpoints.
   Starts a real HTTP server with Hermes and makes actual HTTP requests.
   Tests are skipped when SNOMED index is not available."

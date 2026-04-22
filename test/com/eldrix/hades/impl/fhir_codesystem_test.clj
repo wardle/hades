@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.fhir-codesystem-test
+(ns com.eldrix.hades.impl.fhir-codesystem-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [com.eldrix.hades.impl.fhir-codesystem :as fhir-cs]

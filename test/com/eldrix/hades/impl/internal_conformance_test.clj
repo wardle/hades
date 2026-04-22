@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.internal-conformance-test
+(ns com.eldrix.hades.impl.internal-conformance-test
   "Internal conformance tests — exercise the specific FHIR spec requirements
   that the HL7 conformance suite checks, at the component level (no HTTP).
 

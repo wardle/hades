@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.protocol-test
+(ns com.eldrix.hades.impl.protocol-test
   "Internal conformance harness for protocol implementations.
 
   Exercises protocol impls against the spec'd return contracts in

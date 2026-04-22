@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.fhir-valueset-test
+(ns com.eldrix.hades.impl.fhir-valueset-test
   (:require [clojure.spec.test.alpha :as stest]
             [clojure.string]
             [clojure.test :refer [deftest is testing use-fixtures]]

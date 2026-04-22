@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.compose-test
+(ns com.eldrix.hades.impl.compose-test
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.impl.compose :as compose]
             [com.eldrix.hades.impl.fhir-codesystem :as fhir-cs]

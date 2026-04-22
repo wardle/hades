@@ -1,4 +1,4 @@
-(ns com.eldrix.hades.operations-bench
+(ns com.eldrix.hades.impl.operations-bench
   "Criterium micro-benchmarks for Hades' FHIR terminology operations.
 
   Measurements are at the *registry* layer — HTTP parsing and wire
