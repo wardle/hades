@@ -421,6 +421,88 @@
 ;; Printing — human-readable output
 ;; ---------------------------------------------------------------------------
 
+(defn- tests-with-errors
+  "Tests whose any action result is 'error' — TxTester could not complete the
+  comparison (usually a network/timeout/server-crash condition)."
+  [results]
+  (filter (fn [t] (some #(= "error" (:result %)) (:actions t)))
+          (:tests results)))
+
+(defn- tests-with-5xx
+  "Tests where the actual HTTP status is in the 5xx range — unhandled
+  exception escaped catch-all-error on the server side. `:actual` on a
+  'Response Code fail' action is a string like \"500\" or a pattern like
+  \"4xx\"; only literal 5xx counts."
+  [results]
+  (filter (fn [t]
+            (some (fn [a]
+                    (and (= "HTTP status" (:path a))
+                         (let [actual (:actual a)]
+                           (and (string? actual)
+                                (pos? (count actual))
+                                (= \5 (first actual))
+                                (every? #(Character/isDigit ^char %) actual)))))
+                  (:actions t)))
+          (:tests results)))
+
+(defn print-summary
+  "Top-of-output summary. Totals, baseline delta, tx-ecosystem SHA mismatch,
+  server-side exceptions (action result = error), and 5xx responses are
+  surfaced prominently so a broken run can't hide below 200 lines of per-test
+  failure output."
+  [results baseline]
+  (let [passed        (:passed results)
+        total         (:total results)
+        skipped       (or (:skipped results) 0)
+        denom         (max (- total skipped) 1)
+        pct           (* 100.0 (/ passed (double denom)))
+        base-passed   (:passed baseline)
+        delta         (when base-passed (- passed base-passed))
+        base-rev      (:tx-ecosystem-rev baseline)
+        cur-rev       (:tx-ecosystem-rev results)
+        fmt-rev       (fn [r] (if r (subs (str r) 0 (min 8 (count (str r)))) "unknown"))
+        drift?        (and base-rev cur-rev (not= base-rev cur-rev))
+        errors        (tests-with-errors results)
+        server-errors (tests-with-5xx results)
+        bar           (apply str (repeat 64 \━))
+        show-list     (fn [label ts]
+                        (when (seq ts)
+                          (println (format " %s:" label))
+                          (doseq [t (take 10 ts)]
+                            (println (format "   - %s" (:name t))))
+                          (when (> (count ts) 10)
+                            (println (format "   ... and %d more" (- (count ts) 10))))))]
+    (println)
+    (println bar)
+    (println " CONFORMANCE SUMMARY")
+    (println bar)
+    (println (format " Passed:            %d / %d (%.1f%%)" passed denom pct))
+    (when base-passed
+      (println (format " vs baseline:       %+d  %s"
+                       delta
+                       (cond
+                         (neg? delta) "← REGRESSION"
+                         (pos? delta) "← gained"
+                         :else        "(no change)"))))
+    (println (format " tx-ecosystem:      %s%s"
+                     (fmt-rev cur-rev)
+                     (if drift?
+                       (format "  ← differs from baseline %s (upstream drift possible)"
+                               (fmt-rev base-rev))
+                       "")))
+    (println)
+    (if (seq errors)
+      (do (println (format " ★ Server exceptions: %d  (TxTester could not complete the test)"
+                           (count errors)))
+          (show-list "   tests" errors))
+      (println " Server exceptions: 0"))
+    (if (seq server-errors)
+      (do (println (format " ★ 5xx responses:     %d  (unhandled exception escaped the server)"
+                           (count server-errors)))
+          (show-list "   tests" server-errors))
+      (println " 5xx responses:     0"))
+    (println bar)))
+
 (defn print-suites
   "Print a per-suite summary table."
   [results]
@@ -631,29 +713,24 @@
     (when owns-server?
       (start! :snomed snomed))
     (try
-      (let [results (run-tests :url url)
-            prev (load-latest)
-            baseline (load-baseline)]
+      (let [results  (run-tests :url url)
+            prev     (load-latest)
+            baseline (load-baseline)
+            errors   (count (tests-with-errors results))
+            ;; 5xx responses where the test did NOT expect a 5xx — the server
+            ;; returned a programmer-error response instead of a domain answer.
+            server-errors (count (tests-with-5xx results))
+            regression? (and baseline (< (:passed results) (:passed baseline)))]
+        (print-summary results baseline)
         (print-suites results)
         (println)
         (print-failures results)
         (when prev (print-diff prev results))
         (save-results! results)
-        (when baseline
-          (let [base-rev (:tx-ecosystem-rev baseline)
-                cur-rev  (:tx-ecosystem-rev results)
-                fmt-rev  (fn [r] (if r (subs (str r) 0 (min 8 (count (str r)))) "unknown"))]
-            (println (format "\nBaseline: %d passed (tx-ecosystem %s)"
-                             (:passed baseline) (fmt-rev base-rev)))
-            (println (format "Current:  %d passed (tx-ecosystem %s)"
-                             (:passed results) (fmt-rev cur-rev)))
-            (when (and base-rev cur-rev (not= base-rev cur-rev))
-              (println "  NOTE: tx-ecosystem differs from baseline — upstream changes may explain any delta"))
-            (when (< (:passed results) (:passed baseline))
-              (println "REGRESSION: pass count decreased!")
-              (System/exit 1))))
         (when update-baseline
-          (save-baseline! results)))
+          (save-baseline! results))
+        (when (or regression? (pos? errors) (pos? server-errors))
+          (System/exit 1)))
       (finally
         (when owns-server? (stop!))))))
 
