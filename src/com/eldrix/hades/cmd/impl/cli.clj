@@ -4,10 +4,6 @@
             [clojure.string :as str]
             [clojure.tools.cli :as cli]))
 
-;; Distribution-specific option sets: when the user names a SNOMED distribution
-;; like `uk.nhs/sct-clinical`, pull in the flags that distribution's download
-;; provider needs (TRUD API key, MLDS credentials, …).
-
 (def uk-trud-opts
   [[nil "--api-key API-KEY-PATH" "Path to a file containing TRUD API key"
     :missing "Missing TRUD API key"]

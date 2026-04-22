@@ -1,10 +1,5 @@
 (ns com.eldrix.hades.cmd.core
-  "Command-line entry point for the Hades FHIR terminology server.
-
-  Dispatches subcommands for SNOMED data acquisition (import/list/install/
-  available), maintenance (index/compact/status), and running the server
-  (serve). The terminology functionality is provided by Hermes; Hades wraps
-  it in a FHIR-facing HTTP surface."
+  "Command-line entry point for the Hades FHIR terminology server."
   (:gen-class)
   (:require [clojure.data.json :as json]
             [clojure.pprint :as pp]
