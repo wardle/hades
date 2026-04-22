@@ -34,12 +34,13 @@ jobs:
           key: deps-${{ hashFiles('deps.edn') }}
           restore-keys: deps-
 
-      # Cache the built SNOMED database. Key is bumped via
-      # ci/snomed-version.txt when we want CI to pick up a new TRUD release;
-      # otherwise every PR restores the same db and skips the ~20 min install.
-      - name: Read SNOMED cache version
+      # Cache the built SNOMED database. Key is the current year+month in
+      # UTC so a fresh TRUD release is picked up automatically once a month;
+      # within a month every PR restores the same db and skips the ~20 min
+      # download + install + index.
+      - name: Compute SNOMED cache key
         id: snomed-ver
-        run: echo "ver=$(cat ci/snomed-version.txt)" >> "$GITHUB_OUTPUT"
+        run: echo "ver=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
 
       - name: Cache SNOMED database
         id: snomed-cache
