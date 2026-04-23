@@ -2,30 +2,32 @@
 
 This log documents significant changes for each release.
 
-## [Unreleased]
+## [v1.4.135] - 2026-04-23
 
 Headline: Hades passes 477 / 603 (79.1%) of the HL7 FHIR Terminology
 Ecosystem IG conformance tests, up from 473 / 603.
 
-* Conformance, `^:live` integration tests and benchmarks now run
-  against one pinned SNOMED CT International release (20250201),
-  provisioned via `clj -X:build-db` (local zip or MLDS download).
-  Drops hard-coded personal paths and the `$SNOMED_DB` env var.
-* tx-ecosystem conformance fixtures pinned to a specific upstream
-  commit; every run reports whether upstream main is ahead.
-* `regex` CodeSystem filter uses RE2/j — linear-time, immune to
-  catastrophic backtracking (ReDoS).
-* SNOMED `$lookup` now supports post-coordinated expressions.
-* `ValueSet/$validate-code` with a missing `url` returns a 4xx
-  `OperationOutcome` with `code=invalid`, not a 5xx NPE.
-* SNOMED implicit-VS `not-found` and `inactive-display` issues emit
-  the IG's expected `operationoutcome-message-id` extension.
-* Handled `ex-info` throws log terse INFO instead of ERROR + stack;
-  only genuinely unexpected exceptions keep the stack trace.
-* CI: single workflow with a shared `build-db` job feeding parallel
-  `test` + `conformance`. Actions bumped to Node 24-capable releases.
-* Source reorganised into `impl/` for internals and `cmd/` for the
-  CLI; test namespaces mirror the new layout.
+* Dependency refresh: Clojure 1.12.4, logback 1.5.32, nREPL 1.7.0,
+  HAPI validation 6.9.7 and other minor bumps. okhttp held at 4.12.0
+  pending HAPI support for the 5.x Kotlin multiplatform split.
+* **Reproducible conformance suite.** Conformance, `^:live` integration
+  tests and benchmarks run against one pinned SNOMED CT International
+  release (20250201) and a pinned tx-ecosystem fixture commit,
+  provisioned explicitly via `clj -X:build-db`. Every run reports if
+  upstream has moved ahead. Removes hard-coded personal paths and the
+  `$SNOMED_DB` env var.
+* **`$lookup` ~2× faster.** Post-coordinated expressions parsed and
+  enriched per refinement; dropped unused `extended-concept` work and
+  short-circuited the unknown-code path.
+* **Robustness.** `regex` CodeSystem filter uses RE2/j (linear-time,
+  ReDoS-safe); `ValueSet/$validate-code` with a missing `url` returns
+  4xx instead of 5xx; SNOMED implicit-VS errors emit the IG's
+  `operationoutcome-message-id` extension; expected `ex-info` throws
+  log as terse INFO so real surprises stand out in the stack traces.
+* **CI.** Single workflow with a shared `build-db` job feeding parallel
+  `test` and `conformance`. Actions bumped to Node-24-capable releases.
+* **Layout.** Internals moved to `impl/`, CLI to `cmd/`; test
+  namespaces mirror the new structure.
 
 ## [v1.4.112] - 2026-04-22
 
