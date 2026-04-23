@@ -34,44 +34,32 @@ jobs:
           key: deps-${{ hashFiles('deps.edn') }}
           restore-keys: deps-
 
-      # Cache the built SNOMED database. Key is the current year+month in
-      # UTC so a fresh TRUD release is picked up automatically once a month;
-      # within a month every PR restores the same db and skips the ~20 min
-      # download + install + index.
-      - name: Compute SNOMED cache key
-        id: snomed-ver
-        run: echo "ver=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache SNOMED database
-        id: snomed-cache
-        uses: actions/cache@v4
+      # Shared cache key with the Conformance workflow — CI and conformance
+      # open the same pinned SNOMED DB. Bump `snomed-db/pinned-version` in
+      # the Clojure code AND this key when we roll forward a release.
+      - uses: actions/cache@v4
+        id: snomed-db-cache
         with:
-          path: snomed.db
-          key: snomed-uk-${{ steps.snomed-ver.outputs.ver }}
+          path: .hades/snomed-intl-20250201.db
+          key: snomed-intl-20250201-v1
 
-      - name: Write TRUD API key
-        if: steps.snomed-cache.outputs.cache-hit != 'true'
+      - name: Build pinned SNOMED DB
+        if: steps.snomed-db-cache.outputs.cache-hit != 'true'
+        env:
+          MLDS_USERNAME: ${{ secrets.MLDS_USERNAME }}
+          MLDS_PASSWORD: ${{ secrets.MLDS_PASSWORD }}
         run: |
-          if [ -z "${{ secrets.TRUD_API_KEY }}" ]; then
-            echo "::error::TRUD_API_KEY secret is not set. Add it in repo Settings → Secrets → Actions."
+          if [ -z "$MLDS_USERNAME" ] || [ -z "$MLDS_PASSWORD" ]; then
+            echo "::error::MLDS_USERNAME / MLDS_PASSWORD secrets are not set. Add them in repo Settings → Secrets → Actions."
             exit 1
           fi
-          printf '%s' "${{ secrets.TRUD_API_KEY }}" > api-key.txt
-
-      - name: Install UK SNOMED distribution
-        if: steps.snomed-cache.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p trud-cache
-          clojure -M:run install --db snomed.db --dist uk.nhs/sct-clinical --api-key api-key.txt --cache-dir trud-cache
-          rm -rf trud-cache api-key.txt
-
-      - name: Index database
-        if: steps.snomed-cache.outputs.cache-hit != 'true'
-        run: clojure -M:run index --db snomed.db
-
-      - name: Compact database
-        if: steps.snomed-cache.outputs.cache-hit != 'true'
-        run: clojure -M:run compact --db snomed.db
+          mkdir -p .hades
+          umask 077
+          printf '%s' "$MLDS_PASSWORD" > .hades/mlds-password.txt
+          clojure -X:build-db \
+            :username "\"$MLDS_USERNAME\"" \
+            :password '".hades/mlds-password.txt"'
+          rm -f .hades/mlds-password.txt
 
       - name: Compile check
         run: clojure -M:check
@@ -80,6 +68,4 @@ jobs:
         run: clojure -M:lint/kondo
 
       - name: Tests
-        env:
-          SNOMED_DB: ${{ github.workspace }}/snomed.db
         run: clojure -M:test

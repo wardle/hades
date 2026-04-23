@@ -50,6 +50,10 @@ jobs:
           MLDS_USERNAME: ${{ secrets.MLDS_USERNAME }}
           MLDS_PASSWORD: ${{ secrets.MLDS_PASSWORD }}
         run: |
+          if [ -z "$MLDS_USERNAME" ] || [ -z "$MLDS_PASSWORD" ]; then
+            echo "::error::MLDS_USERNAME / MLDS_PASSWORD secrets are not set. Add them in repo Settings → Secrets → Actions."
+            exit 1
+          fi
           mkdir -p .hades
           umask 077
           printf '%s' "$MLDS_PASSWORD" > .hades/mlds-password.txt

@@ -23,6 +23,7 @@
 
   See CLAUDE.md for credential setup."
   (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.tools.logging :as log]
             [com.eldrix.hermes.core :as hermes]
             [com.eldrix.hermes.download :as hermes-download])
@@ -87,9 +88,9 @@
   `username` / `password` come from `:build-db` params; `password` is the
   path to a file containing the password (mirrors hades' `install` CLI)."
   [username password]
-  (when-not (and username password)
+  (when (or (str/blank? username) (str/blank? password))
     (throw (ex-info
-             (str "Cannot build pinned DB: no local zip and MLDS credentials missing.\n"
+             (str "Cannot build pinned DB: no local zip and MLDS credentials missing or blank.\n"
                   "Either place a release zip at " pinned-zip-path ",\n"
                   "or run:\n"
                   "  clj -X:build-db :username '\"your-mlds-username\"' :password '\"path/to/password-file\"'\n"
@@ -97,12 +98,21 @@
              {:version pinned-version})))
   (log/info "Downloading SNOMED International" pinned-release-date "via MLDS"
             {:package pinned-mlds-package})
-  (let [^java.nio.file.Path p (hermes-download/download
-                                pinned-mlds-package
-                                {:username     username
-                                 :password     password
-                                 :release-date pinned-release-date})]
-    (str p)))
+  (let [p (hermes-download/download
+            pinned-mlds-package
+            {:username     username
+             :password     password
+             :release-date pinned-release-date})
+        dir (some-> p str io/file)]
+    (when-not (and dir (.isDirectory ^java.io.File dir)
+                   (seq (.listFiles ^java.io.File dir)))
+      (throw (ex-info
+               (str "MLDS download returned no files (check logs for "
+                    "'invalid credentials' or similar). Nothing was written.")
+               {:package      pinned-mlds-package
+                :release-date pinned-release-date
+                :returned     (str p)})))
+    (str dir)))
 
 (defn build-pinned-db!
   "Provision the canonical pinned SNOMED CT DB. Intended as the exec-fn for
