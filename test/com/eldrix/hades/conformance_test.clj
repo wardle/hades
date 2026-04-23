@@ -1,6 +1,7 @@
 (ns com.eldrix.hades.conformance-test
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
+            [clojure.java.process :as process]
             [clojure.set]
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
@@ -28,6 +29,14 @@
 (def ^:private results-dir "test/resources/conformance")
 (def ^:private externals-path "resources/messages-hades.json")
 
+;; Pinned tx-ecosystem revision. Conformance fixtures change upstream
+;; (new tests added, existing expectations tightened). Pinning means
+;; CI/CD reruns and local dev runs see the same test population —
+;; defects are real, not upstream drift. Bumping is a deliberate act:
+;; update this constant, rerun conformance, update the baseline.
+(def ^:private tx-ecosystem-pinned-rev
+  "fb9078f6102088e3307e5b77c255bd41453fdcec")
+
 ;; ---------------------------------------------------------------------------
 ;; Server state
 ;; ---------------------------------------------------------------------------
@@ -38,32 +47,48 @@
 ;; Test data management
 ;; ---------------------------------------------------------------------------
 
+(defn- git!
+  "Run git synchronously. Returns trimmed stdout; throws on non-zero
+  exit. Runs in the tx-ecosystem clone dir by default; pass
+  `:at-repo false` for the initial clone (no cwd yet)."
+  [args & {:keys [at-repo] :or {at-repo true}}]
+  (str/trim
+    (if at-repo
+      (apply process/exec {:dir test-data-dir} "git" args)
+      (apply process/exec "git" args))))
+
 (defn ensure-test-data!
-  "Download the tx-ecosystem test data if not already present.
-  Performs a shallow clone to minimize download size."
+  "Ensure the tx-ecosystem test data is present AND checked out at the
+  pinned revision. Clones on first use; fetches and checks out the
+  pinned rev when the working copy is at a different commit."
   []
-  (let [dir (io/file test-data-dir)]
-    (when-not (.exists (io/file dir "tests" "test-cases.json"))
-      (log/info "Downloading tx-ecosystem test data to" test-data-dir)
-      (let [pb (ProcessBuilder. ["git" "clone" "--depth" "1"
-                                 test-data-repo (str dir)])
-            process (-> pb (.inheritIO) (.start))]
-        (when-not (zero? (.waitFor process))
-          (throw (ex-info "Failed to clone tx-ecosystem test data"
-                          {:repo test-data-repo :path test-data-dir})))))
-    test-data-dir))
+  (when-not (.exists (io/file test-data-dir "tests" "test-cases.json"))
+    (log/info "Cloning tx-ecosystem test data to" test-data-dir)
+    (git! ["clone" test-data-repo test-data-dir] :at-repo false))
+  (let [cur (git! ["rev-parse" "HEAD"])]
+    (when-not (= cur tx-ecosystem-pinned-rev)
+      (log/info "Checking out pinned tx-ecosystem rev"
+                {:from cur :to tx-ecosystem-pinned-rev})
+      (try (git! ["fetch" "--quiet" "origin"]) (catch Exception _ nil))
+      (git! ["-c" "advice.detachedHead=false"
+             "checkout" "--quiet" tx-ecosystem-pinned-rev])))
+  test-data-dir)
 
 (defn- tx-ecosystem-rev
-  "Return the current HEAD commit hash of the tx-ecosystem clone, or nil."
+  "Current HEAD commit hash of the tx-ecosystem clone, or nil."
   []
-  (let [git-dir (io/file test-data-dir ".git")]
-    (when (.exists git-dir)
-      (let [pb (ProcessBuilder. ["git" "rev-parse" "HEAD"])
-            _ (.directory pb (io/file test-data-dir))
-            process (.start pb)
-            rev (-> (.getInputStream process) slurp str/trim)]
-        (when (zero? (.waitFor process))
-          rev)))))
+  (when (.exists (io/file test-data-dir ".git"))
+    (try (git! ["rev-parse" "HEAD"]) (catch Exception _ nil))))
+
+(defn- upstream-head-rev
+  "Upstream main-branch HEAD via `git ls-remote`. Nil on any failure —
+  offline-friendly; never blocks a run."
+  []
+  (try
+    (-> (git! ["ls-remote" "origin" "HEAD"])
+        (str/split #"\s+")
+        first)
+    (catch Exception _ nil)))
 
 (defn- canonical-snomed-db!
   "Return the path to the canonical pinned SNOMED CT DB. Throws fast if
@@ -442,10 +467,9 @@
         pct           (* 100.0 (/ passed (double denom)))
         base-passed   (:passed baseline)
         delta         (when base-passed (- passed base-passed))
-        base-rev      (:tx-ecosystem-rev baseline)
-        cur-rev       (:tx-ecosystem-rev results)
+        pinned        tx-ecosystem-pinned-rev
+        upstream      (upstream-head-rev)
         fmt-rev       (fn [r] (if r (subs (str r) 0 (min 8 (count (str r)))) "unknown"))
-        drift?        (and base-rev cur-rev (not= base-rev cur-rev))
         errors        (tests-with-errors results)
         server-errors (tests-with-5xx results)
         bar           (apply str (repeat 64 \━))
@@ -468,12 +492,13 @@
                          (neg? delta) "← REGRESSION"
                          (pos? delta) "← gained"
                          :else        "(no change)"))))
-    (println (format " tx-ecosystem:      %s%s"
-                     (fmt-rev cur-rev)
-                     (if drift?
-                       (format "  ← differs from baseline %s (upstream drift possible)"
-                               (fmt-rev base-rev))
-                       "")))
+    (println (format " tx-ecosystem:      %s (pinned)" (fmt-rev pinned)))
+    (println (format " upstream main:     %s"
+                     (cond
+                       (nil? upstream)       "unavailable (offline?)"
+                       (= upstream pinned)   "up to date"
+                       :else                 (str (fmt-rev upstream)
+                                                  " — ahead of pin; consider bumping"))))
     (println)
     (if (seq errors)
       (do (println (format " ★ Server exceptions: %d  (TxTester could not complete the test)"

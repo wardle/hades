@@ -450,6 +450,23 @@ Run after every task. All items must pass.
    previous release's pass count.
 3. **Update `CHANGELOG.md`** with the release's headline changes.
 
+### Bumping the tx-ecosystem pin
+
+`conformance_test.clj` pins `tx-ecosystem-pinned-rev` to a specific upstream
+commit so CI and local dev see the same test population. Every conformance
+run shows the pinned rev and whether `upstream main` has moved ahead — that
+banner is the trigger to consider bumping.
+
+To bump:
+
+1. Update `tx-ecosystem-pinned-rev` to the new upstream SHA.
+2. Run `clj -X:conformance` — `ensure-test-data!` checks the new rev out.
+3. Fix any new failures the updated fixtures surface.
+4. Update `conformance-baseline.json` (pass/fail/total + `tx-ecosystem-rev`).
+5. Update the conformance figure per the release checklist above.
+
+Bumping is a deliberate act — never let CI pick up new tests implicitly.
+
 ## Key dependencies
 
 | Dep | Purpose |

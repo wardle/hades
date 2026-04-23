@@ -8,6 +8,7 @@
            ch.qos.logback/logback-classic {:mvn/version "1.5.16"}
 
            com.eldrix/hermes              {:mvn/version "1.4.1607"}
+           com.google.re2j/re2j           {:mvn/version "1.8"}
            io.pedestal/pedestal.service   {:mvn/version "0.8.1"}
            io.pedestal/pedestal.jetty     {:mvn/version "0.8.1"}
            lambdaisland/uri               {:mvn/version "1.19.155"}

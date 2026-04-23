@@ -6,7 +6,8 @@
   (:require [clojure.string :as str]
             [com.eldrix.hades.impl.display :as display]
             [com.eldrix.hades.impl.protocols :as protos]
-            [com.eldrix.hades.impl.registry :as registry]))
+            [com.eldrix.hades.impl.registry :as registry])
+  (:import (com.google.re2j Pattern)))
 
 (def ^:private value-keys
   ["valueCode" "valueCoding" "valueString" "valueInteger"
@@ -175,12 +176,12 @@
           (= (:code concept) value)
           (let [pv (get-concept-property concept property)]
             (and (not= pv ::not-found) (= (str pv) value))))
-    "regex" (let [pat (re-pattern value)
+    "regex" (let [pat (Pattern/compile value)
                   pv (if (= property "code")
                        (:code concept)
                        (let [v (get-concept-property concept property)]
                          (when (not= v ::not-found) (str v))))]
-              (boolean (when pv (re-matches pat pv))))
+              (boolean (when pv (.matches (.matcher pat pv)))))
     "in" (let [vals (set (str/split value #","))]
            (if (= property "code")
              (contains? vals (:code concept))
