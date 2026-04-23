@@ -83,8 +83,9 @@
 
 (defn start!
   "Start a Hades server with Hermes. Stores state for subsequent calls.
-  With no arguments, builds the SNOMED database from the tx-ecosystem subset.
-  With a path, uses that pre-existing database directly.
+  With no arguments, opens the canonical pinned SNOMED DB — provision it
+  first with `clj -X:build-db`. Pass `:snomed PATH` to open a different
+  Hermes DB instead (e.g. for ad-hoc probing).
   Returns the server URL."
   [& {:keys [snomed port] :or {port 0}}]
   (when @state
@@ -679,7 +680,8 @@
     :url              — run tests against a Hades server already running at this URL
                         (e.g. \"http://localhost:8080/fhir\"). When set, no local
                         server is started and :snomed is ignored.
-    :snomed           — path to pre-existing Hermes snomed.db (default: auto-build)
+    :snomed           — path to a pre-existing Hermes DB (default: the canonical
+                        pinned DB; provision with `clj -X:build-db` first).
     :update-baseline  — when true, updates the baseline file (default false)
 
   Examples:

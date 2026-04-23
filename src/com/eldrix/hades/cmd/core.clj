@@ -178,7 +178,7 @@
         (invoke-command (commands cmd) options arguments)))))
 
 (comment
-  (def svc (hermes/open "/Users/mark/Dev/hermes/snomed.db"))
+  (def svc (hermes/open "/path/to/snomed.db"))
   (def srv (server/start! (server/make-server {:port 8080})))
   (server/stop! srv)
 

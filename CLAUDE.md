@@ -345,10 +345,11 @@ For a single benchmark, use the REPL:
 (ob/close-snomed!)                                      ; when done
 ```
 
-The fixture opens Hermes against `/Users/mark/Dev/hermes/snomed.db`,
-registers it as the SNOMED CodeSystem/ValueSet/ConceptMap provider, runs
-criterium, then restores registry state and closes Hermes. Benches are
-skipped when the DB is absent.
+The fixture opens the canonical pinned Hermes DB (see
+`com.eldrix.hades.snomed-db`), registers it as the SNOMED
+CodeSystem/ValueSet/ConceptMap provider, runs criterium, then restores
+registry state and closes Hermes. Benches are skipped when the DB is
+absent — run `clj -X:build-db` first.
 
 To add a benchmark, append an entry to the `operations` vector. No new
 deftest or var required.

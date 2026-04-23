@@ -9,9 +9,10 @@
 
   1. `clj -M:bench` — runs the whole catalogue. A single deftest
      iterates `operations` and calls `criterium.core/quick-bench` on
-     each entry. The fixture opens Hermes against
-     `/Users/mark/Dev/hermes/snomed.db`, registers it as the SNOMED
-     provider, runs them, then restores registry state.
+     each entry. The fixture opens the canonical pinned Hermes DB (see
+     `com.eldrix.hades.snomed-db`; provision with `clj -X:build-db`),
+     registers it as the SNOMED provider, runs the benches, then
+     restores registry state.
 
   2. The REPL — `open-snomed!` once per session, then
      `(crit/quick-bench ((benchmarks :subsumes/unrelated)))`
