@@ -19,8 +19,9 @@
   keyed by each language-refset-id, so any representative doc per
   concept yields the correct display — no LMDB in either path.
 
-  This is the only Hades namespace allowed to import from
-  `com.eldrix.hermes.impl.*` — see plan/concept-expansion.md §3."
+  Along with `com.eldrix.hades.impl.snomed.batch`, this is one of only two
+  Hades namespaces allowed to import from `com.eldrix.hermes.impl.*` — see
+  plan/concept-expansion.md §3."
   (:require [clojure.string :as str]
             [com.eldrix.hermes.core :as hermes]
             [com.eldrix.hermes.impl.ecl :as hermes.ecl]

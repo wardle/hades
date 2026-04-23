@@ -78,6 +78,15 @@
             :exec-fn     com.eldrix.hades.conformance-test/run
             :exec-args   {}}
 
+           ;; Provision the canonical pinned SNOMED CT DB used by tests,
+           ;; benchmarks and conformance. Reads `.hades/snomed-int-20250201.zip`,
+           ;; writes `.hades/snomed-intl-20250201.db`. No-op if DB exists.
+           ;; See CLAUDE.md for the licensed download.
+           :build-db
+           {:extra-paths ["test"]
+            :exec-fn     com.eldrix.hades.snomed-db/build-pinned-db!
+            :exec-args   {}}
+
            :bench
            {:extra-paths ["test" "test/resources"]
             :extra-deps  {com.cognitect/test-runner

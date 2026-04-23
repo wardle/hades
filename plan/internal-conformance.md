@@ -3,7 +3,9 @@
 Maps each HL7 FHIR Terminology Ecosystem conformance test suite to the
 underlying FHIR spec requirement and the Hades component responsible.
 
-**Current: 354/572 passing (62%)** as of 2026-03-23.
+**Current: 466/600 passing (77.7%)** as of 2026-04-18.
+See `plan/conformance-next-steps.md` for the full breakdown and the
+active work queue.
 
 ## Component model
 

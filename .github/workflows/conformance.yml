@@ -34,20 +34,29 @@ jobs:
           key: deps-${{ hashFiles('deps.edn') }}
           restore-keys: deps-
 
-      - name: Read tx-ecosystem SHA from baseline
-        id: txrev
-        run: |
-          SHA=$(jq -r '."tx-ecosystem-rev" // empty' test/resources/conformance-baseline.json)
-          echo "sha=${SHA:-unpinned}" >> "$GITHUB_OUTPUT"
-
-      # Cache the tx-ecosystem clone and the built Hermes db together. Keyed
-      # on the baseline's tx-ecosystem SHA: bumping the baseline (which is how
-      # we intentionally move to a new upstream) invalidates the cache and
-      # forces a fresh clone + rebuild on the first run.
+      # Cache the pinned SNOMED CT Hermes DB keyed on the SNOMED release
+      # version. Bumping the pinned release in com.eldrix.hades.snomed-db
+      # invalidates the cache and forces a fresh MLDS download + build on
+      # the next run.
       - uses: actions/cache@v4
+        id: snomed-db-cache
         with:
-          path: .hades
-          key: conformance-${{ steps.txrev.outputs.sha }}
+          path: .hades/snomed-intl-20250201.db
+          key: snomed-intl-20250201-v1
+
+      - name: Build pinned SNOMED DB
+        if: steps.snomed-db-cache.outputs.cache-hit != 'true'
+        env:
+          MLDS_USERNAME: ${{ secrets.MLDS_USERNAME }}
+          MLDS_PASSWORD: ${{ secrets.MLDS_PASSWORD }}
+        run: |
+          mkdir -p .hades
+          umask 077
+          printf '%s' "$MLDS_PASSWORD" > .hades/mlds-password.txt
+          clojure -X:build-db \
+            :username "\"$MLDS_USERNAME\"" \
+            :password '".hades/mlds-password.txt"'
+          rm -f .hades/mlds-password.txt
 
       - name: Run conformance suite
         run: clojure -X:conformance

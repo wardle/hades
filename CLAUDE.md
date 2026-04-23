@@ -7,19 +7,59 @@ full plan.
 ## Quick reference
 
 ```bash
-clj -M:run <snomed-index-path> <port>    # run server
+# CLI subcommands — hades now owns the full SNOMED lifecycle (acquisition,
+# maintenance, serving). Hermes is used as a library; users don't run it.
+clj -M:run serve --db snomed.db --port 8080           # run FHIR server
+clj -M:run install --dist uk.nhs/sct-clinical --db snomed.db --api-key trud.txt
+clj -M:run import  --db snomed.db /path/to/RF2
+clj -M:run list    /path/to/RF2                       # list importable files
+clj -M:run available                                   # list distribution providers
+clj -M:run index   --db snomed.db                     # rebuild search indices
+clj -M:run compact --db snomed.db                     # compact LMDB
+clj -M:run status  --db snomed.db [--format json]     # database status
+clj -M:run --help serve                                # per-command help
+
+# Development
 clj -M:test                              # run tests
+clj -M:bench                             # run criterium benchmarks (see below)
 clj -M:lint/kondo                        # static analysis
 clj -M:lint/eastwood                     # lint
 clj -M:test/cloverage                    # test coverage
 clj -M:check                             # compilation check
 clj -M:nrepl                             # start nREPL server (test paths included)
 
-# conformance tests — auto-builds a SNOMED subset from the tx-ecosystem RF2 data
+# conformance tests — runs against the pinned SNOMED CT International release.
+# See `Conformance / integration test data` below for one-time setup.
 clj -X:conformance
-clj -X:conformance :snomed '"path/to/snomed.db"'        # use an existing snomed.db
+clj -X:conformance :snomed '"path/to/snomed.db"'        # override the pinned DB
 clj -X:conformance :url '"http://localhost:8080/fhir"'   # test an already-running server
 ```
+
+### Conformance / integration test data
+
+Conformance, `^:live` integration tests and benchmarks all run against **one
+pinned SNOMED CT International release: 20250201**. Pinning matters: the
+IG's tx-ecosystem fixtures were authored against this exact release, and
+any other release produces failures that are data-version drift, not real
+defects. Tests, benches and conformance **only consume** the pinned DB —
+they never build it. Provisioning is a separate explicit step:
+
+```bash
+clj -X:build-db                                                        # use a zip already placed locally
+clj -X:build-db :username '"you@example.com"' :password '"/path/pw"'   # or download from MLDS
+```
+
+`:build-db` is idempotent — a no-op if the DB already exists. It provisions
+from the first available of:
+
+1. `.hades/snomed-intl-20250201.db` — existing built DB
+2. `.hades/snomed-int-20250201.zip` — local release zip (extract + build)
+3. SNOMED MLDS — auto-download using `:username` / `:password` (path to
+   password file; Affiliate licence required)
+
+Build takes ~2 minutes and produces a ~2.2 GB Hermes DB. CI caches the
+built DB keyed on the pinned version. Tests and conformance fail fast with
+a clear message if the DB is missing — they never auto-build.
 
 ### Interactive development via nREPL
 
@@ -34,9 +74,9 @@ Then use `clj-nrepl-eval` to start a Hades server and test interactively:
 # Start Hermes + Hades on port 8080
 clj-nrepl-eval -p <port> '
 (require (quote [com.eldrix.hermes.core :as hermes]))
-(require (quote [com.eldrix.hades.server :as server]))
-(require (quote [com.eldrix.hades.registry :as registry]))
-(require (quote [com.eldrix.hades.snomed :as snomed]))
+(require (quote [com.eldrix.hades.impl.server :as server]))
+(require (quote [com.eldrix.hades.impl.registry :as registry]))
+(require (quote [com.eldrix.hades.impl.snomed :as snomed]))
 
 (def svc (hermes/open "/path/to/snomed.db"))
 (def snomed-svc (snomed/->HermesService svc))
@@ -96,7 +136,7 @@ clj -M:nrepl:conformance
 ```bash
 # 1. Start (once per session) — use double quotes to avoid shell escaping issues
 clj-nrepl-eval -p $(cat .nrepl-port) "(require '[com.eldrix.hades.conformance-test :as ct])"
-clj-nrepl-eval -p $(cat .nrepl-port) "(ct/start! \"/Users/mark/Dev/hermes/snomed.db\")"
+clj-nrepl-eval -p $(cat .nrepl-port) "(ct/start!)"   # uses the pinned DB
 
 # 2. Run tests (filtered or all)
 clj-nrepl-eval -p $(cat .nrepl-port) "(def r (ct/run-tests))"
@@ -124,41 +164,54 @@ clj-nrepl-eval -p $(cat .nrepl-port) "(ct/stop!)"
 
 ## Architecture
 
-```
-http.clj                  Pedestal HTTP layer — routes, interceptors,
-                          Parameters parsing, content negotiation
-    │
-wire.clj / metadata.clj   Pure FHIR JSON map builders (string-keyed)
-    │
-registry.clj              Lookup & dispatch — routes requests to implementations
-    │
-protocols.clj             Abstract interfaces (CodeSystem, ValueSet, ConceptMap)
-    │
-snomed.clj                SNOMED CT via Hermes
-fhir_codesystem.clj       File-backed CodeSystem (+ ValueSet impl for CS-backed VS)
-fhir_valueset.clj         File-backed ValueSet (compose expansion + validate)
-compose.clj               ValueSet compose engine (include/exclude, filter, etc.)
+Source layout:
 
-server.clj                Thin façade that exposes `make-server` over http.clj
-core.clj                  CLI entry point
+- `src/com/eldrix/hades/core.clj` — public library API (currently empty; no
+  stable surface yet).
+- `src/com/eldrix/hades/impl/**` — library internals. Subject to breaking
+  changes; nothing outside the project should depend on these namespaces.
+- `src/com/eldrix/hades/cmd/**` — CLI application (entry point +
+  option parsing). Not part of the library surface.
+
+The internal layering under `impl/`:
+
+```
+impl/http.clj                  Pedestal HTTP layer — routes, interceptors,
+                               Parameters parsing, content negotiation
+    │
+impl/wire.clj                  Pure FHIR JSON map builders (string-keyed)
+impl/metadata.clj
+    │
+impl/registry.clj              Lookup & dispatch — routes requests to implementations
+    │
+impl/protocols.clj             Abstract interfaces (CodeSystem, ValueSet, ConceptMap)
+    │
+impl/snomed.clj                SNOMED CT via Hermes
+impl/fhir_codesystem.clj       File-backed CodeSystem (+ ValueSet impl for CS-backed VS)
+impl/fhir_valueset.clj         File-backed ValueSet (compose expansion + validate)
+impl/compose.clj               ValueSet compose engine (include/exclude, filter, etc.)
+
+impl/server.clj                Thin façade that exposes `make-server` over http.clj
+cmd/core.clj                   CLI entry point (-main)
+cmd/impl/cli.clj               CLI option parsing
 ```
 
 ### Layering rules (strict)
 
-- **HTTP concerns live in `http.clj` only.** Pedestal interceptors, request
+- **HTTP concerns live in `impl/http.clj` only.** Pedestal interceptors, request
   parsing, routing, content negotiation, and response-shape decisions all
   stay there. No HTTP details leak into the registry or protocol impls.
-- **Wire-format shaping lives in `wire.clj` / `metadata.clj` only.** They are
-  pure functions that produce string-keyed FHIR JSON maps. Charred serialises
-  those maps in the content-negotiation interceptor.
-- **Registry mediates all access.** `http.clj` handlers call registry
+- **Wire-format shaping lives in `impl/wire.clj` / `impl/metadata.clj` only.**
+  They are pure functions that produce string-keyed FHIR JSON maps. Charred
+  serialises those maps in the content-negotiation interceptor.
+- **Registry mediates all access.** `impl/http.clj` handlers call registry
   functions, not protocol methods directly.
 
 ### Layer responsibilities (strict)
 
 - **Protocol impls** (snomed.clj, fhir_codesystem.clj, fhir_valueset.clj) know
   their domain. They return **complete, self-describing results** that match
-  the specs in `protocols.clj` (e.g. `::protos/validate-result`,
+  the specs in `impl/protocols.clj` (e.g. `::protos/validate-result`,
   `::protos/expansion-result`). No downstream layer should need to patch,
   enrich, or re-derive fields.
 - **Registry** dispatches to the right impl by URL/version and handles
@@ -173,7 +226,7 @@ core.clj                  CLI entry point
   (`:leave`) inspects the result and determines HTTP status / response shape
   (Parameters, ValueSet, or OperationOutcome). Handlers don't transform data,
   don't decide HTTP status, and don't build wire types directly.
-- **Wire builders are pure.** `wire.clj` takes internal keyword-keyed result
+- **Wire builders are pure.** `impl/wire.clj` takes internal keyword-keyed result
   maps and returns string-keyed FHIR maps. No HTTP, no dispatch, no state.
 - **No secret channels.** Data flows through explicit function parameters and
   return values — never through metadata maps, dynamic vars, or by reaching
@@ -234,8 +287,8 @@ the `:request` map and update `::registry/request` spec.
 - **Keyword keys everywhere inside Clojure** (`:code`, `:system`, `:display`,
   `:result`, `:version`). This applies to protocol return values, registry
   results, compose output, and all internal data.
-- **String keys only at serialisation boundaries**: in `wire.clj` /
-  `metadata.clj` (FHIR JSON output — string keys match FHIR property names)
+- **String keys only at serialisation boundaries**: in `impl/wire.clj` /
+  `impl/metadata.clj` (FHIR JSON output — string keys match FHIR property names)
   and when parsing inbound FHIR JSON resources (`tx-resource` bodies and
   file-backed ingest).
 - Parse FHIR JSON with `charred` (for HTTP body parsing) or
@@ -244,7 +297,7 @@ the `:request` map and update `::registry/request` spec.
 ### Specs
 - Use `clojure.spec.alpha` for all public API boundaries: protocol parameters,
   registry inputs, constructor arguments, **and protocol return values**.
-- The canonical data shapes live in `protocols.clj`: `::protos/validate-result`,
+- The canonical data shapes live in `impl/protocols.clj`: `::protos/validate-result`,
   `::protos/expansion-result`, `::protos/expansion-concept`,
   `::protos/lookup-result`, `::protos/issue`. These are the contracts between
   layers — every protocol impl must return data conforming to these specs.
@@ -263,6 +316,42 @@ the `:request` map and update `::registry/request` spec.
   server instance.
 - Place test fixtures (sample FHIR JSON resources) under `test/resources/`.
 - Run the full test suite after every change. No regressions.
+
+### Benchmarking (criterium)
+
+`clj -M:bench` runs Criterium micro-benchmarks at the registry layer (pure
+function calls, HTTP bypassed). Use these to bisect the impact of perf
+changes on the hot paths — faster iteration than tx-benchmark's HTTP/k6
+loop.
+
+Benchmarks are declared as data in `test/com/eldrix/hades/operations_bench.clj`.
+The catalogue is a vector `operations` of `{:id :ns/name :fn #(…)}`
+entries. At load time it's reduced into `benchmarks`, a map from `:id` to
+zero-arg fn, for REPL lookup. Bench files live under `test/` and are
+discovered by the `.*-bench$` regex; `clj -M:test` ignores them.
+
+```bash
+clj -M:bench       # run the whole catalogue — one shot, no flags
+```
+
+For a single benchmark, use the REPL:
+
+```clojure
+(require '[com.eldrix.hades.impl.operations-bench :as ob]
+         '[criterium.core :as crit])
+(ob/open-snomed!)                                       ; once per session
+(crit/quick-bench ((ob/benchmarks :subsumes/unrelated)))
+(crit/quick-bench ((ob/benchmarks :compose/refinement)))
+(ob/close-snomed!)                                      ; when done
+```
+
+The fixture opens Hermes against `/Users/mark/Dev/hermes/snomed.db`,
+registers it as the SNOMED CodeSystem/ValueSet/ConceptMap provider, runs
+criterium, then restores registry state and closes Hermes. Benches are
+skipped when the DB is absent.
+
+To add a benchmark, append an entry to the `operations` vector. No new
+deftest or var required.
 
 ### Conformance testing
 
@@ -305,7 +394,7 @@ place and flows data correctly.
    them and what shape do they expect? Draw the path: http → registry → impl
    → registry → http → wire. If data needs to flow backwards (handler reaching
    back into impl metadata), the return value is incomplete.
-4. **Check the spec.** Does a spec exist in `protocols.clj` for the return value
+4. **Check the spec.** Does a spec exist in `impl/protocols.clj` for the return value
    this change produces? If not, define it before writing the implementation.
    The spec is the contract — write the contract first.
 5. **Check for secret channels.** Does this change require smuggling data through
@@ -339,13 +428,26 @@ Run after every task. All items must pass.
    or into the result map.
 10. **Keyword keys used internally.** Protocol returns, registry results,
     and compose output all use keyword keys. String keys appear only in
-    `wire.clj` / `metadata.clj` (wire output) and in parsed input
+    `impl/wire.clj` / `impl/metadata.clj` (wire output) and in parsed input
     (`tx-resource` bodies, file-backed ingest).
 
 #### Completeness checks
 11. **New public functions have tests.**
 12. **Specs exist for public API boundaries** — input params and return values.
 13. **Changes match the task requirements** — not more, not less.
+
+### Before releasing (release checklist)
+
+1. **Refresh conformance figure in all three places** whenever the pass/total
+   changes. The figure must match everywhere or the badge lies:
+   - `README.md` — the shields.io badge URL (`conformance-PASSED%2FTOTAL%20(XX.X%25)-…`)
+   - `README.md` — the prose sentence ("Hades passes **N / T (XX.X%)** …")
+   - `CHANGELOG.md` — the release headline
+   Get the current numbers from `(ct/run-tests)` in the REPL, or the
+   `:totals` map of `test/resources/conformance-results.json`.
+2. **Run the full conformance suite** and confirm no regression against the
+   previous release's pass count.
+3. **Update `CHANGELOG.md`** with the release's headline changes.
 
 ## Key dependencies
 

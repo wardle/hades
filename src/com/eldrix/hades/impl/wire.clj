@@ -80,8 +80,8 @@
 
 (defn- issue-map
   "Build a string-keyed OperationOutcome.issue map from a keyword-keyed
-  issue: {:severity :type :details-code :text :expression}."
-  [{:keys [severity type details-code text expression]}]
+  issue: {:severity :type :details-code :text :expression :message-id}."
+  [{:keys [severity type details-code text expression message-id]}]
   (let [details (cond-> {}
                   text         (assoc "text" text)
                   details-code (assoc "coding"
@@ -89,6 +89,9 @@
                                         "code"   details-code}]))]
     (cond-> {"severity" (or severity "error")
              "code"     (issue-code type)}
+      message-id       (assoc "extension"
+                              [{"url"         "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id"
+                                "valueString" message-id}])
       (seq details)    (assoc "details" details)
       (seq expression) (assoc "expression" (vec expression)))))
 

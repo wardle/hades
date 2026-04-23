@@ -338,12 +338,19 @@
      :body   (wire/operation-outcome issues)}))
 
 (def catch-all-error
-  "Catch-all error interceptor. Converts unhandled exceptions into 500/4xx
-  OperationOutcome responses. Exceptions with `(ex-data)` carrying `:type`
-  and `:issues` produce the corresponding HTTP status."
+  "Catch-all error interceptor. Converts exceptions into OperationOutcome
+  responses. Deliberate `ex-info` throws (those carrying `:type`) are logged
+  terse without a stack trace — they represent client errors or known
+  server-side limits. Anything else is unexpected and gets a full stack."
   {:name  ::catch-all-error
    :error (fn [context ex]
-            (log/error ex "Unhandled exception")
+            (let [data  (when (instance? clojure.lang.ExceptionInfo ex) (ex-data ex))
+                  t     (:type data)
+                  cause (or (.getCause ^Throwable ex) ex)
+                  msg   (or (ex-message cause) (ex-message ex))]
+              (if t
+                (log/info "Handled" t msg)
+                (log/error ex "Unhandled exception")))
             (assoc context :response (exception-response ex)))})
 
 (defn- pick-display-language [params request ctx]

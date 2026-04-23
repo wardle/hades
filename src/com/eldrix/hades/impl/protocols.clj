@@ -51,9 +51,10 @@
 (s/def ::details-code string?)
 (s/def ::text string?)
 (s/def ::expression (s/coll-of string?))
+(s/def ::message-id string?)
 (s/def ::issue
   (s/keys :req-un [::severity ::type ::text]
-          :opt-un [::details-code ::expression]))
+          :opt-un [::details-code ::expression ::message-id]))
 (s/def ::issues (s/coll-of ::issue))
 
 ;; Return value code — FHIR codes are strings but hades currently uses keywords

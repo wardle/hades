@@ -520,13 +520,13 @@
 (defn valueset-validate-code
   ([params] (valueset-validate-code nil params))
   ([ctx {:keys [url system code valueSetVersion] :as params}]
-   (let [vs-lookup (if url
-                     (if valueSetVersion (versioned-uri url valueSetVersion) url)
-                     (when system system))
-         result (if-let [vs (when vs-lookup (valueset ctx vs-lookup))]
+   (when (str/blank? url)
+     (throw (ex-info "ValueSet $validate-code requires a url or valueSet parameter"
+                     {:type :invalid :details-code "invalid"})))
+   (let [vs-lookup (if valueSetVersion (versioned-uri url valueSetVersion) url)
+         result (if-let [vs (valueset ctx vs-lookup)]
                   (protos/vs-validate-code vs ctx params)
-                  (let [target (or vs-lookup url system)
-                        msg (str "A definition for the value Set '" target "' could not be found")]
+                  (let [msg (str "A definition for the value Set '" vs-lookup "' could not be found")]
                     {:result    false
                      :not-found true
                      :code      (when code (keyword code))

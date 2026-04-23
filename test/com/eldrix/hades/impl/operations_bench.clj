@@ -22,10 +22,9 @@
             [com.eldrix.hades.impl.registry :as registry]
             [com.eldrix.hades.impl.snomed :as snomed]
             [com.eldrix.hades.impl.snomed.expansion :as expansion]
+            [com.eldrix.hades.snomed-db :as snomed-db]
             [com.eldrix.hermes.core :as hermes]
             [criterium.core :as crit]))
-
-(def default-db "/Users/mark/Dev/hermes/snomed.db")
 (def ^:private snomed-uri "http://snomed.info/sct")
 
 ;; ─── Well-known SNOMED anchors ─────────────────────────────────────────────
@@ -208,7 +207,7 @@
 (defn open-snomed!
   "Open Hermes and register it as the SNOMED provider. Idempotent. Safe
   from the REPL or from a fixture."
-  ([] (open-snomed! default-db))
+  ([] (open-snomed! (snomed-db/assert-pinned-db!)))
   ([db-path]
    (or @state
        (let [svc (hermes/open db-path)
@@ -240,8 +239,10 @@
 ;; ─── Test-runner entry point (clj -M:bench) ───────────────────────────────
 
 (defn- live-fixture [f]
-  (if-not (.exists (io/file default-db))
-    (println (str "\n*** Skipping benchmarks: no SNOMED DB at " default-db "\n"))
+  (if-not (.exists (io/file snomed-db/pinned-db-path))
+    (println (str "\n*** Skipping benchmarks: no SNOMED DB at "
+                  snomed-db/pinned-db-path
+                  ". Run `clj -X:build-db` first.\n"))
     (try (open-snomed!) (f) (finally (close-snomed!)))))
 
 (use-fixtures :once live-fixture)

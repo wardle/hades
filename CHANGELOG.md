@@ -4,6 +4,22 @@ This log documents significant changes for each release.
 
 ## [Unreleased]
 
+Headline: Hades passes 477 / 603 (79.1%) of the HL7 FHIR Terminology
+Ecosystem IG conformance tests, up from 473 / 603.
+
+* Conformance and `^:live` integration tests now run against one pinned
+  SNOMED CT International release (20250201). Provisioning is an
+  explicit step (`clj -X:build-db`) using a local zip or MLDS download;
+  tests fail fast if the DB is missing. Drops hard-coded personal paths
+  and the `$SNOMED_DB` env var.
+* `ValueSet/$validate-code` with a missing `url` returns a 4xx
+  `OperationOutcome` with `code=invalid` instead of dispatching into
+  SNOMED's implicit-VS parser (previously produced a 5xx NPE).
+* SNOMED implicit-VS `not-found` and `inactive-display` issues now emit
+  the IG's expected `operationoutcome-message-id` extension.
+* Server log noise reduced: handled `ex-info` throws log terse INFO
+  instead of ERROR + full stack; only genuinely unexpected exceptions
+  keep the stack trace.
 * Source reorganised into `src/com/eldrix/hades/impl/` for internals
   and `src/com/eldrix/hades/cmd/` for the CLI; test namespaces mirror
   the new layout.

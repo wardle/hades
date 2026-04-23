@@ -2,7 +2,7 @@
 
 [![Scc Count Badge](https://sloc.xyz/github/wardle/hades)](https://github.com/wardle/hades/)
 [![Scc Cocomo Badge](https://sloc.xyz/github/wardle/hades?category=cocomo&avg-wage=100000)](https://github.com/wardle/hades/)
-[![Conformance](https://img.shields.io/badge/conformance-473%2F603%20(78.4%25)-blue)](https://github.com/HL7/fhir-tx-ecosystem-ig)
+[![Conformance](https://img.shields.io/badge/conformance-477%2F603%20(79.1%25)-blue)](https://github.com/HL7/fhir-tx-ecosystem-ig)
 
 A lightweight HL7 FHIR terminology server for SNOMED CT. Hades exposes
 `CodeSystem`, `ValueSet`, and `ConceptMap` FHIR operations (`$lookup`,
@@ -10,7 +10,7 @@ A lightweight HL7 FHIR terminology server for SNOMED CT. Hades exposes
 backed by the [hermes](https://github.com/wardle/hermes) SNOMED CT
 terminology engine.
 
-Hades passes **473 / 603 (78.4%)** of the HL7 FHIR Terminology Ecosystem
+Hades passes **477 / 603 (79.1%)** of the HL7 FHIR Terminology Ecosystem
 IG conformance tests.
 
 Hades requires Java 21 or above.
@@ -157,7 +157,7 @@ Planned work, in rough priority order:
 - **Resource read and search** — `GET /fhir/CodeSystem/{id}`,
   `GET /fhir/ValueSet?url=…`, and search by common parameters.
 - **Conformance coverage** — drive the HL7 FHIR Terminology Ecosystem IG
-  pass rate above 80% (currently 473/603).
+  pass rate above 80% (currently 477/603).
 - **CI/CD and health endpoints** — GitHub Actions for test/lint/conformance
   on every push, tagged releases that publish the uberjar, and a
   `/health` endpoint for orchestration.

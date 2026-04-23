@@ -8,6 +8,7 @@
             [com.eldrix.hades.impl.registry :as registry]
             [com.eldrix.hades.impl.server :as server]
             [com.eldrix.hades.impl.snomed :as snomed]
+            [com.eldrix.hades.snomed-db :as snomed-db]
             [com.eldrix.hermes.core :as hermes])
   (:import (java.net ServerSocket)
            (java.time Instant LocalDateTime ZoneId)
@@ -23,9 +24,6 @@
 
 (def ^:private test-data-dir ".hades/tx-ecosystem")
 (def ^:private test-data-repo "https://github.com/HL7/fhir-tx-ecosystem-ig.git")
-(def ^:private snomed-rf2-dir ".hades/tx-ecosystem/tx-source/snomed")
-(def ^:private snomed-db-default ".hades/snomed-conformance.db")
-(def ^:private snomed-rev-path ".hades/snomed-conformance.rev")
 (def ^:private baseline-path "test/resources/conformance-baseline.json")
 (def ^:private results-dir "test/resources/conformance")
 (def ^:private externals-path "resources/messages-hades.json")
@@ -67,28 +65,13 @@
         (when (zero? (.waitFor process))
           rev)))))
 
-(defn build-snomed-db!
-  "Build the SNOMED conformance database from the tx-ecosystem RF2 subset.
-  Rebuilds if the database is missing or the tx-ecosystem repo has been updated."
+(defn- canonical-snomed-db!
+  "Return the path to the canonical pinned SNOMED CT DB. Throws fast if
+  the DB is missing — provisioning is a separate explicit step
+  (`clj -X:build-db`)."
   []
   (ensure-test-data!)
-  (let [db-file (io/file snomed-db-default)
-        rev-file (io/file snomed-rev-path)
-        current-rev (tx-ecosystem-rev)
-        cached-rev (when (.exists rev-file) (str/trim (slurp rev-file)))
-        stale? (or (not (.exists db-file))
-                   (not= current-rev cached-rev))]
-    (when stale?
-      (when (.exists db-file)
-        (log/info "SNOMED subset has changed, rebuilding conformance database")
-        (run! io/delete-file (reverse (file-seq db-file))))
-      (log/info "Building SNOMED conformance database from test subset")
-      (hermes/import-snomed (str db-file) [snomed-rf2-dir])
-      (hermes/index (str db-file))
-      (hermes/compact (str db-file))
-      (spit rev-file current-rev)
-      (log/info "SNOMED conformance database ready" {:path (str db-file)}))
-    (str db-file)))
+  (snomed-db/assert-pinned-db!))
 
 ;; ---------------------------------------------------------------------------
 ;; Server lifecycle
@@ -106,7 +89,7 @@
   [& {:keys [snomed port] :or {port 0}}]
   (when @state
     (throw (ex-info "Server already running. Call (stop!) first." {})))
-  (let [snomed-db-path (or snomed (build-snomed-db!))
+  (let [snomed-db-path (or snomed (canonical-snomed-db!))
         port (if (zero? port) (free-port) port)
         svc (hermes/open snomed-db-path)
         snomed-svc (snomed/->HermesService svc)
