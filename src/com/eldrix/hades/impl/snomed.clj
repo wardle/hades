@@ -358,6 +358,123 @@
                          snomed-ids)]
     {:result (boolean (seq matches)) :matches matches}))
 
+(defn- concept-properties
+  "Build the :properties seq and :designations vec for a concept.
+  Uses four targeted Hermes calls (concept, descriptions, direct
+  parent-relationships, concrete-values) rather than `extended-concept`,
+  whose transitive `parent-relationships-expanded` is unused here and
+  accounts for ~65% of its cost. All displays resolve in one batched
+  LMDB txn pair."
+  [svc lang-refset-ids code']
+  (when-let [concept (hermes/concept svc code')]
+    (let [direct-rels  (hermes/parent-relationships svc code')
+          parents      (get direct-rels snomed/IsA)
+          attrs        (dissoc direct-rels snomed/IsA)
+          children     (hermes/child-relationships-of-type svc code' snomed/IsA)
+          concrete     (hermes/concrete-values svc code')
+          descriptions (hermes/descriptions svc code')
+          display-ids  (-> #{code' snomed/Synonym snomed/FullySpecifiedName}
+                           (into parents)
+                           (into children)
+                           (into (keys attrs))
+                           (into (mapcat val) attrs)
+                           (into (map :typeId) concrete))
+          displays     (batch/preferred-terms svc lang-refset-ids display-ids)]
+      {:displays   displays
+       :properties (concat
+                     [{:code :inactive :value (not (:active concept))}
+                      {:code :sufficientlyDefined :value (= snomed/Defined (:definitionStatusId concept))}]
+                     (map (fn [pid] {:code :parent :value (keyword (str pid))
+                                     :description (get displays pid)}) parents)
+                     (map (fn [cid] {:code :child :value (keyword (str cid))
+                                     :description (get displays cid)}) children)
+                     (mapcat (fn [[tid vids]]
+                               (map (fn [vid] {:code         (keyword (str tid))
+                                               :code-display (get displays tid)
+                                               :value        (keyword (str vid))
+                                               :description  (get displays vid)})
+                                    vids))
+                             attrs)
+                     (map (fn [{:keys [typeId value]}]
+                            {:code         (keyword (str typeId))
+                             :code-display (get displays typeId)
+                             :value        value})
+                          concrete))
+       :designations (into []
+                       (comp (filter :active)
+                         (map (fn [d] {:language (keyword (:languageCode d))
+                                       :use      {:system  snomed-system-uri
+                                                  :code    (str (:typeId d))
+                                                  :display (get displays (:typeId d))}
+                                       :value    (:term d)})))
+                       descriptions)})))
+
+(defn- refinement-pair-seq
+  "Walk a parsed :refinements vec — which may contain grouped sets or
+  ungrouped [attr val] pairs — and yield concept-valued `[attr-id val-id]`
+  tuples. Nested-expression values are skipped (rare in practice;
+  surfaced via `:display` in the rendered expression itself)."
+  [refinements]
+  (for [r (or refinements [])
+        [attr val] (if (set? r) r [r])
+        :let [tid (:conceptId attr), vid (:conceptId val)]
+        :when (and tid vid)]
+    [tid vid]))
+
+(defn- lookup-concept-code
+  "Build a full lookup-result map for a numeric SNOMED concept id.
+  Returns nil when the concept is unknown. The `hermes/concept` gate up
+  front keeps the not-found fast path to a single concept-record read,
+  with no locale or version work."
+  [svc code code' {:keys [version displayLanguage]}]
+  (when (hermes/concept svc code')
+    (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
+          {:keys [displays properties designations]}
+          (concept-properties svc lang-refset-ids code')]
+      {:name         "SNOMED CT"
+       :version      (or version (version-uri svc))
+       :display      (get displays code')
+       :system       snomed-system-uri
+       :code         (keyword code)
+       :properties   properties
+       :designations designations})))
+
+(defn- lookup-expression-code
+  "Build a lookup-result map for a post-coordinated SNOMED expression.
+  Enriches with the focus concept's direct properties and emits one
+  property per refinement attribute=value pair. The designation holds
+  the rendered canonical expression. Returns nil when parsing fails or
+  the focus concept is unknown. `match-locale` / `version-uri` are paid
+  only when the expression parses and the focus is real."
+  [svc code {:keys [version displayLanguage]}]
+  (when-let [parsed (try (hermes/parse-expression svc code) (catch Exception _ nil))]
+    (when-let [focus-id (some-> parsed :subExpression :focusConcepts first :conceptId)]
+      (when (hermes/concept svc focus-id)
+        (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
+              rendered (try (hermes/render-expression* svc code
+                                                       {:terms :update :definition-status :auto
+                                                        :language-refset-ids lang-refset-ids})
+                            (catch Exception _ code))
+              base         (concept-properties svc lang-refset-ids focus-id)
+              refine-pairs (refinement-pair-seq (:refinements (:subExpression parsed)))
+              refine-ids   (into #{} cat refine-pairs)
+              refine-disp  (batch/preferred-terms svc lang-refset-ids refine-ids)
+              displays     (merge (:displays base) refine-disp)
+              refine-props (mapv (fn [[tid vid]]
+                                   {:code         (keyword (str tid))
+                                    :code-display (get displays tid)
+                                    :value        (keyword (str vid))
+                                    :description  (get displays vid)})
+                                 refine-pairs)]
+          {:name         "SNOMED CT"
+           :version      (or version (version-uri svc))
+           :display      rendered
+           :system       snomed-system-uri
+           :code         (keyword code)
+           :properties   (concat (:properties base) refine-props)
+           :designations [{:language (keyword (or displayLanguage "en-US"))
+                           :value    rendered}]})))))
+
 (deftype HermesService
          [svc]
   protos/CodeSystem
@@ -368,70 +485,11 @@
      :title   "SNOMED CT"
      :status  "active"})
   (cs-lookup
-    [_ {:keys [code version displayLanguage]}]
+    [_ {:keys [code] :as params}]
     (when-not (str/blank? code)
       (if-let [code' (parse-long code)]
-        (when-let [ec (hermes/extended-concept svc code')]
-          (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
-                ver             (or version (version-uri svc))
-                parents         (get-in ec [:directParentRelationships snomed/IsA])
-                children        (hermes/child-relationships-of-type svc code' snomed/IsA)
-                attrs           (dissoc (:directParentRelationships ec) snomed/IsA)
-                concrete        (hermes/concrete-values svc code')
-                display-ids     (-> #{code' snomed/Synonym snomed/FullySpecifiedName}
-                                    (into parents)
-                                    (into children)
-                                    (into (keys attrs))
-                                    (into (mapcat val) attrs)
-                                    (into (map :typeId) concrete))
-                displays        (batch/preferred-terms svc lang-refset-ids display-ids)]
-            {:name         "SNOMED CT"
-             :version      ver
-             :display      (get displays code')
-             :system       snomed-system-uri
-             :code         (keyword code)
-             :properties   (concat
-                            [{:code :inactive :value (not (get-in ec [:concept :active]))}
-                             {:code :sufficientlyDefined :value (= snomed/Defined (get-in ec [:concept :definitionStatusId]))}]
-                            (map (fn [pid] {:code        :parent
-                                            :value       (keyword (str pid))
-                                            :description (get displays pid)})
-                                 parents)
-                            (map (fn [cid] {:code        :child
-                                            :value       (keyword (str cid))
-                                            :description (get displays cid)})
-                                 children)
-                            (mapcat (fn [[type-id target-ids]]
-                                      (map (fn [tid] {:code         (keyword (str type-id))
-                                                      :code-display (get displays type-id)
-                                                      :value        (keyword (str tid))
-                                                      :description  (get displays tid)})
-                                           target-ids))
-                                    attrs)
-                            (map (fn [{:keys [typeId value]}]
-                                   {:code         (keyword (str typeId))
-                                    :code-display (get displays typeId)
-                                    :value        value})
-                                 concrete))
-             :designations (into []
-                                 (comp (filter :active)
-                                       (map (fn [d] {:language (keyword (:languageCode d))
-                                                     :use      {:system  snomed-system-uri
-                                                                :code    (str (:typeId d))
-                                                                :display (get displays (:typeId d))}
-                                                     :value    (:term d)})))
-                                 (:descriptions ec))}))
-        (let [lang-ids (hermes/match-locale svc displayLanguage true)
-              rendered (try (hermes/render-expression* svc code
-                                                       {:terms :update :definition-status :auto
-                                                        :language-refset-ids lang-ids})
-                            (catch Exception _ nil))]
-          (when rendered
-            {:name    "SNOMED CT"
-             :version (or version (version-uri svc))
-             :display rendered
-             :system  snomed-system-uri
-             :code    (keyword code)})))))
+        (lookup-concept-code svc code code' params)
+        (lookup-expression-code svc code params))))
 
   (cs-validate-code [_ {:keys [code display version displayLanguage]}]
     (let [ver (or version (version-uri svc))]
