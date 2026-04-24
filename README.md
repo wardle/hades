@@ -4,7 +4,7 @@
 [![Scc Cocomo Badge](https://sloc.xyz/github/wardle/hades?category=cocomo&avg-wage=100000)](https://github.com/wardle/hades/)
 [![Conformance](https://img.shields.io/badge/conformance-477%2F603%20(79.1%25)-blue)](https://github.com/HL7/fhir-tx-ecosystem-ig)
 
-A lightweight HL7 FHIR terminology server for SNOMED CT. Hades exposes
+A lightweight yet powerful HL7 FHIR terminology server for SNOMED CT. Hades exposes
 `CodeSystem`, `ValueSet`, and `ConceptMap` FHIR operations (`$lookup`,
 `$validate-code`, `$subsumes`, `$expand`, `$translate`) over HTTP,
 backed by the [hermes](https://github.com/wardle/hermes) SNOMED CT
@@ -15,13 +15,21 @@ IG conformance tests.
 
 Hades requires Java 21 or above.
 
+It is designed to work at every scale — from a developer or analyst's laptop,
+to a single instance serving thousands of concurrent users, to a horizontally
+scaled deployment behind an API gateway. The database requires no external
+services and can be shared across multiple instances via a single mounted volume.
+Updating to a new SNOMED release is a single command.
+
 # Quickstart
+
+Download the latest `hades-<version>.jar` from the
+[releases page](https://github.com/wardle/hades/releases). Examples
+below use `hades.jar` — substitute the actual filename. From a source
+checkout, replace `java -jar hades.jar` with `clj -M:run` throughout.
 
 Hades handles the full SNOMED CT lifecycle: download a distribution,
 build a database, serve it over FHIR.
-
-Every example below uses `clj -M:run` to run from source; with the pre-built
-uberjar, replace that with `java -jar hades-<version>.jar`.
 
 ## 1. Build a SNOMED database
 
@@ -33,7 +41,7 @@ directory ready for `serve`.
 Save your TRUD API key in a file (e.g. `trud-api-key.txt`), then:
 
 ```shell
-clj -M:run install index compact \
+java -jar hades.jar install index compact \
     --db snomed.db \
     --dist uk.nhs/sct-clinical \
     --api-key trud-api-key.txt
@@ -48,22 +56,22 @@ layer additional UK distributions into the same database before indexing.
 Save your MLDS password in a file, then:
 
 ```shell
-clj -M:run install index compact \
+java -jar hades.jar install index compact \
     --db snomed.db \
     --dist ihtsdo.mlds/167 \
     --username you@example.com \
     --password mlds-password.txt
 ```
 
-Run `clj -M:run available` to browse all MLDS distributions and their IDs.
+Run `java -jar hades.jar available` to browse all MLDS distributions and their IDs.
 
 ### c) A distribution you downloaded manually
 
 Unzip the RF2 release, then point `import` at the unzipped directory:
 
 ```shell
-clj -M:run list /path/to/unzipped-rf2/              # inspect what hades will import
-clj -M:run import index compact \
+java -jar hades.jar list /path/to/unzipped-rf2/              # inspect what hades will import
+java -jar hades.jar import index compact \
     --db snomed.db \
     /path/to/unzipped-rf2/
 ```
@@ -71,10 +79,10 @@ clj -M:run import index compact \
 ## 2. Serve
 
 ```shell
-clj -M:run serve --db snomed.db --port 8080
+java -jar hades.jar serve --db snomed.db --port 8080
 ```
 
-Use `clj -M:run --help <command>` for full per-command options.
+Use `java -jar hades.jar --help <command>` for full per-command options.
 
 ## Command reference
 
