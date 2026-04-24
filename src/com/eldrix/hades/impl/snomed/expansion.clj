@@ -28,10 +28,12 @@
             [com.eldrix.hermes.impl.search :as hermes.search])
   (:import (com.eldrix.hermes.impl.lucene IntoLongSetCollectorManager)
            (com.eldrix.hermes.snomed Result)
-           (java.util Arrays)
+           (java.util ArrayList Arrays)
            (org.apache.lucene.document LongPoint)
+           (org.apache.lucene.index LeafReaderContext NumericDocValues)
            (org.apache.lucene.internal.hppc LongHashSet)
-           (org.apache.lucene.search IndexSearcher Query)))
+           (org.apache.lucene.search CollectionTerminatedException Collector CollectorManager
+                                     IndexSearcher LeafCollector Query Scorable ScoreMode)))
 
 (set! *warn-on-reflection* true)
 
@@ -53,6 +55,14 @@
      searcher
      (hermes.search/q-and [(LongPoint/newSetQuery "concept-id" cids)
                            (hermes.search/q-concept-active false)]))))
+
+(defn inactive-concepts
+  "Return a set of concept-ids in `cids` whose concept is flagged inactive.
+  Svc-taking wrapper over the Lucene `inactive-in` helper."
+  [svc cids]
+  (if (empty? cids)
+    #{}
+    (inactive-in (:searcher svc) (long-array cids))))
 
 (defn- result->row
   [^Result r inactive-ids]
@@ -168,6 +178,106 @@
                                     acc)))
                          (persistent! acc)))]
         {:concepts rows :total total}))))
+
+;; ---------------------------------------------------------------------------
+;; Direct Lucene path for implicit SNOMED ValueSets that reduce to a single
+;; point query — `fhir_vs=isa/{id}` and `fhir_vs=refset/{id}` with no text
+;; filter. The collector dedupes by concept-id, skips `offset` unique concepts,
+;; emits the next `count` rows reading preferredTerm inline from the
+;; description's stored field, then early-terminates. Per-request cost scales
+;; with `offset + count`, not with subtree size.
+;;
+;; `:total` is not returned. Per FHIR R4: "If total is not supplied, expect
+;; that it will be expensive to calculate (e.g. a SNOMED CT subsumption tree
+;; that requires counting descendants)." Callers that need total must omit
+;; `count` and take the ECL path, which scans the full subtree.
+;; ---------------------------------------------------------------------------
+
+(deftype ^:no-doc PagingDedupCollector
+  [^IndexSearcher searcher
+   ^LongHashSet seen
+   ^ArrayList rows
+   lang-ids
+   ^long offset
+   ^long limit]
+  Collector
+  (getLeafCollector [_ ctx]
+    (when (>= (.size rows) limit)
+      (throw (CollectionTerminatedException.)))
+    (let [^LeafReaderContext c ctx
+          leaf (.reader c)
+          ndv  (.getNumericDocValues leaf "concept-id")
+          base (.-docBase c)
+          sf   (.storedFields searcher)]
+      (reify LeafCollector
+        (^void setScorer [_ ^Scorable _])
+        (^void collect [_ ^int doc-id]
+          (.advance ^NumericDocValues ndv doc-id)
+          (let [cid (.longValue ^NumericDocValues ndv)]
+            (when (.add seen cid)
+              (when (> (.size seen) offset)
+                (if (< (.size rows) limit)
+                  (let [abs-doc (+ base doc-id)
+                        doc (.document sf abs-doc)
+                        display (hermes.search/doc->preferred-term doc lang-ids)]
+                    (.add rows {:conceptId cid :display display}))
+                  (throw (CollectionTerminatedException.))))))))))
+  (scoreMode [_] ScoreMode/COMPLETE_NO_SCORES))
+
+;; Manager-wrapping avoids the deprecated `.search(Query, Collector)` overload.
+;; `.search(Query, CollectorManager)` is the non-deprecated API; Lucene's
+;; model expects `newCollector` to return fresh per-thread instances for
+;; parallel collection and a `reduce` to merge per-collector results. Our
+;; collector carries global `seen`/`rows` state across segments — it can't be
+;; sharded per-segment without an index-time sort on concept-id (Hermes
+;; doesn't set one). So `newCollector` returns fresh wrappers that share the
+;; manager's state via closure, and the search runs through a fresh
+;; executor-less IndexSearcher so leaf slices are processed sequentially,
+;; making the shared-state mutation safe.
+
+(deftype ^:no-doc PagingDedupManager
+  [^IndexSearcher searcher
+   ^LongHashSet seen
+   ^ArrayList rows
+   lang-ids
+   ^long offset
+   ^long limit]
+  CollectorManager
+  (newCollector [_]
+    (->PagingDedupCollector searcher seen rows lang-ids offset limit))
+  (reduce [_ _collectors]
+    nil))
+
+(defn expand-paginated-query
+  "Paginate a Lucene `query` directly, without ECL and without a text filter.
+
+  Used for implicit SNOMED ValueSets whose semantics reduce to a single point
+  query — `fhir_vs=isa/{id}` (LongPoint on `116680003`) and
+  `fhir_vs=refset/{id}` (LongPoint on `concept-refsets`). Returns `:total nil`;
+  see the namespace comment above for the FHIR rationale.
+
+  Required keys:
+    :limit           Page size. Non-nil.
+
+  Optional keys:
+    :offset          Default 0.
+    :language-range  Accept-Language-style string for display selection.
+
+  Returns:
+    {:concepts (({:conceptId <long> :display <string or nil>}) ...)
+     :total    nil}"
+  [svc ^Query query {:keys [offset limit language-range]}]
+  (let [reader    (.getIndexReader ^IndexSearcher (:searcher svc))
+        searcher  (IndexSearcher. reader)                    ; no executor → sequential
+        lang-ids  (hermes/match-locale svc language-range true)
+        lim       (long limit)
+        rows      (ArrayList. (int lim))
+        seen      (LongHashSet.)
+        ^CollectorManager mgr (->PagingDedupManager searcher seen rows lang-ids
+                                                    (long (or offset 0)) lim)]
+    (.search searcher query mgr)
+    {:concepts (seq rows)
+     :total    nil}))
 
 (defn expand
   "Expand an ECL expression to a FHIR-shaped concept-level result.

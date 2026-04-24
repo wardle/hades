@@ -6,6 +6,7 @@
             [com.eldrix.hades.impl.snomed.batch :as batch]
             [com.eldrix.hades.impl.snomed.expansion :as expansion]
             [com.eldrix.hermes.core :as hermes]
+            [com.eldrix.hermes.impl.search :as hermes.search]
             [com.eldrix.hermes.snomed :as snomed]
             [lambdaisland.uri :as uri])
   (:import (com.eldrix.hermes.snomed Description)
@@ -616,23 +617,73 @@
   protos/ValueSet
   (vs-resource [_ _params])
   (vs-expand [_ _ctx {:keys [url filter activeOnly] cnt :count ofs :offset}]
-    (when-let [{:keys [ecl error message]} (parse-implicit-value-set url)]
+    (when-let [{:keys [query ecl error message]} (parse-implicit-value-set url)]
       (if error
         {:concepts [] :total 0
          :issues   [{:severity     "error" :type "not-supported"
                      :details-code "not-implemented" :text message}]}
-        (let [ver (version-uri svc)
+        (let [ver       (version-uri svc)
+              offset    (or ofs 0)
+              no-filter? (str/blank? filter)
+              ;; Three fast paths for paginated implicit ValueSets:
+              ;;   :isa/{id}    → descendants via description index + inline
+              ;;                  preferredTerm. Descendants are active by
+              ;;                  SNOMED semantics, so no inactive check.
+              ;;   :refset/{id} → members via description index + inline
+              ;;                  preferredTerm + per-page inactive check
+              ;;                  (refsets can reference inactive concepts).
+              ;;   :refset      → installed reference sets, pure LMDB —
+              ;;                  sort, slice, per-id preferred-synonym.
+              ;; All return :total nil; FHIR R4 permits omitting total for
+              ;; expensive-to-compute expansions. Anything else (filter
+              ;; present, :ecl, :all, or no count) falls through to the ECL
+              ;; path, which keeps its existing :total computation.
               {:keys [concepts total]}
-              (expansion/expand {:svc          svc
-                                 :ecl          ecl
-                                 :filter       filter
-                                 :active-only? (true? activeOnly)
-                                 :offset       (or ofs 0)
-                                 :limit        cnt})]
-          {:concepts         (expansion->concepts concepts ver)
-           :total            total
-           :used-codesystems [{:uri (str snomed-system-uri "|" ver) :status "active"}]
-           :compose-pins     []}))))
+              (cond
+                (and (= query :isa) no-filter? cnt)
+                (expansion/expand-paginated-query
+                  svc
+                  (hermes.search/q-descendantOf (parse-long (subs ecl 1)))
+                  {:offset offset :limit cnt})
+
+                (and (= query :in-refset) no-filter? cnt)
+                (let [refset-id (parse-long (subs ecl 1))
+                      result    (expansion/expand-paginated-query
+                                  svc (hermes.search/q-memberOf refset-id)
+                                  {:offset offset :limit cnt})
+                      cids      (map :conceptId (:concepts result))
+                      inactive  (expansion/inactive-concepts svc cids)]
+                  (cond-> result
+                    (seq inactive)
+                    (assoc :concepts
+                           (map #(cond-> % (inactive (:conceptId %))
+                                    (assoc :inactive true))
+                                (:concepts result)))))
+
+                (and (= query :refsets) cnt)
+                (let [lang-ids (hermes/match-locale svc nil true)]
+                  {:concepts
+                   (->> (hermes/installed-reference-sets svc)
+                        sort
+                        (drop offset)
+                        (take cnt)
+                        (map (fn [id]
+                               {:conceptId id
+                                :display (some-> (hermes/preferred-synonym*
+                                                   svc id lang-ids)
+                                                 :term)})))})
+
+                :else
+                (expansion/expand {:svc          svc
+                                   :ecl          ecl
+                                   :filter       filter
+                                   :active-only? (true? activeOnly)
+                                   :offset       offset
+                                   :limit        cnt}))]
+          (cond-> {:concepts         (expansion->concepts concepts ver)
+                   :used-codesystems [{:uri (str snomed-system-uri "|" ver) :status "active"}]
+                   :compose-pins     []}
+            total (assoc :total total))))))
   (vs-validate-code [_ _ctx {:keys [url code system display displayLanguage]}]
     (when (and (= system snomed-system-uri) (not (str/blank? code)))
       (let [code' (parse-long code)
