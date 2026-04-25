@@ -2,6 +2,10 @@
 
 This log documents significant changes for each release.
 
+## [v1.4.138] - 2026-04-24
+
+* Improve performance of common implicit valueset expansion
+
 ## [v1.4.135] - 2026-04-23
 
 Headline: Hades passes 477 / 603 (79.1%) of the HL7 FHIR Terminology
