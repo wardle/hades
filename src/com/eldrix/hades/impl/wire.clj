@@ -179,7 +179,7 @@
             (conj {"name" "value" "valueString" (str value)}))})
 
 (defn validate->parameters
-  "Convert a ::protos/validate-result to a FHIR Parameters map."
+  "Convert a ::result/validate to a FHIR Parameters map."
   [{:keys [result code system version display message
            inactive inactive-status normalized-code issues
            x-caused-by-unknown-system x-unknown-system
@@ -205,7 +205,7 @@
       (conj (param-canonical "x-unknown-system" x-unknown-system)))))
 
 (defn lookup->parameters
-  "Convert a ::protos/lookup-result to a FHIR Parameters map."
+  "Convert a ::result/lookup to a FHIR Parameters map."
   [{:keys [name version display system code definition abstract
            properties designations]}]
   (let [base (cond-> []
@@ -238,7 +238,7 @@
                                                     version (assoc :version version)))})))})
 
 (defn translate->parameters
-  "Convert a ::protos/translate-result to a FHIR Parameters map."
+  "Convert a ::result/translate to a FHIR Parameters map."
   [{:keys [result message matches issues]}]
   (parameters
     (cond-> [(param-boolean "result" (boolean result))]
@@ -388,7 +388,7 @@
 (defn expansion->valueset
   "Build a full FHIR ValueSet map with an expansion component.
   Inputs:
-    - result: an ::expansion-result (keyword-keyed) from the provider
+    - result: an ::result/expansion (keyword-keyed) from the provider
     - opts:   echo/context data gathered by the response interceptor:
         :vs-meta, :url, :offset-value, :count-value, :include-designations?,
         :expansion-params (already-built vector of parameter maps)"

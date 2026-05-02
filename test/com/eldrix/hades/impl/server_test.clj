@@ -6,8 +6,9 @@
   with `clj -M:test -e :live` when running on a machine without it."
   (:require [clojure.data.json :as json]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [com.eldrix.hades.impl.registry :as registry]
-            [com.eldrix.hades.impl.server :as server]
+            [com.eldrix.hades.core :as hades]
+            [com.eldrix.hades.http :as http]
+            [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.snomed :as snomed]
             [com.eldrix.hades.snomed-db :as snomed-db]
             [com.eldrix.hermes.core :as hermes])
@@ -22,22 +23,17 @@
 
 (defn server-fixture [f]
   (let [port (free-port)
-        svc (hermes/open (snomed-db/assert-pinned-db!))
-        snomed-svc (snomed/->HermesService svc)
-        srv (server/make-server {:port port})]
-    (registry/register-codesystem "http://snomed.info/sct" snomed-svc)
-    (registry/register-codesystem "http://snomed.info/sct|*" snomed-svc)
-    (registry/register-codesystem "sct" snomed-svc)
-    (registry/register-valueset "http://snomed.info/sct" snomed-svc)
-    (registry/register-valueset "http://snomed.info/sct|*" snomed-svc)
-    (registry/register-valueset "sct" snomed-svc)
-    (registry/register-concept-map-provider snomed-svc)
-    (server/start! srv)
-    (reset! test-state {:port port :svc svc :server srv})
+        hermes-svc (hermes/open (snomed-db/assert-pinned-db!))
+        snomed-svc (snomed/->HermesService hermes-svc)
+        svc (hades/open [snomed-svc])
+        srv (http/make-server svc {:port port})]
+    (http/start! srv)
+    (reset! test-state {:port port :hermes hermes-svc :svc svc :server srv})
     (try (f)
          (finally
-           (server/stop! srv)
-           (.close svc)
+           (http/stop! srv)
+           (hades/close svc)
+           (.close hermes-svc)
            (reset! test-state nil)))))
 
 (use-fixtures :once server-fixture)
@@ -82,10 +78,13 @@
         (get body "parameter")))
 
 (deftest ^:live lookup-valid-code
-  (testing "lookup returns display for valid SNOMED code"
+  (testing "lookup returns display and system|version-uri name for valid SNOMED code"
     (let [{:keys [status body]} (http-get "/CodeSystem/$lookup?system=http://snomed.info/sct&code=73211009")]
       (is (= 200 status))
-      (is (= "SNOMED CT" (get (get-param body "name") "valueString")))
+      (is (clojure.string/starts-with?
+            (get (get-param body "name") "valueString")
+            "http://snomed.info/sct|http://snomed.info/sct/")
+          "name parameter is system|version-uri form, per tx.fhir.org convention")
       (is (some? (get (get-param body "display") "valueString"))))))
 
 (deftest ^:live lookup-unknown-code
@@ -126,10 +125,9 @@
 ;; ---------------------------------------------------------------------------
 ;; Post-coordinated SNOMED CT expression dispatch.
 ;;
-;; Term-annotated, compound, and definition-status SCG shapes were previously
-;; misrouted to the simple-code path (the `:`/`{` screen missed them) and
-;; returned "unknown code". After flipping dispatch to `parse-long`-first,
-;; anything that isn't a bare numeric is handed to the SCG parser.
+;; Anything that isn't a bare numeric concept id — term-annotated,
+;; compound, definition-status SCG shapes — is handed to the SCG parser
+;; rather than the simple-code path.
 ;; ---------------------------------------------------------------------------
 
 (deftest ^:live lookup-expression-term-annotated
@@ -233,9 +231,12 @@
       (is (false? (get (get-param body "result") "valueBoolean")))
       (is (nil? (get-param body "match"))))))
 
+(defn- conceptmap-descriptions []
+  (protos/cm-metadata (:svc @test-state)))
+
 (defn- conceptmap-registered-for? [source target]
   (some (fn [d] (and (= source (:system d)) (= target (:target d))))
-        (registry/conceptmap-descriptions)))
+        (conceptmap-descriptions)))
 
 (deftest ^:live translate-pair-lookup-dispatches-to-provider
   (let [sct "http://snomed.info/sct"
@@ -252,9 +253,9 @@
                                               "?system=" icd-o "&code=FAKE&target=" sct))]
           (is (= 200 status)))))))
 
-(deftest ^:live cm-describe-lists-installed-refsets
-  (testing "cm-describe emits SCT→SCT historical maps + pairs for any installed external maps"
-    (let [descs (registry/conceptmap-descriptions)
+(deftest ^:live cm-metadata-lists-installed-refsets
+  (testing "cm-metadata emits SCT→SCT historical maps + pairs for any installed external maps"
+    (let [descs (conceptmap-descriptions)
           snomed "http://snomed.info/sct"]
       (is (seq (filter #(= [snomed snomed] [(:system %) (:target %)]) descs))
           "at least one SCT→SCT historical association should be registered")

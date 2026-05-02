@@ -1,0 +1,6 @@
+"LoincNumber","LongCommonName","PartNumber","PartName","PartCodeSystem","PartTypeName","LinkTypeName","Property"
+"2951-2","Sodium [Moles/volume] in Serum or Plasma","LP15099-2","Sodium","http://loinc.org","COMPONENT","Primary","http://loinc.org/property/COMPONENT"
+"2951-2","Sodium [Moles/volume] in Serum or Plasma","LP6860-3","SCnc","http://loinc.org","PROPERTY","Primary","http://loinc.org/property/PROPERTY"
+"2951-2","Sodium [Moles/volume] in Serum or Plasma","LP6960-1","Pt","http://loinc.org","TIME","Primary","http://loinc.org/property/TIME_ASPCT"
+"2951-2","Sodium [Moles/volume] in Serum or Plasma","LP7576-4","Ser/Plas","http://loinc.org","SYSTEM","Primary","http://loinc.org/property/SYSTEM"
+"2951-2","Sodium [Moles/volume] in Serum or Plasma","LP7753-9","Qn","http://loinc.org","SCALE","Primary","http://loinc.org/property/SCALE_TYP"

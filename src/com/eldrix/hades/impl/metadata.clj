@@ -3,7 +3,7 @@
   string-keyed maps ready for FHIR JSON serialisation."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [com.eldrix.hades.impl.registry :as registry]))
+            [clojure.string :as str]))
 
 (def ^:private build-info
   (some-> (io/resource "com/eldrix/hades/version.edn") slurp edn/read-string))
@@ -66,15 +66,20 @@
    "includeDesignations" "offset" "property" "system-version" "tx-resource"])
 
 (defn terminology-capabilities
-  "Build a FHIR TerminologyCapabilities map describing terminology behaviour."
-  []
-  {"resourceType" "TerminologyCapabilities"
-   "status"       "active"
-   "date"         release-date
-   "version"      hades-version
-   "name"         "Hades"
-   "title"        "Hades FHIR Terminology Server"
-   "kind"         "instance"
-   "codeSystem"   (mapv (fn [uri] {"uri" uri}) (sort (keys @registry/codesystems)))
-   "expansion"    {"parameter"
-                   (mapv (fn [p] {"name" p}) expansion-parameter-names)}})
+  "Build a FHIR TerminologyCapabilities map describing terminology
+  behaviour. `svc` is the service whose registered CodeSystem URLs
+  populate the listing."
+  [svc]
+  (let [uris (sort (keep (fn [k]
+                           (when-not (str/includes? k "|") k))
+                         (keys (:codesystems svc))))]
+    {"resourceType" "TerminologyCapabilities"
+     "status"       "active"
+     "date"         release-date
+     "version"      hades-version
+     "name"         "Hades"
+     "title"        "Hades FHIR Terminology Server"
+     "kind"         "instance"
+     "codeSystem"   (mapv (fn [uri] {"uri" uri}) uris)
+     "expansion"    {"parameter"
+                     (mapv (fn [p] {"name" p}) expansion-parameter-names)}}))

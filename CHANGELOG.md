@@ -2,6 +2,40 @@
 
 This log documents significant changes for each release.
 
+## [Unreleased]
+
+Headline: Hades passes 490 / 600 (81.7%) of the HL7 FHIR Terminology
+Ecosystem IG conformance tests against the pinned tx-ecosystem rev
+(`fb9078f6`). Same passes as the prior 490 / 603 figure — the upstream
+fixture set shrank by three deleted tests.
+
+* **Multi-terminology architecture.** SNOMED CT, LOINC, and FHIR NPM
+  packages are served from one process via a composite that dispatches
+  by canonical URL. Providers may be Hermes-backed (SNOMED), SQLite
+  containers (LOINC, optional for FHIR packages), or in-memory
+  (`--resources <dir>`).
+* **LOINC ingestion at parity with the schema.** The release loader now
+  reads `Part.csv`, `LoincPartLink_Primary.csv`,
+  `ComponentHierarchyBySystem.csv` and the per-language
+  `LinguisticVariants/*.csv` files in addition to the Core table. A real
+  Loinc 2.81 import yields 202k concepts, 7M designations across 21
+  languages, 661k typed Coding axis links, and a 252k-row ancestor
+  closure powering `$subsumes` over LOINC's DAG.
+* **FHIR NPM package ingestion.** `import` auto-detects extracted FHIR
+  package directories (`hl7.fhir.r4.core`, `hl7.terminology`,
+  `hl7.fhir.us.core`, `hl7.fhir.uv.ips`, `us.cdc.phinvads`); the JSON
+  reader strips a leading UTF-8 BOM and treats malformed sidecar JSON
+  (e.g. openapi specs) as soft skips so a single broken file no longer
+  aborts a directory walk.
+* **`:concept` shape supports multi-parent hierarchies.** Optional
+  `:parents` vector alongside the existing single-`:parent-code`. Both
+  the SQLite indexer and the in-memory builder consume either form.
+* **Bug fix: SQLite `cs-subsumes`** was destructuring `:system` instead
+  of `:systemA`, so it always returned `not-subsumed` on disjoint codes.
+  Fixed and regression-tested against a real LOINC closure.
+* **Dep bumps.** `sqlite-jdbc 3.50.3.0 → 3.53.0.0`,
+  `next.jdbc 1.3.1048 → 1.3.1093`, `HikariCP 6.2.1 → 7.0.2`.
+
 ## [v1.4.138] - 2026-04-24
 
 * Improve performance of common implicit valueset expansion

@@ -1,0 +1,17 @@
+{
+  "resourceType": "ConceptMap",
+  "url": "http://example.com/loader-test/cm",
+  "version": "1.0",
+  "name": "LoaderTestCM",
+  "status": "active",
+  "sourceUri": "http://example.com/loader-test/cs",
+  "targetUri": "http://example.com/other-cs",
+  "group": [
+    {"source": "http://example.com/loader-test/cs",
+     "target": "http://example.com/other-cs",
+     "element": [
+       {"code": "A", "display": "Alpha",
+        "target": [{"code": "X", "display": "Ex", "equivalence": "equivalent"}]}
+     ]}
+  ]
+}

@@ -1,0 +1,6 @@
+"PartNumber","PartTypeName","PartName","PartDisplayName","Status"
+"LP15099-2","COMPONENT","Sodium","Sodium","ACTIVE"
+"LP6860-3","PROPERTY","SCnc","Substance Concentration","ACTIVE"
+"LP7753-9","SCALE","Qn","Qn","ACTIVE"
+"LP7576-4","SYSTEM","Ser/Plas","Serum or Plasma","ACTIVE"
+"LP6960-1","TIME","Pt","Point in time (spot)","ACTIVE"

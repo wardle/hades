@@ -1,0 +1,9 @@
+{
+  "resourceType": "StructureDefinition",
+  "url": "http://example.com/loader-test/sd",
+  "name": "LoaderTestSD",
+  "status": "active",
+  "kind": "resource",
+  "abstract": false,
+  "type": "Observation"
+}

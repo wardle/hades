@@ -1,0 +1,13 @@
+{
+  "resourceType": "ValueSet",
+  "url": "http://example.com/loader-test/vs",
+  "version": "1.0",
+  "name": "LoaderTestVS",
+  "status": "active",
+  "compose": {
+    "include": [
+      {"system": "http://example.com/loader-test/cs",
+       "concept": [{"code": "A"}, {"code": "B"}]}
+    ]
+  }
+}

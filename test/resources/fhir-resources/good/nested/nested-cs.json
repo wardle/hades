@@ -1,0 +1,9 @@
+{
+  "resourceType": "CodeSystem",
+  "url": "http://example.com/loader-test/nested-cs",
+  "version": "1.0",
+  "status": "active",
+  "content": "complete",
+  "caseSensitive": true,
+  "concept": [{"code": "N", "display": "Nested"}]
+}

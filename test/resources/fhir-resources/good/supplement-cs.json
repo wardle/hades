@@ -1,0 +1,13 @@
+{
+  "resourceType": "CodeSystem",
+  "url": "http://example.com/loader-test/cs-supplement",
+  "version": "1.0",
+  "name": "LoaderTestSupplement",
+  "status": "active",
+  "content": "supplement",
+  "supplements": "http://example.com/loader-test/cs",
+  "concept": [
+    {"code": "A",
+     "designation": [{"language": "fr", "value": "Alpha (fr)"}]}
+  ]
+}

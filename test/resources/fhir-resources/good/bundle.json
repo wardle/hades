@@ -1,0 +1,22 @@
+{
+  "resourceType": "Bundle",
+  "type": "collection",
+  "entry": [
+    {"resource": {
+      "resourceType": "CodeSystem",
+      "url": "http://example.com/loader-test/bundled-cs",
+      "version": "1.0",
+      "status": "active",
+      "content": "complete",
+      "caseSensitive": true,
+      "concept": [{"code": "X", "display": "X-ray"}]
+    }},
+    {"resource": {
+      "resourceType": "ValueSet",
+      "url": "http://example.com/loader-test/bundled-vs",
+      "version": "1.0",
+      "status": "active",
+      "compose": {"include": [{"system": "http://example.com/loader-test/bundled-cs"}]}
+    }}
+  ]
+}

@@ -431,12 +431,21 @@
   (when (hermes/concept svc code')
     (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
           {:keys [displays properties designations]}
-          (concept-properties svc lang-refset-ids code')]
-      {:name         "SNOMED CT"
-       :version      (or version (version-uri svc))
+          (concept-properties svc lang-refset-ids code')
+          ver (or version (version-uri svc))]
+      {;; FHIR $lookup `name` parameter — tx.fhir.org and the
+       ;; tx-ecosystem fixtures use the `system|version-uri` form here
+       ;; rather than the human display name.
+       :name         (str snomed-system-uri "|" ver)
+       :version      ver
        :display      (get displays code')
        :system       snomed-system-uri
        :code         (keyword code)
+       ;; SNOMED concepts are always selectable (no abstract concepts
+       ;; in the SNOMED model). Emit `:abstract false` explicitly so
+       ;; the wire layer surfaces the parameter — the tx-ecosystem
+       ;; fixture asserts on its presence.
+       :abstract     false
        :properties   properties
        :designations designations})))
 
@@ -466,19 +475,37 @@
                                     :code-display (get displays tid)
                                     :value        (keyword (str vid))
                                     :description  (get displays vid)})
-                                 refine-pairs)]
-          {:name         "SNOMED CT"
-           :version      (or version (version-uri svc))
+                                 refine-pairs)
+          ver (or version (version-uri svc))]
+          {:name         (str snomed-system-uri "|" ver)
+           :version      ver
            :display      rendered
            :system       snomed-system-uri
            :code         (keyword code)
+           :abstract     false
            :properties   (concat (:properties base) refine-props)
            :designations [{:language (keyword (or displayLanguage "en-US"))
                            :value    rendered}]})))))
 
+(defn- module-version-uri [{:keys [moduleId effectiveTime]}]
+  (str snomed-system-uri "/" moduleId "/version/"
+       (.format DateTimeFormatter/BASIC_ISO_DATE effectiveTime)))
+
 (deftype HermesService
          [svc]
   protos/CodeSystem
+  (cs-metadata [_]
+    ;; Each installed SNOMED module is its own (url|version) registry
+    ;; key. The bare URL `http://snomed.info/sct` is bound by the
+    ;; composite via semver-latest pick over modules. The wildcard
+    ;; `url|*` entry ensures that requests pinning to any other
+    ;; SNOMED Edition URI (e.g. `xsct/.../version/...`) still resolve
+    ;; here — the SCT engine handles arbitrary editions natively.
+    (into [{:url snomed-system-uri :version "*"}]
+          (map (fn [ri] {:url snomed-system-uri
+                         :version (module-version-uri ri)}))
+          (hermes/release-information svc)))
+
   (cs-resource [_ _params]
     {:url     snomed-system-uri
      :version (version-uri svc)
@@ -615,8 +642,15 @@
                                  :language-range (when-not (str/blank? displayLanguage) displayLanguage)})]
           {:concepts (expansion->concepts concepts ver)}))))
   protos/ValueSet
+  (vs-metadata [_]
+    ;; Implicit ValueSet of every installed SNOMED module.
+    (mapv (fn [ri]
+            {:url snomed-system-uri
+             :version (module-version-uri ri)})
+          (hermes/release-information svc)))
+
   (vs-resource [_ _params])
-  (vs-expand [_ _ctx {:keys [url filter activeOnly] cnt :count ofs :offset}]
+  (vs-expand [_ _svc {:keys [url filter activeOnly] cnt :count ofs :offset}]
     (when-let [{:keys [query ecl error message]} (parse-implicit-value-set url)]
       (if error
         {:concepts [] :total 0
@@ -684,7 +718,7 @@
                    :used-codesystems [{:uri (str snomed-system-uri "|" ver) :status "active"}]
                    :compose-pins     []}
             total (assoc :total total))))))
-  (vs-validate-code [_ _ctx {:keys [url code system display displayLanguage]}]
+  (vs-validate-code [_ _svc {:keys [url code system display displayLanguage]}]
     (when (and (= system snomed-system-uri) (not (str/blank? code)))
       (let [code' (parse-long code)
             ver (version-uri svc)
@@ -770,7 +804,7 @@
                         :text         msg
                         :expression   ["url"]}]})))))
   protos/ConceptMap
-  (cm-describe
+  (cm-metadata
     [_]
     (let [installed (installed-refset-ids svc)]
       (concat

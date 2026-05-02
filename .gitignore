@@ -21,3 +21,4 @@ hades.iml
 .hades/
 test/resources/conformance-results.json
 test/resources/conformance/
+.claude/

@@ -8,11 +8,10 @@
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
+            [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.impl.compose :as compose]
-            [com.eldrix.hades.impl.fhir-codesystem :as fhir-cs]
-            [com.eldrix.hades.impl.fhir-valueset :as fhir-vs]
-            [com.eldrix.hades.impl.protocols :as protos]
-            [com.eldrix.hades.impl.registry :as registry]
+            [com.eldrix.hades.impl.load :as load-fhir]
+            [com.eldrix.hades.impl.protocols.result :as result]
             [com.eldrix.hades.impl.wire :as wire]))
 
 ;; ---------------------------------------------------------------------------
@@ -98,46 +97,38 @@
    "compose"      {"include" [{"system" "http://hl7.org/fhir/test/CodeSystem/draft"}]}})
 
 (defn- make-impls []
-  (let [cs (fhir-cs/make-fhir-code-system simple-cs)
-        vs (fhir-vs/make-fhir-value-set simple-vs)
-        vcs1 (fhir-cs/make-fhir-code-system version-cs-1)
-        vcs2 (fhir-cs/make-fhir-code-system version-cs-2)
-        vvs-nopin (fhir-vs/make-fhir-value-set version-vs-no-pin)
-        vvs-pin1 (fhir-vs/make-fhir-value-set version-vs-pin-1)
-        dcs (fhir-cs/make-fhir-code-system draft-cs)
-        dvs (fhir-vs/make-fhir-value-set draft-vs)]
+  (let [cs (load-fhir/from-fhir simple-cs)
+        vs (load-fhir/from-fhir simple-vs)
+        vcs1 (load-fhir/from-fhir version-cs-1)
+        vcs2 (load-fhir/from-fhir version-cs-2)
+        vvs-nopin (load-fhir/from-fhir version-vs-no-pin)
+        vvs-pin1 (load-fhir/from-fhir version-vs-pin-1)
+        dcs (load-fhir/from-fhir draft-cs)
+        dvs (load-fhir/from-fhir draft-vs)]
     {:cs cs :vs vs :vcs1 vcs1 :vcs2 vcs2
      :vvs-nopin vvs-nopin :vvs-pin1 vvs-pin1 :dcs dcs :dvs dvs}))
 
-(defn register-fixture [f]
-  (let [{:keys [cs vs vcs1 vcs2 vvs-nopin vvs-pin1 dcs dvs]} (make-impls)]
-    (registry/register-codesystem "http://hl7.org/fhir/test/CodeSystem/simple" cs)
-    (registry/register-valueset "http://hl7.org/fhir/test/ValueSet/simple-all" vs)
-    (registry/register-codesystem "http://hl7.org/fhir/test/CodeSystem/version" vcs2)
-    (registry/register-codesystem "http://hl7.org/fhir/test/CodeSystem/version|1.0.0" vcs1)
-    (registry/register-codesystem "http://hl7.org/fhir/test/CodeSystem/version|1.2.0" vcs2)
-    (registry/register-valueset "http://hl7.org/fhir/test/ValueSet/version-all" vvs-nopin)
-    (registry/register-valueset "http://hl7.org/fhir/test/ValueSet/version" vvs-pin1)
-    (registry/register-valueset "http://hl7.org/fhir/test/ValueSet/version|1.0.0" vvs-pin1)
-    (registry/register-codesystem "http://hl7.org/fhir/test/CodeSystem/draft" dcs)
-    (registry/register-valueset "http://hl7.org/fhir/test/CodeSystem/draft" dcs)
-    (registry/register-valueset "http://hl7.org/fhir/test/ValueSet/draft-vs" dvs))
-  (f))
+(def ^:dynamic *svc* nil)
 
-(use-fixtures :each register-fixture)
+(defn svc-fixture [f]
+  (let [{:keys [cs vs vcs1 vcs2 vvs-nopin vvs-pin1 dcs dvs]} (make-impls)]
+    (binding [*svc* (hades/open [cs vs vcs1 vcs2 vvs-nopin vvs-pin1 dcs dvs])]
+      (f))))
+
+(use-fixtures :each svc-fixture)
 
 ;; ---------------------------------------------------------------------------
 ;; Helper: assert spec conformance
 ;; ---------------------------------------------------------------------------
 
 (defn- assert-validate-result [result]
-  (is (s/valid? ::protos/validate-result result)
-      (str "validate-result spec violation:\n" (s/explain-str ::protos/validate-result result)))
+  (is (s/valid? ::result/validate result)
+      (str "validate-result spec violation:\n" (s/explain-str ::result/validate result)))
   result)
 
 (defn- assert-expansion-result [result]
-  (is (s/valid? ::protos/expansion-result result)
-      (str "expansion-result spec violation:\n" (s/explain-str ::protos/expansion-result result)))
+  (is (s/valid? ::result/expansion result)
+      (str "expansion-result spec violation:\n" (s/explain-str ::result/expansion result)))
   result)
 
 (defn- issue-codes [result]
@@ -153,7 +144,7 @@
 
 (deftest expression-path-contract-test
   (testing "impls use canonical Coding.* paths"
-    (let [result (registry/valueset-validate-code nil
+    (let [result (hades/validate-code *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"
                     :system "http://hl7.org/fhir/test/CodeSystem/simple"
                     :code "code1" :display "Wrong Display"
@@ -163,7 +154,7 @@
           "display issue should use Coding.display")))
 
   (testing "impls use Coding.code for not-in-vs"
-    (let [result (registry/valueset-validate-code nil
+    (let [result (hades/validate-code *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"
                     :system "http://hl7.org/fhir/test/CodeSystem/simple"
                     :code "MISSING"
@@ -227,7 +218,7 @@
 
 (deftest vs-not-found-test
   (testing "unknown VS URL returns :not-found"
-    (let [result (registry/valueset-validate-code nil
+    (let [result (hades/validate-code *svc*
                    {:url "http://example.com/no-such-vs"
                     :system "http://hl7.org/fhir/test/CodeSystem/simple"
                     :code "code1"})]
@@ -237,7 +228,7 @@
       (is (contains? (issue-codes result) "not-found"))))
 
   (testing "unknown VS version returns :not-found"
-    (let [result (registry/valueset-validate-code nil
+    (let [result (hades/validate-code *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/version"
                     :valueSetVersion "2.4.0"
                     :system "http://hl7.org/fhir/test/CodeSystem/version"
@@ -247,7 +238,7 @@
       (is (str/includes? (:message result) "2.4.0"))))
 
   (testing "valid VS does NOT return :not-found"
-    (let [result (registry/valueset-validate-code nil
+    (let [result (hades/validate-code *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"
                     :system "http://hl7.org/fhir/test/CodeSystem/simple"
                     :code "code1"})]
@@ -260,7 +251,7 @@
 
 (deftest cc-valid-coding-test
   (testing "single valid coding"
-    (let [result (registry/valueset-validate-codeableconcept nil
+    (let [result (hades/validate-codeable-concept *svc*
                    [{:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "code1"}]
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"})]
       (is (true? (:result result)))
@@ -268,7 +259,7 @@
 
 (deftest cc-invalid-coding-test
   (testing "single invalid coding returns this-code-not-in-vs + invalid-code"
-    (let [result (registry/valueset-validate-codeableconcept nil
+    (let [result (hades/validate-codeable-concept *svc*
                    [{:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "MISSING"}]
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"})]
       (assert-validate-result result)
@@ -279,7 +270,7 @@
 
 (deftest cc-multi-coding-one-valid-test
   (testing "two codings, one valid — result false with all issues"
-    (let [result (registry/valueset-validate-codeableconcept nil
+    (let [result (hades/validate-codeable-concept *svc*
                    [{:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "MISSING"}
                     {:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "code1"}]
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"})]
@@ -290,7 +281,7 @@
 
 (deftest cc-vs-not-found-test
   (testing "CC with unknown VS propagates :not-found"
-    (let [result (registry/valueset-validate-codeableconcept nil
+    (let [result (hades/validate-codeable-concept *svc*
                    [{:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "code1"}]
                    {:url "http://example.com/no-such-vs"})]
       (is (true? (:not-found result)))
@@ -298,7 +289,7 @@
 
 (deftest cc-issues-have-coding-index-test
   (testing "per-coding issues tagged with coding-index"
-    (let [result (registry/valueset-validate-codeableconcept nil
+    (let [result (hades/validate-codeable-concept *svc*
                    [{:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "MISSING"}
                     {:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "ALSO-MISSING"}]
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"})
@@ -312,7 +303,7 @@
 
 (deftest expand-result-shape-test
   (testing "expand returns ::expansion-result with required keys"
-    (let [result (registry/valueset-expand nil
+    (let [result (hades/expand *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"})]
       (assert-expansion-result result)
       (is (pos? (:total result)))
@@ -320,7 +311,7 @@
       (is (seq (:used-codesystems result)))))
 
   (testing "expand concepts have required keys"
-    (let [{:keys [concepts]} (registry/valueset-expand nil
+    (let [{:keys [concepts]} (hades/expand *svc*
                                {:url "http://hl7.org/fhir/test/ValueSet/simple-all"})]
       (is (every? :code concepts))
       (is (every? :system concepts))
@@ -328,7 +319,7 @@
 
 (deftest expand-version-pinned-test
   (testing "versioned include expands from pinned CodeSystem"
-    (let [result (registry/valueset-expand nil
+    (let [result (hades/expand *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/version"})
           codes (set (map :code (:concepts result)))]
       (assert-expansion-result result)
@@ -339,14 +330,14 @@
       (is (not (contains? codes "code3")))))
 
   (testing "compose-pins reflects pinned version"
-    (let [{:keys [compose-pins]} (registry/valueset-expand nil
+    (let [{:keys [compose-pins]} (hades/expand *svc*
                                    {:url "http://hl7.org/fhir/test/ValueSet/version"})]
       (is (= [{:system "http://hl7.org/fhir/test/CodeSystem/version" :version "1.0.0"}]
              compose-pins)))))
 
 (deftest expand-unpinned-test
   (testing "unpinned include uses default (latest) CodeSystem"
-    (let [result (registry/valueset-expand nil
+    (let [result (hades/expand *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/version-all"})
           codes (set (map :code (:concepts result)))]
       ;; Default version is 1.2.0 (registered as default)
@@ -359,7 +350,7 @@
 
 (deftest version-mismatch-existing-version-test
   (testing "caller version 1.0.0, VS resolves to 1.2.0 → error mismatch"
-    (let [result (registry/valueset-validate-code nil
+    (let [result (hades/validate-code *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/version-all"
                     :system "http://hl7.org/fhir/test/CodeSystem/version"
                     :code "code1"
@@ -375,7 +366,7 @@
 
 (deftest version-mismatch-unknown-version-test
   (testing "caller version 9.9.9 (doesn't exist) → warning mismatch + error unknown"
-    (let [result (registry/valueset-validate-code nil
+    (let [result (hades/validate-code *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"
                     :system "http://hl7.org/fhir/test/CodeSystem/simple"
                     :code "code1"
@@ -396,7 +387,7 @@
 
 (deftest cs-status-warnings-test
   (testing "draft CodeSystem validation via ValueSet includes status warning"
-    (let [result (registry/valueset-validate-code nil
+    (let [result (hades/validate-code *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/draft-vs"
                     :system "http://hl7.org/fhir/test/CodeSystem/draft"
                     :code "A"
@@ -412,7 +403,7 @@
 
 (deftest inactive-code-validate-test
   (testing "inactive code in VS returns :inactive flag"
-    (let [result (registry/valueset-validate-code nil
+    (let [result (hades/validate-code *svc*
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"
                     :system "http://hl7.org/fhir/test/CodeSystem/simple"
                     :code "code2"

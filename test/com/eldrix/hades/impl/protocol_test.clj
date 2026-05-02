@@ -11,10 +11,9 @@
             [clojure.spec.test.alpha :as stest]
             [clojure.string]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [com.eldrix.hades.impl.fhir-codesystem :as fhir-cs]
-            [com.eldrix.hades.impl.fhir-valueset :as fhir-vs]
-            [com.eldrix.hades.impl.protocols :as protos]
-            [com.eldrix.hades.impl.registry :as registry]))
+            [com.eldrix.hades.core :as hades]
+            [com.eldrix.hades.impl.load :as load-fhir]
+            [com.eldrix.hades.impl.protocols :as protos]))
 
 ;; ---------------------------------------------------------------------------
 ;; Spec instrumentation — validate inputs at boundaries during test runs
@@ -22,6 +21,24 @@
 
 (stest/instrument (filter #(clojure.string/starts-with? (namespace %) "com.eldrix.hades")
                           (stest/instrumentable-syms)))
+
+;; ---------------------------------------------------------------------------
+;; Generic return-shape conformance — fetches each `core` operation's
+;; `:ret` spec via `s/get-spec` and validates the live result against
+;; it. Adding `:ret` to a new operation automatically gives it
+;; coverage; no per-operation boilerplate here.
+;; ---------------------------------------------------------------------------
+
+(defn check-ret
+  "Run `f` with `args`, assert the result conforms to f's `:ret` spec
+  (looked up via `s/get-spec`). Returns the result for further checks."
+  [sym f & args]
+  (let [result (apply f args)
+        ret-spec (some-> (s/get-spec sym) :ret)]
+    (when ret-spec
+      (is (s/valid? ret-spec result)
+          (str sym " :ret violation:\n" (s/explain-str ret-spec result))))
+    result))
 
 ;; ---------------------------------------------------------------------------
 ;; Test fixtures — minimal code systems and value sets for contract testing
@@ -49,107 +66,88 @@
    "compose"      {"include" [{"system" "http://example.com/contract-cs"
                                 "concept" [{"code" "A"} {"code" "B"}]}]}})
 
-(def cs (fhir-cs/make-fhir-code-system simple-cs-map))
-(def vs (fhir-vs/make-fhir-value-set simple-vs-map))
+(def cs (load-fhir/from-fhir simple-cs-map))
+(def vs (load-fhir/from-fhir simple-vs-map))
 
-(defn register-fixture [f]
-  (registry/register-codesystem "http://example.com/contract-cs" cs)
-  (registry/register-valueset "http://example.com/contract-cs" cs)
-  (f))
+(def ^:dynamic *svc* nil)
 
-(use-fixtures :each register-fixture)
+(defn svc-fixture [f]
+  (binding [*svc* (hades/open [cs vs])]
+    (f)))
 
-;; ---------------------------------------------------------------------------
-;; Contract validators — generic functions that assert spec conformance
-;; ---------------------------------------------------------------------------
-
-(defn assert-lookup-contract
-  "Assert that cs-lookup returns a valid ::protos/lookup-result."
-  [impl code]
-  (let [result (protos/cs-lookup impl {:code code :system "http://example.com/contract-cs"})]
-    (when result
-      (is (s/valid? ::protos/lookup-result result)
-          (str "cs-lookup contract violation:\n" (s/explain-str ::protos/lookup-result result))))
-    result))
-
-(defn assert-validate-code-contract
-  "Assert that cs-validate-code returns a valid ::protos/validate-result."
-  [impl code]
-  (let [result (protos/cs-validate-code impl {:code code})]
-    (when result
-      (is (s/valid? ::protos/validate-result result)
-          (str "cs-validate-code contract violation:\n" (s/explain-str ::protos/validate-result result))))
-    result))
-
-(defn assert-vs-validate-code-contract
-  "Assert that vs-validate-code returns a valid ::protos/validate-result."
-  [impl ctx params]
-  (let [result (protos/vs-validate-code impl ctx params)]
-    (when result
-      (is (s/valid? ::protos/validate-result result)
-          (str "vs-validate-code contract violation:\n" (s/explain-str ::protos/validate-result result))))
-    result))
+(use-fixtures :each svc-fixture)
 
 ;; ---------------------------------------------------------------------------
-;; cs-lookup contract tests
+;; cs-lookup scenario tests — `check-ret` validates the return shape via
+;; `core/lookup`'s `:ret` spec; the explicit assertions check semantics.
 ;; ---------------------------------------------------------------------------
 
 (deftest cs-lookup-contract-test
   (testing "valid code returns spec-conforming result"
-    (let [result (assert-lookup-contract cs "A")]
+    (let [result (check-ret `hades/lookup hades/lookup *svc*
+                            {:code "A" :system "http://example.com/contract-cs"})]
       (is (some? result))
       (is (= "Alpha" (:display result)))))
 
   (testing "unknown code returns nil"
-    (is (nil? (protos/cs-lookup cs {:code "MISSING"})))))
+    (is (nil? (check-ret `hades/lookup hades/lookup *svc*
+                         {:code "MISSING" :system "http://example.com/contract-cs"})))))
 
 ;; ---------------------------------------------------------------------------
-;; cs-validate-code contract tests
+;; cs-validate-code scenario tests
 ;; ---------------------------------------------------------------------------
+
+(defn- cs-validate [code]
+  (check-ret `hades/validate-code hades/validate-code *svc*
+             {:code code :system "http://example.com/contract-cs"}))
 
 (deftest cs-validate-code-contract-test
   (testing "valid code returns spec-conforming result"
-    (let [result (assert-validate-code-contract cs "A")]
+    (let [result (cs-validate "A")]
       (is (true? (:result result)))
       (is (= "Alpha" (:display result)))))
 
   (testing "unknown code returns spec-conforming result=false"
-    (let [result (assert-validate-code-contract cs "MISSING")]
+    (let [result (cs-validate "MISSING")]
       (is (false? (:result result)))
       (is (some? (:message result)))
       (is (seq (:issues result)))))
 
   (testing "inactive code has :inactive flag"
-    (let [result (assert-validate-code-contract cs "B")]
+    (let [result (cs-validate "B")]
       (is (true? (:result result)))
       (is (true? (:inactive result)))))
 
   (testing "display mismatch returns issues"
-    (let [result (protos/cs-validate-code cs {:code "A" :display "Wrong"})]
-      (is (s/valid? ::protos/validate-result result))
+    (let [result (check-ret `hades/validate-code hades/validate-code *svc*
+                            {:code "A" :system "http://example.com/contract-cs"
+                             :display "Wrong"})]
       (is (false? (:result result)))
       (is (some #(= "invalid-display" (:details-code %)) (:issues result))))))
 
 ;; ---------------------------------------------------------------------------
-;; vs-validate-code contract tests
+;; vs-validate-code scenario tests
 ;; ---------------------------------------------------------------------------
+
+(defn- vs-validate [code]
+  (check-ret `hades/validate-code hades/validate-code *svc*
+             {:url    "http://example.com/contract-vs"
+              :code   code
+              :system "http://example.com/contract-cs"}))
 
 (deftest vs-validate-code-contract-test
   (testing "code in value set"
-    (let [result (assert-vs-validate-code-contract vs nil
-                   {:code "A" :system "http://example.com/contract-cs"})]
+    (let [result (vs-validate "A")]
       (is (true? (:result result)))
       (is (= "Alpha" (:display result)))))
 
   (testing "code not in value set"
-    (let [result (assert-vs-validate-code-contract vs nil
-                   {:code "C" :system "http://example.com/contract-cs"})]
+    (let [result (vs-validate "C")]
       (is (false? (:result result)))
       (is (some #(= "not-in-vs" (:details-code %)) (:issues result)))))
 
   (testing "inactive code in value set returns :inactive"
-    (let [result (assert-vs-validate-code-contract vs nil
-                   {:code "B" :system "http://example.com/contract-cs"})]
+    (let [result (vs-validate "B")]
       (is (true? (:result result)))
       (is (true? (:inactive result))))))
 

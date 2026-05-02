@@ -19,8 +19,8 @@
      to run one by id. `close-snomed!` when done."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest use-fixtures]]
+            [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.impl.compose :as compose]
-            [com.eldrix.hades.impl.registry :as registry]
             [com.eldrix.hades.impl.snomed :as snomed]
             [com.eldrix.hades.impl.snomed.expansion :as expansion]
             [com.eldrix.hades.snomed-db :as snomed-db]
@@ -62,36 +62,36 @@
 (def operations
   [ ;; --- $lookup -----------------------------------------------------------
    {:id :lookup/minimal
-    :fn #(registry/codesystem-lookup {:system snomed-uri :code (str multiple-sclerosis)})}
+    :fn #(hades/lookup (:svc @state) {:system snomed-uri :code (str multiple-sclerosis)})}
    {:id :lookup/full
-    :fn #(registry/codesystem-lookup {:system snomed-uri :code (str multiple-sclerosis)
+    :fn #(hades/lookup (:svc @state) {:system snomed-uri :code (str multiple-sclerosis)
                                       :property ["designation" "parent" "child" "definition"]})}
 
    ;; --- $validate-code ----------------------------------------------------
    {:id :validate-code/plain
-    :fn #(registry/codesystem-validate-code {:system snomed-uri :code (str diabetes-mellitus)})}
+    :fn #(hades/validate-code (:svc @state) {:system snomed-uri :code (str diabetes-mellitus)})}
    {:id :validate-code/display
-    :fn #(registry/codesystem-validate-code {:system snomed-uri :code (str diabetes-mellitus)
+    :fn #(hades/validate-code (:svc @state) {:system snomed-uri :code (str diabetes-mellitus)
                                              :display "Diabetes mellitus"})}
    {:id :validate-code/against-valueset
-    :fn #(registry/valueset-validate-code
+    :fn #(hades/validate-code (:svc @state)
            {:url (expand-url (str "ecl/<<" disease))
             :system snomed-uri :code (str diabetes-mellitus)})}
 
    ;; --- $subsumes — all four branches -------------------------------------
    {:id :subsumes/equivalent
-    :fn #(registry/codesystem-subsumes {:systemA snomed-uri :codeA (str diabetes-mellitus)
+    :fn #(hades/subsumes (:svc @state) {:systemA snomed-uri :codeA (str diabetes-mellitus)
                                         :systemB snomed-uri :codeB (str diabetes-mellitus)})}
    {:id :subsumes/subsumes
-    :fn #(registry/codesystem-subsumes {:systemA snomed-uri :codeA (str disease)
+    :fn #(hades/subsumes (:svc @state) {:systemA snomed-uri :codeA (str disease)
                                         :systemB snomed-uri :codeB (str influenza)})}
    {:id :subsumes/subsumed-by
-    :fn #(registry/codesystem-subsumes {:systemA snomed-uri :codeA (str type-2-dm)
+    :fn #(hades/subsumes (:svc @state) {:systemA snomed-uri :codeA (str type-2-dm)
                                         :systemB snomed-uri :codeB (str diabetes-mellitus)})}
-   ;; Historical-equivalence fallback — the branch that previously threw
-   ;; 'Don't know how to create ISeq from: java.lang.Long' on unrelated pairs.
+   ;; Historical-equivalence fallback — exercises the unrelated-pair
+   ;; branch that has to walk the historical-association refsets.
    {:id :subsumes/unrelated
-    :fn #(registry/codesystem-subsumes {:systemA snomed-uri :codeA (str asthma)
+    :fn #(hades/subsumes (:svc @state) {:systemA snomed-uri :codeA (str asthma)
                                         :systemB snomed-uri :codeB (str influenza)})}
 
    ;; --- $translate --------------------------------------------------------
@@ -101,34 +101,34 @@
    ;; (900000000000526001) to match the implicit ConceptMap shape that
    ;; tx-benchmark's CM01 sends.
    {:id :translate/historical
-    :fn #(registry/conceptmap-translate
+    :fn #(hades/translate (:svc @state)
            {:url    (str snomed-uri "?fhir_cm=900000000000526001")
             :system snomed-uri :code "56485000"
             :target snomed-uri})}
 
    ;; --- $expand via implicit-VS URLs --------------------------------------
    {:id :expand/ecl-small
-    :fn #(registry/valueset-expand {:url (expand-url (str "ecl/<<" diabetes-mellitus)) :count 50})}
+    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" diabetes-mellitus)) :count 50})}
    {:id :expand/ecl-medium
-    :fn #(registry/valueset-expand {:url (expand-url (str "ecl/<<" asthma)) :count 100})}
+    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" asthma)) :count 100})}
    {:id :expand/ecl-large
-    :fn #(registry/valueset-expand {:url (expand-url (str "ecl/<<" clinical-finding)) :count 100})}
+    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" clinical-finding)) :count 100})}
    {:id :expand/isa
-    :fn #(registry/valueset-expand {:url (expand-url (str "isa/" clinical-finding)) :count 100})}
+    :fn #(hades/expand (:svc @state) {:url (expand-url (str "isa/" clinical-finding)) :count 100})}
    {:id :expand/text-filter-rare
-    :fn #(registry/valueset-expand {:url (expand-url (str "ecl/<<" clinical-finding))
+    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" clinical-finding))
                                     :filter "asthma" :count 20})}
    {:id :expand/text-filter-common
-    :fn #(registry/valueset-expand {:url (expand-url (str "ecl/<<" clinical-finding))
+    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" clinical-finding))
                                     :filter "pain" :count 20})}
    {:id :expand/paged
-    :fn #(registry/valueset-expand {:url (expand-url (str "ecl/<<" clinical-finding))
+    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" clinical-finding))
                                     :offset 1000 :count 20})}
    ;; Mirrors tx-benchmark's EX03 shape: implicit "all of SNOMED" VS +
    ;; text filter. This is the shape that regressed from p95 128 ms to
    ;; 11 s at 50 VUs in the preflight comparison.
    {:id :expand/all-snomed-text-filter
-    :fn #(registry/valueset-expand {:url (str snomed-uri "?fhir_vs")
+    :fn #(hades/expand (:svc @state) {:url (str snomed-uri "?fhir_vs")
                                     :filter "diabetes" :count 100})}
 
    ;; --- Non-paginated direct calls to expansion/expand --------------------
@@ -143,21 +143,21 @@
    ;; --- $expand via hand-built compose (bypasses URL parsing) -------------
    {:id :compose/is-a
     :fn #(compose/expand-compose
-           nil
+           (:svc @state)
            {"include" [{"system" snomed-uri
                         "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}]}]}
            {:count 100})}
    ;; Mirrors tx-benchmark's EX05 shape: focus concept + attribute refinement.
    {:id :compose/refinement
     :fn #(compose/expand-compose
-           nil
+           (:svc @state)
            {"include" [{"system" snomed-uri
                         "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}
                                   {"property" "363698007" "op" "=" "value" "89187006"}]}]}
            {:count 50})}
    {:id :compose/multi-include
     :fn #(compose/expand-compose
-           nil
+           (:svc @state)
            {"include" [{"system" snomed-uri
                         "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}]}
                        {"system" snomed-uri
@@ -165,7 +165,7 @@
            {:count 100})}
    {:id :compose/include-exclude
     :fn #(compose/expand-compose
-           nil
+           (:svc @state)
            {"include" [{"system" snomed-uri
                         "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}]}]
             "exclude" [{"system" snomed-uri
@@ -176,14 +176,14 @@
    ;; no ECL bound. Exercises "all of SNOMED" text search.
    {:id :compose/all-snomed-text-filter
     :fn #(compose/expand-compose
-           nil
+           (:svc @state)
            {"include" [{"system" snomed-uri}]}
            {:filter "pain" :count 200})}
 
    ;; Mirrors tx-benchmark EX08 — is-a + attribute refinement + text filter.
    {:id :compose/refinement-text-filter
     :fn #(compose/expand-compose
-           nil
+           (:svc @state)
            {"include" [{"system" snomed-uri
                         "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}
                                   {"property" "116676008" "op" "=" "value" "72704001"}]}]}
@@ -206,35 +206,23 @@
 (defonce ^:private state (atom nil))
 
 (defn open-snomed!
-  "Open Hermes and register it as the SNOMED provider. Idempotent. Safe
-  from the REPL or from a fixture."
+  "Open Hermes, build a Hades service wrapping it, and stash both in
+  `state`. Idempotent. The bench fns read `(:svc @state)` directly."
   ([] (open-snomed! (snomed-db/assert-pinned-db!)))
   ([db-path]
    (or @state
-       (let [svc (hermes/open db-path)
-             snomed-svc (snomed/->HermesService svc)
-             saved {:svc svc
-                    :prior-cs @registry/codesystems
-                    :prior-vs @registry/valuesets
-                    :prior-cm @registry/conceptmaps}]
-         (registry/register-codesystem snomed-uri snomed-svc)
-         (registry/register-codesystem "http://snomed.info/sct|*" snomed-svc)
-         (registry/register-codesystem "sct" snomed-svc)
-         (registry/register-valueset snomed-uri snomed-svc)
-         (registry/register-valueset "http://snomed.info/sct|*" snomed-svc)
-         (registry/register-valueset "sct" snomed-svc)
-         (registry/register-concept-map-provider snomed-svc)
-         (reset! state saved)
+       (let [hermes-svc (hermes/open db-path)
+             snomed-svc (snomed/->HermesService hermes-svc)
+             svc        (hades/open [snomed-svc])]
+         (reset! state {:hermes hermes-svc :svc svc})
          svc))))
 
 (defn close-snomed!
-  "Close Hermes and restore registry state. Idempotent."
+  "Close the Hades service and the underlying Hermes connection."
   []
-  (when-let [{:keys [svc prior-cs prior-vs prior-cm]} @state]
-    (reset! registry/codesystems prior-cs)
-    (reset! registry/valuesets   prior-vs)
-    (reset! registry/conceptmaps prior-cm)
-    (hermes/close svc)
+  (when-let [{:keys [hermes svc]} @state]
+    (hades/close svc)
+    (hermes/close hermes)
     (reset! state nil)))
 
 ;; ─── Test-runner entry point (clj -M:bench) ───────────────────────────────

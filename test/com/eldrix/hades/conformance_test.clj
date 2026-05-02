@@ -6,9 +6,12 @@
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [com.eldrix.hades.impl.registry :as registry]
-            [com.eldrix.hades.impl.server :as server]
+            [com.eldrix.hades.core :as hades]
+            [com.eldrix.hades.http :as http]
+            [com.eldrix.hades.impl.load :as load-fhir]
+            [com.eldrix.hades.impl.loaders.fhir :as fhir-loaders]
             [com.eldrix.hades.impl.snomed :as snomed]
+            [com.eldrix.hades.impl.sqlite.provider :as sqlite-provider]
             [com.eldrix.hades.snomed-db :as snomed-db]
             [com.eldrix.hermes.core :as hermes])
   (:import (java.net ServerSocket)
@@ -36,6 +39,18 @@
 ;; update this constant, rerun conformance, update the baseline.
 (def ^:private tx-ecosystem-pinned-rev
   "fb9078f6102088e3307e5b77c255bd41453fdcec")
+
+;; Pinned LOINC release. tx-ecosystem fixtures expect 2.81; running
+;; against any other release introduces display-string drift exactly
+;; like the SNOMED 20250201 pin guards against. Provisioning the .db
+;; from a release directory is a separate explicit step:
+;;
+;;   clj -M:run import --db .hades/loinc-2.81.db /path/to/Loinc_2.81
+;;
+;; If the .db is absent, `start!` registers SNOMED only and logs a
+;; warning — local dev without LOINC still runs SNOMED conformance.
+(def ^:private loinc-pinned-version "2.81")
+(def ^:private loinc-db-path ".hades/loinc-2.81.db")
 
 ;; ---------------------------------------------------------------------------
 ;; Server state
@@ -106,40 +121,65 @@
   (with-open [sock (ServerSocket. 0)]
     (.getLocalPort sock)))
 
+(defn- loinc-providers!
+  "Open the pinned LOINC SQLite catalogue providers if the .db is
+  present. Returns `{:providers [..] :datasource ds}` or nil."
+  []
+  (if-not (.exists (io/file loinc-db-path))
+    (do (log/warn "LOINC db not found; LOINC conformance tests will fail."
+                  {:expected-path loinc-db-path
+                   :provision (str "clj -M:run import --db " loinc-db-path
+                                   " /path/to/Loinc_" loinc-pinned-version)})
+        nil)
+    (let [{:keys [datasource codesystem valueset conceptmap]}
+          (sqlite-provider/open-providers loinc-db-path)]
+      (log/info "Registered LOINC for conformance"
+                {:codesystem-impl? (some? codesystem)
+                 :valueset-impl?   (some? valueset)
+                 :conceptmap-impl? (some? conceptmap)})
+      {:providers  (filterv some? [codesystem valueset conceptmap])
+       :datasource datasource})))
+
 (defn start!
   "Start a Hades server with Hermes. Stores state for subsequent calls.
   With no arguments, opens the canonical pinned SNOMED DB — provision it
   first with `clj -X:build-db`. Pass `:snomed PATH` to open a different
   Hermes DB instead (e.g. for ad-hoc probing).
+
+  If `.hades/loinc-<pinned-version>.db` is present, the LOINC SQLite
+  providers are also opened so the IG's LOINC conformance suites can run.
   Returns the server URL."
   [& {:keys [snomed port] :or {port 0}}]
   (when @state
     (throw (ex-info "Server already running. Call (stop!) first." {})))
   (let [snomed-db-path (or snomed (canonical-snomed-db!))
         port (if (zero? port) (free-port) port)
-        svc (hermes/open snomed-db-path)
-        snomed-svc (snomed/->HermesService svc)
-        srv (server/make-server {:port port :max-expansion-size 1000})]
-    (registry/register-codesystem "http://snomed.info/sct" snomed-svc)
-    (registry/register-codesystem "http://snomed.info/sct|*" snomed-svc)
-    (registry/register-codesystem "sct" snomed-svc)
-    (registry/register-valueset "http://snomed.info/sct" snomed-svc)
-    (registry/register-valueset "http://snomed.info/sct|*" snomed-svc)
-    (registry/register-valueset "sct" snomed-svc)
-    (registry/register-concept-map-provider snomed-svc)
-    (server/start! srv)
+        hermes-svc (hermes/open snomed-db-path)
+        snomed-svc (snomed/->HermesService hermes-svc)
+        loinc-bundle (loinc-providers!)
+        all-providers (into [snomed-svc] (:providers loinc-bundle))
+        svc (hades/open all-providers)
+        srv (http/make-server svc {:port port :max-expansion-size 1000})]
+    (http/start! srv)
     (let [url (str "http://localhost:" port "/fhir")]
-      (reset! state {:server srv :port port :svc svc
+      (reset! state {:server srv :port port
+                     :hermes hermes-svc
+                     :svc svc
+                     :loinc-ds (:datasource loinc-bundle)
                      :snomed-db-path snomed-db-path :url url})
       (println (format "Server started: %s" url))
       url)))
 
 (defn stop!
-  "Stop the running test server and close Hermes."
+  "Stop the running test server and close Hermes + the LOINC SQLite
+  datasource (if any)."
   []
-  (when-let [{:keys [server svc]} @state]
-    (when server (server/stop! server))
-    (when svc (.close svc))
+  (when-let [{:keys [server hermes svc loinc-ds]} @state]
+    (when server (http/stop! server))
+    (when svc (hades/close svc))
+    (when hermes (.close hermes))
+    (when (and loinc-ds (instance? java.io.Closeable loinc-ds))
+      (.close ^java.io.Closeable loinc-ds))
     (reset! state nil)
     (println "Server stopped.")))
 
@@ -151,15 +191,21 @@
       (throw (ex-info "No server to restart. Call (start!) first." {})))
     (stop!)
     (doseq [ns-sym '[com.eldrix.hades.impl.protocols
+                     com.eldrix.hades.impl.canonical
                      com.eldrix.hades.impl.wire
                      com.eldrix.hades.impl.metadata
                      com.eldrix.hades.impl.snomed
                      com.eldrix.hades.impl.compose
-                     com.eldrix.hades.impl.fhir-codesystem
-                     com.eldrix.hades.impl.fhir-valueset
-                     com.eldrix.hades.impl.registry
+                     com.eldrix.hades.impl.fhir-extract
+                     com.eldrix.hades.impl.loaders.fhir
+                     com.eldrix.hades.impl.in-memory
+                     com.eldrix.hades.impl.index.memory
+                     com.eldrix.hades.impl.sqlite.db
+                     com.eldrix.hades.impl.sqlite.provider
+                     com.eldrix.hades.impl.composite
                      com.eldrix.hades.impl.http
-                     com.eldrix.hades.impl.server]]
+                     com.eldrix.hades.core
+                     com.eldrix.hades.http]]
       (require ns-sym :reload))
     (start! :snomed snomed-db-path :port port)))
 
@@ -773,12 +819,14 @@
                    (catch Exception _ nil))))
          vec)))
 
-(defn make-test-ctx
-  "Build an overlay context from test resources for REPL testing."
-  ([resources] (make-test-ctx resources nil))
-  ([resources request-params]
-   (let [overlay (server/build-tx-ctx resources)]
-     (assoc overlay :request (merge registry/default-request request-params)))))
+(defn make-test-svc
+  "Return a service derived from `(svc)` with the given test resources
+  layered on as overlay providers. For REPL testing of operations
+  scoped to a tx-resource bundle."
+  [resources]
+  (when-let [base (:svc @state)]
+    (let [providers (vec (keep load-fhir/from-fhir resources))]
+      (hades/with-overlays base providers))))
 
 (defn- find-test-case
   "Find a test case definition by name. Returns {:test tc :suite suite-def}."

@@ -1,280 +1,189 @@
 (ns com.eldrix.hades.impl.protocols
   "Protocols defining a terminology service.
 
-  These definitions decouple the web server (currently using HAPI) from the
-  underlying implementations which can then be dynamically registered at
-  runtime.
+  Implementations participate in a Hades service by satisfying one or
+  more of `CodeSystem`, `ValueSet`, and `ConceptMap`. The composite
+  layer dispatches on URL/version, calls the matching protocol method,
+  and aggregates cross-provider concerns.
 
-  The HL7 FHIR TerminologyService is defined in https://hl7.org/fhir/terminology-service.html
+  Spec definitions are split across three sibling namespaces so input
+  and output field names don't collide:
 
-  These protocols are *based* on the definitions of TerminologyService, but with
-  some changes given that they reflect internal hades abstractions. Therefore:
-  - attributes are pluralised when they are one-to-many relationships
-  - duplication reduced; e.g. implementations do not need to support both
-  system/code and Coding - it is expected that caller will do this."
-  (:require [clojure.spec.alpha :as s])
-  (:import (java.time LocalDate)))
+    `impl.protocols`         — protocols + the loader/indexer
+                                interchange (`::fhir-data`).
+    `impl.protocols.input`   — operation parameter specs.
+    `impl.protocols.result`  — protocol return-value specs.
 
+  The HL7 FHIR TerminologyService is defined in
+  https://hl7.org/fhir/terminology-service.html. These protocols are
+  *based* on that definition but reflect Hades' internal abstractions:
+  attributes are pluralised when one-to-many; callers split system/code
+  and Coding shapes themselves rather than each impl handling both."
+  (:require [clojure.spec.alpha :as s]))
 
 ;; ---------------------------------------------------------------------------
-;; Input specs (operation parameters)
+;; Loader-to-indexer interchange (fhir-data)
+;;
+;; `fhir-data` is the tagged map emitted by loaders and consumed by
+;; the indexer. Variants describe a CodeSystem header, a single
+;; concept (after recursive flattening), a ValueSet, or a ConceptMap.
+;; This pipeline sits next to the protocol abstractions but isn't
+;; itself an input or a return value, so the specs live here rather
+;; than in `input` or `result`.
 ;; ---------------------------------------------------------------------------
 
 (s/def ::url string?)
-(s/def ::code string?)
 (s/def ::system string?)
+(s/def ::code string?)
 (s/def ::version (s/nilable string?))
 (s/def ::display (s/nilable string?))
-(s/def ::userSelected boolean?)
-(s/def ::date #(instance? LocalDate %))
-(s/def ::displayLanguage string?)
-(s/def ::properties (s/coll-of ::code))
-(s/def ::canonical string?)
-(s/def ::useSupplements (s/coll-of ::canonical))
-;; Supplement canonicals declared on a ValueSet via the
-;; http://hl7.org/fhir/StructureDefinition/valueset-supplement extension.
-(s/def ::supplements (s/coll-of ::canonical))
-(s/def ::codesystem-lookup (s/keys :req-un [::code ::system]
-                                   :opt-un [::version ::date ::displayLanguage ::properties ::useSupplements]))
-
-;; ---------------------------------------------------------------------------
-;; Return value specs (data contracts between layers)
-;; ---------------------------------------------------------------------------
-
-;; Issue — structured problem report used in validate-code and expansion results.
-;; Matches the FHIR OperationOutcome issue structure.
-;; Note: :type uses a namespaced spec to avoid clashing with clojure.core/type.
-(s/def ::severity #{"fatal" "error" "warning" "information"})
-(s/def ::type #{"code-invalid" "invalid" "not-found" "not-supported"
-                 "business-rule" "exception" "processing" "informational"
-                 "too-costly"})
-(s/def ::details-code string?)
-(s/def ::text string?)
-(s/def ::expression (s/coll-of string?))
-(s/def ::message-id string?)
-(s/def ::issue
-  (s/keys :req-un [::severity ::type ::text]
-          :opt-un [::details-code ::expression ::message-id]))
-(s/def ::issues (s/coll-of ::issue))
-
-;; Return value code — FHIR codes are strings but hades currently uses keywords
-;; in results (e.g. :73211009). This will be migrated to strings in future; for
-;; now the return specs accept keywords. The input ::code spec stays string?.
-(s/def ::code-or-kw (s/or :string string? :keyword keyword?))
-
-;; Validate-code result — returned by cs-validate-code and vs-validate-code.
-;; Protocol impls must return a complete result; no downstream patching.
-(s/def ::result boolean?)
-(s/def ::inactive boolean?)
-(s/def ::inactive-status (s/nilable #{"inactive" "retired" "deprecated"}))
-(s/def ::normalized-code (s/or :string string? :keyword keyword?))
-(s/def ::message string?)
-(s/def ::not-found boolean?)
-(s/def ::x-unknown-system (s/nilable string?))
-(s/def ::x-caused-by-unknown-system (s/nilable string?))
-(s/def ::validate-result
-  (s/and (s/keys :req-un [::result]
-                 :opt-un [::system ::version ::display
-                          ::inactive ::inactive-status ::normalized-code
-                          ::message ::issues ::not-found
-                          ::x-unknown-system ::x-caused-by-unknown-system])
-         ;; :code in results is keyword (migration: will become string)
-         #(or (nil? (:code %)) (s/valid? ::code-or-kw (:code %)))))
-
-;; Designation — an alternative name for a concept, typically in a
-;; different language or for a different use (synonym, FSN, etc.).
-;; Mirrors FHIR CodeSystem.concept.designation.
-(s/def ::language keyword?)
-(s/def ::value string?)
-(s/def ::use (s/keys :req-un [::system ::code] :opt-un [::display]))
-(s/def ::designation
-  (s/keys :req-un [::value]
-          :opt-un [::language ::use]))
-
-;; Property — a concept property returned by $lookup.
-;; :code is the property name (keyword), :value is the property value
-;; (boolean, string, keyword for coded values, or number).
-;; Optional :description provides a human-readable label for coded values.
-;; Optional :code-display provides the display for the property type itself.
-(s/def ::property-code (s/or :keyword keyword? :string string?))
-(s/def ::property-value (s/or :boolean boolean? :string string?
-                              :keyword keyword? :number number?))
-(s/def ::property
-  (s/and #(contains? % :code)
-         #(s/valid? ::property-code (:code %))
-         #(contains? % :value)
-         #(s/valid? ::property-value (:value %))))
-
-;; Lookup result — returned by cs-lookup.
 (s/def ::name (s/nilable string?))
+(s/def ::title (s/nilable string?))
 (s/def ::definition (s/nilable string?))
-(s/def ::abstract boolean?)
-(s/def ::properties (s/nilable (s/coll-of ::property)))
-(s/def ::designations (s/nilable (s/coll-of ::designation)))
-(s/def ::lookup-result
-  (s/and (s/keys :req-un [::display ::system]
-                 :opt-un [::name ::version ::definition ::abstract
-                          ::properties ::designations])
-         ;; :code in results is keyword (migration: will become string)
-         #(s/valid? ::code-or-kw (:code %))))
-
-;; Expansion concept — a single entry in an expansion result.
-;; :code here is always a string (compose engine returns strings).
-(s/def ::expansion-concept
-  (s/keys :req-un [::code ::system]
-          :opt-un [::display ::version ::inactive ::inactive-status
-                   ::abstract ::designations ::properties]))
-
-;; Used codesystem — metadata about a CodeSystem consulted during expansion.
-(s/def ::uri string?)
+(s/def ::description (s/nilable string?))
 (s/def ::status #{"active" "draft" "retired"})
 (s/def ::experimental boolean?)
 (s/def ::standards-status (s/nilable string?))
-(s/def ::used-codesystem
-  (s/keys :req-un [::uri]
-          :opt-un [::status ::experimental ::standards-status]))
+(s/def ::case-sensitive boolean?)
+(s/def ::hierarchy-meaning (s/nilable string?))
+(s/def ::content (s/nilable string?))
+(s/def ::property-defs (s/coll-of map?))
+(s/def ::filter-defs (s/coll-of map?))
+(s/def ::metadata (s/nilable map?))
+(s/def ::parent-code (s/nilable string?))
 
-;; Compose pin — a system+version pair locked by the compose definition.
-(s/def ::compose-pin (s/keys :req-un [::system] :opt-un [::version]))
+;; Canonical reference, optionally pinned with `|version`.
+(s/def ::canonical-with-version
+  (s/and string? #(re-matches #"[^|]+(\|.+)?" %)))
 
-;; Expansion result — returned by vs-expand. A map, not a bare seq.
-;; Carries concepts plus metadata so the server layer doesn't need to
-;; re-derive used-codesystems or compose-pinned versions.
-(s/def ::concepts (s/coll-of ::expansion-concept))
-(s/def ::total nat-int?)
-(s/def ::used-codesystems (s/coll-of ::used-codesystem))
-(s/def ::used-valuesets (s/coll-of string?))
-(s/def ::compose-pins (s/coll-of ::compose-pin))
-(s/def ::display-language (s/nilable string?))
-(s/def ::expansion-result
-  (s/keys :req-un [::concepts]
-          :opt-un [::total ::used-codesystems ::used-valuesets
-                   ::compose-pins ::issues ::display-language]))
+(s/def ::supplements-target (s/nilable ::canonical-with-version))
 
-;; Resource metadata — returned by cs-resource and vs-resource.
-(s/def ::title (s/nilable string?))
-(s/def ::description (s/nilable string?))
-(s/def ::resource-meta
-  (s/keys :opt-un [::url ::version ::name ::title ::status
-                   ::description ::experimental]))
+;; A `:source-path` is normally a filesystem path string, but the loader
+;; uses sentinel keywords for synthetic origins (tx-resource POST bodies
+;; and inline ValueSet parameters).
+(s/def ::source-path
+  (s/or :path string?
+        :sentinel #{:tx-resource :inline-valueset}))
 
-;; Query — the unified request passed to cs-find-matches. Carries every
-;; constraint a provider must honour: concept-level filters, request
-;; text, display language, requested properties, pagination and active
-;; scope. Providers MUST return concepts that satisfy the ENTIRE query
-;; (delegating what they can't do natively to the shared defaults in
-;; `com.eldrix.hades.cs-defaults`). No partial handling, no :applied
-;; signalling — compose trusts the return value.
-;;
-;; Spec names live under the :query/ keyword namespace to avoid
-;; colliding with CS result-field specs (e.g. ::text on an issue).
-(s/def :query/filter-entry
-  (s/keys :req-un [:query/property :query/op :query/value]))
-(s/def :query/property string?)
-(s/def :query/op string?)
-(s/def :query/value string?)
-(s/def :query/filters (s/nilable (s/coll-of :query/filter-entry)))
-(s/def :query/text (s/nilable string?))
-(s/def :query/max-hits (s/nilable nat-int?))
-(s/def :query/active-only (s/nilable boolean?))
-;; Note: offset/skip is deliberately NOT part of the Query. Lucene (via
-;; Hermes) currently lacks efficient search-after pagination, so emulating
-;; skip in a provider means materialising the discarded prefix. Compose
-;; applies offset itself after dedup/exclude, which is also the only
-;; place it can be correct for multi-include expansions. When Hermes
-;; gains native search-after, reintroduce :skip in the Query.
-(s/def ::query
-  (s/keys :req-un [::system]
-          :opt-un [::version ::displayLanguage ::properties
-                   :query/filters :query/text :query/max-hits
-                   :query/active-only]))
+(s/def ::codesystem-meta-data
+  (s/keys :req-un [::url]
+          :opt-un [::version ::case-sensitive ::hierarchy-meaning ::content
+                   ::name ::title ::description ::status ::experimental
+                   ::standards-status ::property-defs ::filter-defs
+                   ::metadata ::source-path]))
 
-;; Match result — returned by cs-find-matches. Always a map; :total is
-;; optional and populated only when cheaply knowable by the provider.
-(s/def ::match-result
-  (s/keys :req-un [::concepts]
-          :opt-un [::total ::issues]))
+;; :designations / :properties on a concept are not in the s/keys form
+;; — their names would collide with result-level `::result/designations`
+;; / `::result/properties`. Indexer-level invariants:
+;;  - :designations is a coll of result/designation maps
+;;  - :properties is a coll of raw FHIR string-keyed property maps
+(s/def ::concept-data
+  (s/keys :req-un [::system ::code]
+          :opt-un [::version ::display ::definition
+                   ::parent-code ::source-path]))
 
-;; ConceptMap $translate — a single match entry plus the overall result.
-;; :equivalence uses the FHIR R4 ConceptMapEquivalence value set; R5
-;; servers may downstream-translate to the newer :relationship codes.
-(s/def ::equivalence
-  #{"relatedto" "equivalent" "equal" "wider" "subsumes"
-    "narrower" "specializes" "inexact" "unmatched" "disjoint"})
-(s/def ::match
-  (s/keys :req-un [::equivalence ::system ::code]
-          :opt-un [::display ::version]))
-(s/def ::matches (s/coll-of ::match))
-(s/def ::translate-result
-  (s/keys :req-un [::result]
-          :opt-un [::message ::matches ::issues]))
+(s/def ::compose map?)
+(s/def ::expansion map?)
 
-;; ConceptMap description — a provider-advertised ConceptMap. Providers
-;; may expose multiple ConceptMaps (e.g. forward + reverse of a SNOMED
-;; map refset); each tuple gets indexed by both url and (source, target)
-;; system pair so callers can $translate with either shape of params.
-(s/def ::cm-description
-  (s/keys :req-un [::url ::system ::target]
-          :opt-un [::title ::description ::version]))
+(s/def ::valueset-data
+  (s/keys :req-un [::url]
+          :opt-un [::version ::metadata ::compose ::expansion ::source-path]))
 
+(s/def ::source-uri (s/nilable string?))
+(s/def ::source-version (s/nilable string?))
+(s/def ::target-uri (s/nilable string?))
+(s/def ::target-version (s/nilable string?))
+(s/def ::groups (s/coll-of map?))
 
+(s/def ::conceptmap-data
+  (s/keys :req-un [::url]
+          :opt-un [::version ::source-uri ::source-version ::target-uri
+                   ::target-version ::metadata ::groups ::source-path]))
+
+(defmulti fhir-data-type :type)
+(defmethod fhir-data-type :codesystem-meta [_] ::codesystem-meta-data)
+(defmethod fhir-data-type :concept        [_] ::concept-data)
+(defmethod fhir-data-type :valueset       [_] ::valueset-data)
+(defmethod fhir-data-type :conceptmap     [_] ::conceptmap-data)
+
+(s/def ::fhir-data (s/multi-spec fhir-data-type :type))
+
+;; Canonical concept payload used by non-FHIR loaders and persistent
+;; indexed providers. Currently identical to `::concept-data`; kept
+;; under a distinct name so storage backends that need to diverge from
+;; the FHIR-loader shape can without churning every concept consumer.
+(s/def ::canonical-concept ::concept-data)
+
+;; ---------------------------------------------------------------------------
+;; Protocols
+;; ---------------------------------------------------------------------------
 
 (defprotocol CodeSystem
-  "The CodeSystem resource is used to declare the existence of and describe a
-  code system or code system supplement and its key properties, and optionally
-  define a part or all of its content."
+  "The CodeSystem resource is used to declare the existence of and
+  describe a code system or code system supplement and its key
+  properties, and optionally define a part or all of its content."
   :extend-via-metadata true
+  (cs-metadata [this]
+    "Return a seq of `::result/cs-metadata` maps — one per CodeSystem
+    this provider exposes. Called by the boot driver at registration
+    time to discover the provider's `(url, version)` keyspace; impls
+    should cache any expensive introspection.")
   (cs-resource [this params]
     "Get description of codesystem and key properties as per
     https://hl7.org/fhir/codesystem.html")
   (cs-lookup [this params]
     "Given a code/system, get additional details about the concept,
-    including definition, status, designations, and properties. One of the
-    products of this operation is a full decomposition of a code from a
-    structured terminology.")
+    including definition, status, designations, and properties. One of
+    the products of this operation is a full decomposition of a code
+    from a structured terminology.")
   (cs-validate-code [this params]
-    "Validate that a coded value is in the code system. The operation returns a
-    result (true / false), an error message, and the recommended display for the
-    code.")
+    "Validate that a coded value is in the code system. The operation
+    returns a result (true / false), an error message, and the
+    recommended display for the code.")
   (cs-subsumes [this params]
-    "Test the subsumption relationship between code/Coding A and code/Coding B
-    given the semantics of subsumption in the underlying code system")
+    "Test the subsumption relationship between code/Coding A and
+    code/Coding B given the semantics of subsumption in the underlying
+    code system")
   (cs-find-matches [this query]
-    "Return the concepts that satisfy the ENTIRE query (::query). Providers
-    must honour every supplied constraint — filters, text, bounds, properties,
-    activeOnly, displayLanguage — either natively or by delegating to the
-    shared helpers in `com.eldrix.hades.cs-defaults`. Returns a ::match-result
-    `{:concepts [...]  :total? (optional)}`. Returning a lazy seq for
-    :concepts is fine; only :total needs to be computed eagerly when known."))
+    "Return the concepts that satisfy the ENTIRE query
+    (`::input/query`). Providers must honour every supplied constraint
+    — filters, text, bounds, properties, activeOnly, displayLanguage —
+    either natively or by delegating to shared helpers. Returns a
+    `::result/match` map. Returning a lazy seq for `:concepts` is fine;
+    only `:total` needs to be computed eagerly when known."))
 
 (defprotocol ValueSet
   "A value set is selection of codes for use in a particular context."
   :extend-via-metadata true
+  (vs-metadata [this]
+    "Return a seq of `::result/vs-metadata` maps — one per ValueSet
+    this provider exposes. Called by the boot driver at registration
+    time.")
   (vs-resource [this params])
-  (vs-expand [this ctx params]
-    "The definition of a value set is used to create a simple collection of
-    codes suitable for use for data entry or validation.
-    ctx is the overlay/request context (::registry/ctx), or nil.")
-  (vs-validate-code [this ctx params]
-    "Validate that a coded value is in the set of codes allowed by a value set.
-    ctx is the overlay/request context (::registry/ctx), or nil."))
+  (vs-expand [this svc params]
+    "Expand a ValueSet to its constituent codes. `svc` is the
+    TerminologyService (possibly with overlays applied via
+    `core/with-overlays`); compose calls protocol methods on `svc`
+    for cross-CodeSystem lookups.")
+  (vs-validate-code [this svc params]
+    "Validate that a coded value is in the set of codes allowed by a
+    value set. `svc` is the TerminologyService (possibly with overlays
+    applied)."))
 
 (defprotocol ConceptMap
   "A ConceptMap resource describes mappings between concepts in
   different CodeSystems or ValueSets."
   :extend-via-metadata true
-  (cm-describe [this]
-    "Return a seq of ::cm-description maps — one per ConceptMap this
-    provider exposes. The registry uses these to build its url-based
-    and (source, target) system-pair indices. A provider handling both
-    directions of a map must emit two descriptions. Called at
+  (cm-metadata [this]
+    "Return a seq of `::result/cm-metadata` maps — one per ConceptMap
+    this provider exposes. The composite uses these to build its
+    url-based and (source, target) system-pair indices. A provider
+    handling both directions of a map must emit two entries. Called at
     registration time; impls should cache any expensive introspection.")
   (cm-resource [this params])
   (cm-translate [this params]
-    "Given a source Coding, return a ::translate-result. Params carry
-    :url (the ConceptMap canonical, possibly with implicit-form query
-    parameters), :system, :code, and optionally :target and :version.
-    Impls must return a complete ::translate-result — no downstream
-    patching."))
-
-
+    "Given a source Coding, return a `::result/translate`. Params carry
+    `:url` (the ConceptMap canonical, possibly with implicit-form query
+    parameters), `:system`, `:code`, and optionally `:target` and
+    `:version`. Impls must return a complete `::result/translate` —
+    no downstream patching."))

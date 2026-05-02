@@ -1,0 +1,15 @@
+{
+  "resourceType": "CodeSystem",
+  "url": "http://example.com/loader-test/cs",
+  "version": "1.0",
+  "name": "LoaderTestCS",
+  "status": "active",
+  "content": "complete",
+  "caseSensitive": true,
+  "concept": [
+    {"code": "A", "display": "Alpha"},
+    {"code": "B", "display": "Beta",
+     "concept": [{"code": "B1", "display": "Beta one"}]},
+    {"code": "C", "display": "Gamma"}
+  ]
+}

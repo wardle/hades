@@ -74,27 +74,26 @@ Then use `clj-nrepl-eval` to start a Hades server and test interactively:
 # Start Hermes + Hades on port 8080
 clj-nrepl-eval -p <port> '
 (require (quote [com.eldrix.hermes.core :as hermes]))
-(require (quote [com.eldrix.hades.impl.server :as server]))
-(require (quote [com.eldrix.hades.impl.registry :as registry]))
+(require (quote [com.eldrix.hades.core :as hades]))
+(require (quote [com.eldrix.hades.http :as http]))
 (require (quote [com.eldrix.hades.impl.snomed :as snomed]))
 
-(def svc (hermes/open "/path/to/snomed.db"))
-(def snomed-svc (snomed/->HermesService svc))
-(registry/register-codesystem "http://snomed.info/sct" snomed-svc)
-(registry/register-valueset "http://snomed.info/sct" snomed-svc)
-(def srv (server/start! (server/make-server {:port 8080})))
+(def hermes-svc (hermes/open "/path/to/snomed.db"))
+(def svc (hades/open [(snomed/->HermesService hermes-svc)]))
+(def srv (http/start! (http/make-server svc {:port 8080})))
 '
 
 # Test an endpoint via HTTP
 curl -s 'http://localhost:8080/fhir/CodeSystem/$lookup?system=http://snomed.info/sct&code=73211009'
 
-# Test the same thing internally — returns the plain Clojure map before HAPI serialisation
+# Test the same thing internally — returns the plain Clojure map
+# before serialisation
 clj-nrepl-eval -p <port> '
-(registry/codesystem-lookup {:system "http://snomed.info/sct" :code "73211009"})
+(hades/lookup svc {:system "http://snomed.info/sct" :code "73211009"})
 '
 
 # Stop
-clj-nrepl-eval -p <port> '(server/stop! srv) (.close svc)'
+clj-nrepl-eval -p <port> '(http/stop! srv) (hades/close svc)'
 ```
 
 ### REPL-driven conformance testing (the default workflow)
@@ -170,8 +169,8 @@ Source layout:
   stable surface yet).
 - `src/com/eldrix/hades/impl/**` — library internals. Subject to breaking
   changes; nothing outside the project should depend on these namespaces.
-- `src/com/eldrix/hades/cmd/**` — CLI application (entry point +
-  option parsing). Not part of the library surface.
+- `src/com/eldrix/hades/cmd.clj` + `impl/cli.clj` — CLI application
+  (entry point + option parsing). Not part of the library surface.
 
 The internal layering under `impl/`:
 
@@ -182,47 +181,55 @@ impl/http.clj                  Pedestal HTTP layer — routes, interceptors,
 impl/wire.clj                  Pure FHIR JSON map builders (string-keyed)
 impl/metadata.clj
     │
-impl/registry.clj              Lookup & dispatch — routes requests to implementations
+impl/composite.clj             TerminologyService — dispatch by URL/version,
+                               cross-provider concerns (status warnings,
+                               supplements check, CodeableConcept aggregation)
     │
 impl/protocols.clj             Abstract interfaces (CodeSystem, ValueSet, ConceptMap)
     │
 impl/snomed.clj                SNOMED CT via Hermes
-impl/fhir_codesystem.clj       File-backed CodeSystem (+ ValueSet impl for CS-backed VS)
-impl/fhir_valueset.clj         File-backed ValueSet (compose expansion + validate)
+impl/in_memory.clj             In-memory deftypes + SupplementedCodeSystem wrapper
+impl/sqlite/provider.clj       SQLite-backed catalogue providers
 impl/compose.clj               ValueSet compose engine (include/exclude, filter, etc.)
 
-impl/server.clj                Thin façade that exposes `make-server` over http.clj
-cmd/core.clj                   CLI entry point (-main)
-cmd/impl/cli.clj               CLI option parsing
+impl/loaders/fhir.clj          FHIR JSON → fhir-data
+impl/loaders/loinc.clj         LOINC release dir → fhir-data
+impl/index/memory.clj          fhir-data → in-memory providers
+impl/index/sqlite.clj          fhir-data → SQLite container
+impl/sqlite/db.clj             SQLite open/create/schema/pragmas
+
+cmd.clj                        CLI entry point (-main)
+impl/cli.clj                   CLI option parsing
 ```
 
 ### Layering rules (strict)
 
 - **HTTP concerns live in `impl/http.clj` only.** Pedestal interceptors, request
   parsing, routing, content negotiation, and response-shape decisions all
-  stay there. No HTTP details leak into the registry or protocol impls.
+  stay there. No HTTP details leak into the composite or protocol impls.
 - **Wire-format shaping lives in `impl/wire.clj` / `impl/metadata.clj` only.**
   They are pure functions that produce string-keyed FHIR JSON maps. Charred
   serialises those maps in the content-negotiation interceptor.
-- **Registry mediates all access.** `impl/http.clj` handlers call registry
-  functions, not protocol methods directly.
+- **Composite mediates all access.** `impl/http.clj` handlers call the
+  service-level operation functions in `core` (which delegate to the
+  composite), not protocol methods directly.
 
 ### Layer responsibilities (strict)
 
-- **Protocol impls** (snomed.clj, fhir_codesystem.clj, fhir_valueset.clj) know
+- **Protocol impls** (snomed.clj, in_memory.clj, sqlite/provider.clj) know
   their domain. They return **complete, self-describing results** that match
   the specs in `impl/protocols.clj` (e.g. `::protos/validate-result`,
   `::protos/expansion-result`). No downstream layer should need to patch,
   enrich, or re-derive fields.
-- **Registry** dispatches to the right impl by URL/version and handles
+- **Composite** dispatches to the right impl by URL/version and handles
   version resolution (`force-system-version` / `system-version` /
   `check-system-version`). It does **not** patch results, add issues
   retroactively, look up other resources to fill gaps, or fix FHIRPath
-  expressions. If the registry is doing post-call surgery on a result, the
+  expressions. If the composite is doing post-call surgery on a result, the
   impl's return value is incomplete — fix the impl.
 - **HTTP handlers are thin.** Each operation handler parses its parameters
-  (from GET query or POST `Parameters`), calls the registry, and stores the
-  result on the Pedestal context. The per-operation response interceptor
+  (from GET query or POST `Parameters`), calls the operation, and stores
+  the result on the Pedestal context. The per-operation response interceptor
   (`:leave`) inspects the result and determines HTTP status / response shape
   (Parameters, ValueSet, or OperationOutcome). Handlers don't transform data,
   don't decide HTTP status, and don't build wire types directly.
@@ -235,33 +242,24 @@ cmd/impl/cli.clj               CLI option parsing
 
 ### Request-scoped overlays (`tx-resource`)
 
-FHIR operations accept `tx-resource` parameters — temporary CodeSystem /
-ValueSet resources scoped to a single request. The overlay is built by the
-`tx-ctx` interceptor and attached to the Pedestal request as `:hades/ctx`.
-From there `ctx` flows as an ordinary function argument: handler → registry
-→ protocol impl. Registry lookup functions accept an optional first argument
-`ctx` — a map that may contain `:codesystems`, `:valuesets`, and/or
-`:conceptmaps` overlay maps. Overlays are checked before global atoms.
+FHIR operations accept `tx-resource` parameters — temporary CodeSystem,
+ValueSet, and ConceptMap resources scoped to a single request. The
+`derive-svc` interceptor in `impl/http.clj` parses them, builds providers
+via `loaders/fhir` + `index/memory` + `in_memory/build-from-fhir-data`,
+and folds them onto the base service via `core/with-overlays`. The
+result replaces `:hades/svc` for the rest of the interceptor chain.
 
-When `ctx` is nil or absent, only global registrations are consulted.
+From a handler's view, the request-scoped overlay is invisible: every
+handler reads `:hades/svc` and calls the operation functions on `core`
+(`hades/lookup`, `hades/expand`, etc.). The composite dispatches to
+overlay providers first, then to base providers, by URL/version.
 
-### ctx structure (strict)
-
-The `ctx` map has exactly two concerns:
-
-1. **Overlays** (top-level keys): `:codesystems`, `:valuesets`, `:conceptmaps` —
-   maps of `{uri → protocol-impl}` for tx-resource scoped resources.
-2. **Request parameters** (`:request` key): a map of operation parameters that
-   affect behaviour across layers. Spec'd as `::registry/request`.
-
-**All FHIR operation parameters belong in `:request`.** This includes:
-- Version control: `:system-version`, `:force-system-version`, `:check-system-version`
-- Display: `:lenient-display-validation`, `:display-language`
-- Scoping: `:value-set-version`
-
-**Never add FHIR operation parameters as top-level ctx keys.** The top level is
-reserved for overlays. If a new parameter needs to flow through ctx, add it to
-the `:request` map and update `::registry/request` spec.
+Operation parameters that affect behaviour across layers
+(`system-version`, `force-system-version`, `check-system-version`,
+`lenient-display-validation`, `display-language`, `value-set-version`)
+flow as flat keys on the `params` map passed to operation functions —
+parsed once into `:hades/flags` by the same interceptor and merged into
+each handler's params via `merge-flags`.
 
 ## Code style
 
@@ -279,13 +277,14 @@ the `:request` map and update `::registry/request` spec.
 - Predicates end in `?`.
 - Conversion functions use `->` (e.g., `map->parameters`).
 - Protocol methods are prefixed by resource type: `cs-`, `vs-`, `cm-`.
-- Registry functions match operation names: `codesystem-lookup`, `valueset-expand`.
+- Operation functions in `core` match FHIR operation names: `lookup`,
+  `expand`, `validate-code`, `subsumes`, `translate`.
 - Use domain language from the FHIR spec, not invented synonyms.
 
 ### Data
 - Use plain Clojure maps as the data interchange format between layers.
 - **Keyword keys everywhere inside Clojure** (`:code`, `:system`, `:display`,
-  `:result`, `:version`). This applies to protocol return values, registry
+  `:result`, `:version`). This applies to protocol return values, composite
   results, compose output, and all internal data.
 - **String keys only at serialisation boundaries**: in `impl/wire.clj` /
   `impl/metadata.clj` (FHIR JSON output — string keys match FHIR property names)
@@ -296,15 +295,19 @@ the `:request` map and update `::registry/request` spec.
 
 ### Specs
 - Use `clojure.spec.alpha` for all public API boundaries: protocol parameters,
-  registry inputs, constructor arguments, **and protocol return values**.
+  operation inputs, constructor arguments, **and protocol return values**.
 - The canonical data shapes live in `impl/protocols.clj`: `::protos/validate-result`,
   `::protos/expansion-result`, `::protos/expansion-concept`,
   `::protos/lookup-result`, `::protos/issue`. These are the contracts between
   layers — every protocol impl must return data conforming to these specs.
-- Namespace specs under the relevant module: `::protos/code`, `::registry/url`.
+- Namespace specs under the relevant module: `::protos/code`,
+  `::compose/expand-params`.
 - Write `s/fdef` for public functions with non-trivial parameter contracts.
-- Use `clojure.spec.test.alpha/instrument` in test runs to validate data at
-  boundaries automatically.
+- Use `clojure.spec.test.alpha/instrument` in test runs to validate data
+  at boundaries automatically. Note: `instrument` only checks `:args`.
+  Don't add `:ret` specs that aren't actually exercised — either drop
+  them, or assert via `(s/assert ::spec result)` at the call site (the
+  composite layer does this for the five main operation contracts).
 
 ## Testing
 
@@ -319,8 +322,8 @@ the `:request` map and update `::registry/request` spec.
 
 ### Benchmarking (criterium)
 
-`clj -M:bench` runs Criterium micro-benchmarks at the registry layer (pure
-function calls, HTTP bypassed). Use these to bisect the impact of perf
+`clj -M:bench` runs Criterium micro-benchmarks against `core` operation
+functions (HTTP bypassed). Use these to bisect the impact of perf
 changes on the hot paths — faster iteration than tx-benchmark's HTTP/k6
 loop.
 
@@ -346,10 +349,10 @@ For a single benchmark, use the REPL:
 ```
 
 The fixture opens the canonical pinned Hermes DB (see
-`com.eldrix.hades.snomed-db`), registers it as the SNOMED
-CodeSystem/ValueSet/ConceptMap provider, runs criterium, then restores
-registry state and closes Hermes. Benches are skipped when the DB is
-absent — run `clj -X:build-db` first.
+`com.eldrix.hades.snomed-db`), wraps it as the SNOMED
+CodeSystem/ValueSet/ConceptMap provider, runs criterium, then closes
+the service. Benches are skipped when the DB is absent — run
+`clj -X:build-db` first.
 
 To add a benchmark, append an entry to the `operations` vector. No new
 deftest or var required.
@@ -387,13 +390,13 @@ place and flows data correctly.
    this behaviour? If you can't point to a spec section, you may be solving the
    wrong problem or optimising for a test rather than the specification.
 2. **Identify which layer owns this change.** Is it domain logic (protocol impl),
-   dispatch/version resolution (registry), HTTP handling (http.clj), or wire
+   dispatch/version resolution (composite), HTTP handling (http.clj), or wire
    shaping (wire.clj / metadata.clj)? If the answer is "a bit of each,"
    reconsider — the design may be unclear.
 3. **Trace the data flow.** For the inputs this change needs: where do they
    originate and how do they reach this layer? For the outputs: who consumes
-   them and what shape do they expect? Draw the path: http → registry → impl
-   → registry → http → wire. If data needs to flow backwards (handler reaching
+   them and what shape do they expect? Draw the path: http → composite → impl
+   → composite → http → wire. If data needs to flow backwards (handler reaching
    back into impl metadata), the return value is incomplete.
 4. **Check the spec.** Does a spec exist in `impl/protocols.clj` for the return value
    this change produces? If not, define it before writing the implementation.
@@ -420,14 +423,17 @@ Run after every task. All items must pass.
 7. **Protocol impls return complete results.** If you changed a protocol impl,
    its return value should match the relevant spec (`::validate-result`,
    `::expansion-result`, `::lookup-result`). No downstream patching needed.
-8. **Registry is not patching results.** If you added logic to the registry that
-   modifies a result after the protocol call (adding issues, filling in missing
-   fields, fixing expressions), the impl's return is incomplete — fix the impl.
+8. **Composite is not patching domain results.** If you added logic to the
+   composite that modifies a result after the protocol call (adding issues,
+   filling in missing fields, fixing expressions), the impl's return is
+   incomplete — fix the impl. (The composite legitimately *adds*
+   cross-provider concerns: status warnings, supplements check, inactive
+   warnings, CodeableConcept aggregation. It does not patch domain data.)
 9. **Handlers are thin.** If an operation handler grew beyond ~30 lines or
    contains terminology logic (version checking, status warnings, compose
    inspection, code existence checks), push that logic into a lower layer
    or into the result map.
-10. **Keyword keys used internally.** Protocol returns, registry results,
+10. **Keyword keys used internally.** Protocol returns, composite results,
     and compose output all use keyword keys. String keys appear only in
     `impl/wire.clj` / `impl/metadata.clj` (wire output) and in parsed input
     (`tx-resource` bodies, file-backed ingest).
