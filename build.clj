@@ -78,13 +78,13 @@
               :pom-file  (b/pom-path {:lib       lib
                                       :class-dir class-dir})}))
 (defn uber
-  "Build an executable uberjar file for hermes HTTP server"
+  "Build an executable uberjar file for the Hades FHIR terminology server"
   [_]
   (clean nil)
   (println "Building" lib version)
   (b/compile-clj {:basis      uber-basis
                   :src-dirs   ["src"]
-                  :ns-compile ['com.eldrix.hades.cmd.core]
+                  :ns-compile ['com.eldrix.hades.cmd]
                   :class-dir  class-dir})
   (b/copy-dir {:src-dirs   ["src" "resources"]
                :target-dir class-dir})
@@ -92,7 +92,7 @@
   (b/uber {:class-dir class-dir
            :uber-file uber-file
            :basis     uber-basis
-           :main      'com.eldrix.hades.cmd.core}))
+           :main      'com.eldrix.hades.cmd}))
 
 (defn release
   "Deploy release to github. Requires valid token in GITHUB_TOKEN environmental

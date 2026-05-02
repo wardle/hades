@@ -2,7 +2,7 @@
 
 This log documents significant changes for each release.
 
-## [Unreleased]
+## [v2.0.140] - 2026-05-02
 
 Headline: Hades passes 490 / 600 (81.7%) of the HL7 FHIR Terminology
 Ecosystem IG conformance tests against the pinned tx-ecosystem rev
