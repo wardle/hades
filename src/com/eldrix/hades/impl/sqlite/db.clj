@@ -44,13 +44,17 @@
   {:dbtype "sqlite" :dbname path})
 
 (def ^:private default-pool-size
-  "Default Hikari pool size. SQLite WAL serialises writers but allows
-  concurrent readers; each `$lookup` issues a small handful of queries
-  serially on one connection, so a few connections cover dozens of
-  concurrent VUs. Empirically (50-VU LK02 fixed-code) raising the pool
-  past ~8 buys nothing — the binding constraint is per-request work,
-  not connection acquisition."
-  8)
+  "Default Hikari pool size: the cap on concurrent in-flight SQLite
+  reads per database. SQLite WAL permits unlimited concurrent readers,
+  so the binding limit is OS file descriptors and per-connection RAM
+  (~10 KB each), not the database.
+
+  Sized by Little's Law (L = λW), not a CPU-count heuristic: 32 holds
+  peak concurrency for a typical 50-VU mixed-read workload (a heavier
+  multi-system text-filter `$expand` alongside fixed-code `$lookup`)
+  without VUs queueing on connection acquisition. The `default-` prefix
+  anticipates a forthcoming CLI/env override."
+  32)
 
 (def ^:private init-sql
   "Per-connection pragmas applied at handout. Equivalent to the
@@ -64,8 +68,17 @@
               (.setJdbcUrl (str "jdbc:sqlite:" path))
               (.setMaximumPoolSize (int default-pool-size))
               (.setMinimumIdle 1)
+              ;; Load-shed at the pool boundary: under saturation surface a 503
+              ;; instead of letting requests block on the 30 s default. Sits
+              ;; above HikariCP's 5 s `validationTimeout` and well above any
+              ;; plausible cold-cache + GC pause, so legitimate burst-queueing
+              ;; isn't shed. A future benchmark will tune this from data.
+              (.setConnectionTimeout (long 5000))
               (.setConnectionInitSql init-sql)
-              (.setPoolName (str "fhir-tx-" (.hashCode ^String path))))]
+              ;; Pool name surfaces in HikariCP exception/log messages —
+              ;; embed the file basename so saturation events are
+              ;; attributable to a specific database.
+              (.setPoolName (str "fhir-tx[" (.getName (io/file path)) "]")))]
     (HikariDataSource. cfg)))
 
 ;; ---------------------------------------------------------------------------

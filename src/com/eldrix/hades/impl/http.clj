@@ -22,7 +22,8 @@
             [io.pedestal.connector :as conn]
             [io.pedestal.http.jetty :as jetty])
   (:import (java.net URLDecoder)
-           (java.nio.charset StandardCharsets)))
+           (java.nio.charset StandardCharsets)
+           (java.sql SQLTransientConnectionException)))
 
 (set! *warn-on-reflection* true)
 
@@ -281,17 +282,45 @@
     {:status status
      :body   (wire/operation-outcome issues)}))
 
+(defn- saturation-cause
+  "Walk the cause chain and return the first SQLTransientConnectionException
+  found, or nil. HikariCP throws this when `connectionTimeout` elapses
+  with no connection available."
+  ^Throwable [^Throwable ex]
+  (loop [t ex]
+    (cond
+      (nil? t) nil
+      (instance? SQLTransientConnectionException t) t
+      :else (recur (.getCause t)))))
+
+(defn- saturation-response []
+  ;; 503 + Retry-After: 1 + throttled OperationOutcome — the load-shedding
+  ;; signal a client can back off on. Body shape matches every other error
+  ;; path, so clients parse it the same way.
+  {:status  503
+   :headers {"Retry-After" "1"}
+   :body    (wire/operation-outcome
+             [{:severity "error"
+               :type     "throttled"
+               :text     "The server is temporarily out of database connection capacity. Please retry."}])})
+
 (def catch-all-error
   {:name  ::catch-all-error
    :error (fn [context ex]
-            (let [data  (when (instance? clojure.lang.ExceptionInfo ex) (ex-data ex))
-                  t     (:type data)
-                  cause (or (.getCause ^Throwable ex) ex)
-                  msg   (or (ex-message cause) (ex-message ex))]
-              (if t
-                (log/info "Handled" t msg)
-                (log/error ex "Unhandled exception")))
-            (assoc context :response (exception-response ex)))})
+            (if-let [cause (saturation-cause ex)]
+              ;; Saturation is high-volume during overload: log without a stack
+              ;; trace so the signal isn't drowned. The Hikari pool name is in
+              ;; the cause's message.
+              (do (log/warn "connection pool saturated:" (.getMessage cause))
+                  (assoc context :response (saturation-response)))
+              (let [data  (when (instance? clojure.lang.ExceptionInfo ex) (ex-data ex))
+                    t     (:type data)
+                    cause (or (.getCause ^Throwable ex) ex)
+                    msg   (or (ex-message cause) (ex-message ex))]
+                (if t
+                  (log/info "Handled" t msg)
+                  (log/error ex "Unhandled exception"))
+                (assoc context :response (exception-response ex)))))})
 
 (defn inject-svc
   "Inject the configured service onto each request as ::svc. The
