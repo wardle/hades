@@ -4,11 +4,17 @@
 
 Hades is an open-source HL7 FHIR terminology server. It serves `CodeSystem`,
 `ValueSet` and `ConceptMap` operations — `$lookup`, `$validate-code`,
-`$subsumes`, `$expand`, `$translate` — over HTTP, with first-class support
-for SNOMED CT including reference sets and the SNOMED implicit ValueSet /
-ConceptMap URIs. LOINC and any FHIR NPM package (`hl7.fhir.r4.core`,
-`hl7.terminology`, `hl7.fhir.us.core`, IPS, …) can be served alongside
-SNOMED in the same process — the composite dispatches by canonical URL.
+`$subsumes`, `$expand`, `$translate` — over HTTP, across multiple
+terminologies in the same process:
+
+- **SNOMED CT** — ECL v2.2, reference sets, and the implicit
+  `http://snomed.info/sct?fhir_vs=…` / `?fhir_cm=…` URI patterns
+- **LOINC** — codes, properties, hierarchy, and LOINC→LOINC maps
+- **Any FHIR NPM package** — `hl7.fhir.r4.core`, `hl7.terminology`,
+  `hl7.fhir.us.core`, IPS, your own IGs
+
+The composite dispatches by canonical URL, so a single endpoint serves
+all of them.
 
 It is exercised against the
 [HL7 FHIR Terminology Ecosystem IG](https://github.com/HL7/fhir-tx-ecosystem-ig)
@@ -18,25 +24,58 @@ conformance test suite — see [Conformance and benchmarks](#conformance-and-ben
 
 Hades runs from a developer or analyst's laptop, as a single instance, or
 behind an API gateway as a horizontally scaled fleet sharing a read-only
-database volume. The store has no external dependencies (no Postgres, no
-Elasticsearch); a SNOMED release update is a single command.
+database volume. The store has no external dependencies — no Postgres,
+no Elasticsearch — and a release update for any terminology is a single
+command.
 
-What works today:
+Capabilities:
 
-- **SNOMED CT** — `$lookup`, `$validate-code`, `$subsumes`, `$expand`,
-  `$translate` (via SNOMED map reference sets), and the implicit
-  `http://snomed.info/sct?fhir_vs=…` / `?fhir_cm=…` URI patterns
-- **Full SNOMED lifecycle** in one binary: download (TRUD, MLDS, manual RF2),
-  import, index, compact, serve
-- **LOINC** ingestion from a release archive into a Hades SQLite container
-- **FHIR NPM packages** (`hl7.fhir.r4.core`, `hl7.terminology`,
-  `hl7.fhir.us.core`, `hl7.fhir.uv.ips`, etc.) installed via the
-  registry (`packages.fhir.org`) or pointed at a local extracted
-  package; loaded **in-memory at startup** for sub-microsecond hashmap
-  lookups, or **into a SQLite container** for memory-constrained or
+- **`$lookup`, `$validate-code`, `$subsumes`, `$expand`, `$translate`**
+  across every loaded terminology, dispatched to the right provider by
+  canonical URL
+- **SNOMED CT** — full ECL, reference sets, $translate via SNOMED map
+  reference sets, and the implicit
+  `http://snomed.info/sct?fhir_vs=…` / `?fhir_cm=…` URI patterns;
+  download (TRUD, MLDS, manual RF2), import, index, compact and serve
+  all in one binary
+- **LOINC** — codes with full property metadata, the multi-axial
+  hierarchy (so `descendant-of` and `$subsumes` work), and the
+  LOINC→LOINC `MapTo` ConceptMap; ingested from a release archive into
+  a SQLite container
+- **FHIR NPM packages** — installable via `packages.fhir.org`
+  (`hl7.fhir.r4.core`, `hl7.terminology`, `hl7.fhir.us.core`,
+  `hl7.fhir.uv.ips`, etc.) or pointed at a local extracted package;
+  loaded **in-memory at startup** for sub-microsecond hashmap lookups,
+  or **into a SQLite container** for memory-constrained or
   very-large-corpus deployments — the same binary serves both
+- **Mix and match** — multiple SNOMED databases, LOINC, FHIR packages,
+  and on-disk JSON directories all combine in a single `serve` command
 - `tx-resource` request-scoped overlays for transient CodeSystem / ValueSet
 - Java 21+, no JVM flags required, no native compilation
+
+The wire format is FHIR R4. Hades is exercised against the HL7 FHIR
+Terminology Ecosystem IG conformance suite — see
+[Conformance and benchmarks](#conformance-and-benchmarks).
+
+## Performance
+
+Hades is built for low-latency, single-process operation. SNOMED is
+served from an embedded LMDB + Lucene store ([Hermes](https://github.com/wardle/hermes));
+LOINC and FHIR packages can be held entirely in heap as plain Clojure
+hashmaps, or in a SQLite container on disk. There is no database
+round-trip on the hot path — `$lookup`, `$validate-code` and
+`$subsumes` typically return in under a millisecond on a laptop. See
+[Benchmarks](#benchmarks) for per-operation numbers.
+
+> **A note on the Health Samurai `tx-benchmark` Round 0 chart.**
+> The published [scoreboard](https://healthsamurai.github.io/tx-benchmark/results/round-0/)
+> shows Hades at 6%. That number is from a container that pinned
+> Hades **v1.4.69 / Hermes v1.4.1520** (now several major versions
+> behind) and was configured **SNOMED-only** — no LOINC, no RxNorm, no
+> FHIR packages — even though the test mix relies on all of them. Tests
+> targeting other terminologies therefore returned 404. We have
+> contributed an updated container loading the current multi-terminology
+> Hades; an updated round is awaited.
 
 On the roadmap (see [Roadmap](#roadmap)):
 
@@ -52,110 +91,243 @@ Download the latest `hades-<version>.jar` from the
 below use `hades.jar` — substitute the actual filename. From a source
 checkout, replace `java -jar hades.jar` with `clj -M:run` throughout.
 
-Hades handles the full SNOMED CT lifecycle: download a distribution,
-build a database, serve it over FHIR.
+This walkthrough builds three terminologies side-by-side and serves them
+from a single Hades process: SNOMED CT (UK monolith edition from TRUD),
+LOINC, and a couple of FHIR conformance packages from
+[packages.fhir.org](https://packages.fhir.org). Each block is a discrete
+step — skip any terminology you don't need.
 
-## 1. Build a SNOMED database
+You'll need:
 
-Pick whichever path matches your source. All three end with a `snomed.db`
-directory ready for `serve`.
+- Java 21 or above
+- A [TRUD](https://isd.digital.nhs.uk/trud) API key, saved to a file
+  (e.g. `trud-api-key.txt`), for the UK SNOMED download
+- A LOINC release archive — sign in at
+  [loinc.org/downloads](https://loinc.org/downloads/) (free) and unzip
+  it locally (e.g. to `/tmp/Loinc_2.81/`)
 
-### a) UK edition from TRUD
+## 1. Install SNOMED CT (UK monolith edition)
 
-Save your TRUD API key in a file (e.g. `trud-api-key.txt`), then:
+The monolith is the merged UK edition (international + clinical + drug
+extensions in one). One command downloads, imports, indexes and compacts:
 
 ```shell
 java -jar hades.jar install index compact snomed.db \
-    --dist uk.nhs/sct-clinical \
+    --dist uk.nhs/sct-monolith \
     --api-key trud-api-key.txt
 ```
 
-Commands execute in the order given — download + import, then build indices,
-then compact. Add more `--dist` flags (e.g. `--dist uk.nhs/sct-drug-ext`) to
-layer additional UK distributions into the same database before indexing.
+`install index compact` are run in the order given on the same positional
+path. Build takes a few minutes; the resulting `snomed.db/` is around 2 GB.
 
-### b) SNOMED CT International from MLDS
+## 2. Build LOINC
 
-Save your MLDS password in a file, then:
+LOINC isn't distributed via a registry — point `import` at the unzipped
+release directory:
 
 ```shell
-java -jar hades.jar install index compact snomed.db \
-    --dist ihtsdo.mlds/167 \
-    --username you@example.com \
-    --password mlds-password.txt
+java -jar hades.jar import loinc.db /tmp/Loinc_2.81/
 ```
 
-Run `java -jar hades.jar available` to browse all installable distributions.
+LOINC builds into a SQLite container; no separate `index` or `compact`
+step is needed.
 
-### c) A distribution you downloaded manually
-
-Unzip the RF2 release, then point `import` at the unzipped directory.
-`import` takes the destination database as its first positional argument
-followed by one or more source paths; chain `index` and `compact`
-afterwards as separate invocations:
+## 3. Install FHIR conformance packages
 
 ```shell
-java -jar hades.jar list /path/to/unzipped-rf2/        # inspect what hades will import
-java -jar hades.jar import snomed.db /path/to/unzipped-rf2/
-java -jar hades.jar index compact snomed.db
+java -jar hades.jar install fhir.db \
+    --dist hl7.fhir.r4.core@4.0.1 \
+    --dist hl7.terminology.r4@7.0.1 \
+    --dist hl7.fhir.uv.ips@2.0.0
 ```
 
-## 2. Serve
+Packages are pulled from `packages.fhir.org` and loaded into a SQLite
+container. To serve in-memory instead — faster lookups, larger heap —
+add `--cache-dir packages/` and `serve` the extracted directories
+directly (see [FHIR packages](#fhir-packages) below).
+
+## 4. Check what you've got
 
 ```shell
-java -jar hades.jar serve snomed.db --port 8080
+java -jar hades.jar status snomed.db loinc.db fhir.db
 ```
 
-Verify it works — `73211009` is *Diabetes mellitus* in SNOMED CT:
+Reports the CodeSystems, ValueSets and ConceptMaps each source
+contributes — handy as a smoke test before exposing the server. Add
+`--format json` for machine-readable output.
+
+## 5. Serve them together
 
 ```shell
-curl -sH "Accept: application/fhir+json" \
-  'http://localhost:8080/fhir/CodeSystem/$lookup?system=http://snomed.info/sct&code=73211009' | jq .
+java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
+```
+
+The composite catalogue dispatches operations to the right provider by
+canonical URL — no per-terminology routes, no client-side configuration.
+A single endpoint serves all three.
+
+## 6. Try it
+
+```shell
+# SNOMED CT — 73211009 is "Diabetes mellitus"
+curl -sG 'http://localhost:8080/fhir/CodeSystem/$lookup' \
+  --data-urlencode 'system=http://snomed.info/sct' \
+  --data-urlencode 'code=73211009' | jq .
+
+# LOINC — 718-7 is "Hemoglobin [Mass/volume] in Blood"
+curl -sG 'http://localhost:8080/fhir/CodeSystem/$lookup' \
+  --data-urlencode 'system=http://loinc.org' \
+  --data-urlencode 'code=718-7' | jq .
+
+# FHIR — expand the administrative-gender ValueSet from hl7.fhir.r4.core
+curl -sG 'http://localhost:8080/fhir/ValueSet/$expand' \
+  --data-urlencode 'url=http://hl7.org/fhir/ValueSet/administrative-gender' | jq .
 ```
 
 Use `java -jar hades.jar --help <command>` for full per-command options.
 
-## 3. Add LOINC and FHIR packages (optional)
+# Terminologies
 
-`serve` takes mixed positional sources — Hermes SNOMED databases, Hades
-SQLite containers, and directories of FHIR JSON resources are auto-
-detected. Mix and match:
+## SNOMED CT
+
+Hades wraps [Hermes](https://github.com/wardle/hermes) (LMDB + Lucene)
+to serve SNOMED CT. Operations are full-fidelity: ECL queries, the
+implicit `http://snomed.info/sct?fhir_vs=…` / `?fhir_cm=…` URI patterns,
+$translate via SNOMED map reference sets, and lookup with all
+designations and properties.
+
+### Distributions
 
 ```shell
-# 1. Build LOINC DB once from a release archive
-java -jar hades.jar import loinc.db /path/to/Loinc_2.81
-
-# 2. Install FHIR packages from packages.fhir.org. --cache-dir keeps
-#    the extracted JSON for in-memory serving; the destination path
-#    also builds a SQLite container of the same data. Pick whichever
-#    you'll serve from.
-java -jar hades.jar install fhir.db \
-  --dist hl7.fhir.r4.core@4.0.1 \
-  --dist hl7.terminology.r4@7.0.1 \
-  --cache-dir packages
-
-# 3a. Serve from SQLite containers (lower memory):
-java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
-
-# 3b. Or serve FHIR packages in-memory (faster lookups):
-java -jar hades.jar serve --port 8080 \
-  snomed.db loinc.db \
-  packages/hl7.fhir.r4.core-4.0.1/package \
-  packages/hl7.terminology.r4-7.0.1/package
+java -jar hades.jar available
 ```
 
-**Choosing in-memory (FHIR JSON dir) vs SQLite container (`.db`):**
+lists every distribution Hades knows. The common choices:
 
-| | FHIR JSON dir | `.db` (SQLite container) |
+| Identifier | Source | Auth |
+|---|---|---|
+| `uk.nhs/sct-monolith` | UK monolith (intl + clinical + drug ext, merged) | TRUD `--api-key` |
+| `uk.nhs/sct-clinical` | UK clinical edition | TRUD `--api-key` |
+| `uk.nhs/sct-drug-ext` | UK drug extension (layer on top of clinical) | TRUD `--api-key` |
+| `ihtsdo.mlds/167` | SNOMED CT International (from MLDS) | MLDS `--username` + `--password` |
+
+Pin a release with `@<version>`, e.g.
+`--dist uk.nhs/sct-monolith@2025-02-01`. Run
+`java -jar hades.jar available --dist <id>` to list available versions
+(some registries authenticate read access — pass the same credentials
+you'd use for install).
+
+### Layering distributions
+
+Multiple `--dist` flags layer into the same database before indexing:
+
+```shell
+java -jar hades.jar install index compact snomed.db \
+    --dist uk.nhs/sct-clinical \
+    --dist uk.nhs/sct-drug-ext \
+    --api-key trud-api-key.txt
+```
+
+### Importing a manually-downloaded release
+
+If you already have an RF2 release on disk, skip `install`:
+
+```shell
+java -jar hades.jar list /path/to/unzipped-rf2/        # preview what will be imported
+java -jar hades.jar import snomed.db /path/to/unzipped-rf2/
+java -jar hades.jar index compact snomed.db
+```
+
+## LOINC
+
+LOINC is consumed from a local release directory (the unzipped
+`Loinc_<version>` archive from [loinc.org](https://loinc.org/downloads/)).
+There is no registry — manual download is required for licensing reasons,
+but no API key is involved.
+
+```shell
+java -jar hades.jar import loinc.db /path/to/Loinc_2.81/
+```
+
+What's exposed:
+
+- The `http://loinc.org` CodeSystem with `$lookup`, `$validate-code`,
+  `$subsumes` (over LOINC's class hierarchy), and full property metadata
+  (COMPONENT, PROPERTY, SYSTEM, METHOD_TYP, SHORTNAME, etc.)
+- `MultiAxialHierarchy.csv` is loaded as parent/child concept relations,
+  so `descendant-of` filters in `$expand` and `$subsumes` traverse
+  LOINC's hierarchy
+- `LoincTable/MapTo.csv` is loaded as a LOINC→LOINC ConceptMap
+
+LOINC builds into a SQLite container directly; no separate `index` or
+`compact` is needed.
+
+## FHIR packages
+
+Any [FHIR NPM package](https://registry.fhir.org/) — IGs, conformance
+packages, terminology bundles — can be served alongside SNOMED and
+LOINC. The composite dispatches by canonical URL, so a `ValueSet` from
+`hl7.fhir.us.core` and a `CodeSystem` from `hl7.terminology.r4` resolve
+without any per-package configuration.
+
+```shell
+java -jar hades.jar available                                # show known FHIR packages
+java -jar hades.jar available --dist hl7.fhir.r4.core        # list versions
+```
+
+Common packages:
+
+| Package | Purpose |
+|---|---|
+| `hl7.fhir.r4.core` | FHIR R4 core (CodeSystems and ValueSets) |
+| `hl7.terminology.r4` | HL7 standard CodeSystems and ValueSets |
+| `hl7.fhir.us.core` | US Core implementation guide |
+| `hl7.fhir.uv.ips` | International Patient Summary |
+
+Hades's wire format is FHIR **R4** (the CapabilityStatement reports
+`fhirVersion` 4.0.1). R5 packages can be installed and their
+CodeSystems/ValueSets will mostly load, but the server speaks R4 to
+clients and R5 ConceptMaps (`relationship`, not R4 `equivalence`) are
+not fully supported.
+
+Any other id from `packages.fhir.org` works too — e.g.
+`--dist hl7.fhir.uv.sdc@3.0.0`. If the registry doesn't authenticate the
+listing, `available --dist <id>` shows versions; otherwise pin a known
+version with `@<version>`.
+
+### In-memory vs SQLite container
+
+`install` lands a FHIR package as a SQLite container by default. Add
+`--cache-dir <dir>` to also keep the extracted JSON, then `serve` the
+package directory directly for in-memory operation:
+
+```shell
+# Install once, keep the extracted JSON in ./packages
+java -jar hades.jar install fhir.db \
+    --dist hl7.fhir.r4.core@4.0.1 \
+    --dist hl7.terminology.r4@7.0.1 \
+    --cache-dir packages
+
+# Serve in-memory (faster lookups, larger heap)
+java -jar hades.jar serve --port 8080 \
+    snomed.db loinc.db \
+    packages/hl7.fhir.r4.core-4.0.1/package \
+    packages/hl7.terminology.r4-7.0.1/package
+
+# Or serve from the SQLite container (lower memory)
+java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
+```
+
+| | FHIR JSON dir (in-memory) | `.db` (SQLite container) |
 | --- | --- | --- |
 | Boot time | Slower — parses every JSON at start (~15 s for 6 HL7 packages) | Fast — opens the file |
 | Per-request latency | Hashmap lookup, nanoseconds | JDBC + page fault, tens of µs |
 | Memory | Whole corpus in heap (~1.5 GB for the 6 HL7 packages above) | Just the working set |
-| Best for | Benchmark territory; small-to-medium catalogues; latency-sensitive | Memory-constrained hosts; very large corpora that don't fit in RAM |
+| Best for | Latency-sensitive use; small-to-medium catalogues | Memory-constrained hosts; very large corpora |
 
-For FHIR packages the in-memory route is the default recommendation.
-Convert to a SQLite container with `import <out.db> <pkg-dir>` when
-persistence or RAM pressure matter.
+In-memory is the default recommendation for FHIR packages. Convert a
+package directory to a SQLite container later with
+`import <out.db> <pkg-dir>` if RAM pressure becomes an issue.
 
 ## Command reference
 
@@ -249,8 +421,9 @@ land in `test/resources/conformance/latest.json`.
 ## Benchmarks
 
 The numbers below come from driving a running Hades over HTTP with
-[hurl](https://hurl.dev) at `--parallel --jobs=10`. They are indicative,
-not a marketing claim:
+[hurl](https://hurl.dev) at `--parallel --jobs=10`. The methodology is
+described so anyone can apply the same shape of test to alternative
+servers — these are not a marketing claim, but they are reproducible.
 
 - Hardware: Apple M1 MacBook Pro, 16 GB RAM
 - Data: SNOMED CT International 2025-02-01
@@ -272,6 +445,18 @@ not a marketing claim:
 
 A registry-layer Criterium suite (HTTP bypassed, useful for bisecting
 perf changes) is available via `clj -M:bench`.
+
+### Comparing against other servers
+
+Independent comparative benchmarks are welcome. The
+[Health Samurai `tx-benchmark`](https://github.com/HealthSamurai/tx-benchmark)
+project covers Hades, Snowstorm, Ontoserver, FHIRsmith and Termbox; its
+Round 0 results currently use **Hades v1.4.69** (several major versions
+old) configured **SNOMED-only**, so most tests in the mix — LOINC,
+RxNorm, HL7-published ValueSets — return 404 from Hades and the
+composite score is not informative. We've contributed an updated
+container running the current multi-terminology Hades; expect refreshed
+numbers once that round publishes.
 
 # Roadmap
 
