@@ -109,46 +109,40 @@ You'll need:
 ## 1. Install SNOMED CT (UK monolith edition)
 
 The monolith is the merged UK edition (international + clinical + drug
-extensions in one). One command downloads, imports, indexes and compacts:
+extensions in one). One command downloads, imports and indexes:
 
 ```shell
-java -jar hades.jar install index compact snomed.db \
+java -jar hades.jar install snomed.db \
     --dist uk.nhs/sct-monolith \
     --api-key trud-api-key.txt
 ```
 
-`install index compact` are run in the order given on the same positional
-path. Build takes a few minutes; the resulting `snomed.db/` is around 2 GB.
+`install` auto-indexes the destination so the resulting `snomed.db/` is
+queryable as soon as it returns. Build takes a few minutes; the
+database is around 2 GB.
 
 ## 2. Build LOINC
 
 LOINC isn't distributed via a registry — point `import` at the unzipped
-release directory, then build the search index and compact the
-container:
+release directory:
 
 ```shell
 java -jar hades.jar import loinc.db /tmp/Loinc_2.81/
-java -jar hades.jar index compact loinc.db
 ```
-
-`import` cannot be chained with other commands, so it's two
-invocations. `index` builds the ancestor closure and full-text
-search; `compact` runs `VACUUM` on the SQLite container.
 
 ## 3. Install FHIR conformance packages
 
 ```shell
-java -jar hades.jar install index compact fhir.db \
+java -jar hades.jar install fhir.db \
     --dist hl7.fhir.r4.core@4.0.1 \
     --dist hl7.terminology.r4@7.0.1 \
     --dist hl7.fhir.uv.ips@2.0.0
 ```
 
 Packages are pulled from `packages.fhir.org` and loaded into a SQLite
-container; `index` and `compact` run on the same path on the same
-line. To serve in-memory instead — faster lookups, larger heap — add
-`--cache-dir packages/` and `serve` the extracted directories directly
-(see [FHIR packages](#fhir-packages) below).
+container. To serve in-memory instead — faster lookups, larger heap —
+add `--cache-dir packages/` and `serve` the extracted directories
+directly (see [FHIR packages](#fhir-packages) below).
 
 ## 4. Check what you've got
 
@@ -169,6 +163,17 @@ java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
 The composite catalogue dispatches operations to the right provider by
 canonical URL — no per-terminology routes, no client-side configuration.
 A single endpoint serves all three.
+
+When two providers claim the same canonical URL (e.g. an International
+and a UK SNOMED database both serving `http://snomed.info/sct`),
+disambiguate with one or more `--default URL=VERSION` flags. A request
+that names the bare URL is routed to the matching version; requests
+that include an explicit `version` are routed normally.
+
+```shell
+java -jar hades.jar serve snomed-intl.db snomed-uk.db \
+    --default http://snomed.info/sct=http://snomed.info/sct/83821000000107/version/20250416
+```
 
 ## 6. Try it
 
@@ -223,13 +228,24 @@ you'd use for install).
 
 ### Layering distributions
 
-Multiple `--dist` flags layer into the same database before indexing:
+Multiple `--dist` flags on a single `install` layer into the same
+database; the auto-index runs once at the end:
 
 ```shell
-java -jar hades.jar install index compact snomed.db \
+java -jar hades.jar install snomed.db \
     --dist uk.nhs/sct-clinical \
     --dist uk.nhs/sct-drug-ext \
     --api-key trud-api-key.txt
+```
+
+To layer across **separate** invocations (e.g. install one distribution
+today, another next week into the same DB), pass `--no-index` on every
+call but the last to skip the per-call index — then run a final
+unflagged install/import or a standalone `index <db>`:
+
+```shell
+java -jar hades.jar install --no-index snomed.db --dist uk.nhs/sct-clinical --api-key trud-api-key.txt
+java -jar hades.jar install            snomed.db --dist uk.nhs/sct-drug-ext --api-key trud-api-key.txt
 ```
 
 ### Importing a manually-downloaded release
@@ -237,9 +253,8 @@ java -jar hades.jar install index compact snomed.db \
 If you already have an RF2 release on disk, skip `install`:
 
 ```shell
-java -jar hades.jar list /path/to/unzipped-rf2/        # preview what will be imported
+java -jar hades.jar list /path/to/unzipped-rf2/                       # preview what will be imported
 java -jar hades.jar import snomed.db /path/to/unzipped-rf2/
-java -jar hades.jar index compact snomed.db
 ```
 
 ## LOINC
@@ -250,13 +265,12 @@ There is no registry — manual download is required for licensing reasons,
 but no API key is involved.
 
 ```shell
-java -jar hades.jar import  loinc.db /path/to/Loinc_2.81/
-java -jar hades.jar index compact loinc.db
+java -jar hades.jar import loinc.db /path/to/Loinc_2.81/
 ```
 
-`import` brings in the raw rows; `index` builds the ancestor closure
-and the FTS tables (so `descendant-of` filters and text search work);
-`compact` runs `VACUUM`.
+`import` auto-indexes the destination — the ancestor closure and FTS
+tables (which `descendant-of` filters and text search rely on) are
+built before the command returns.
 
 What's exposed:
 
@@ -312,7 +326,7 @@ package directory directly for in-memory operation:
 
 ```shell
 # Install once, keep the extracted JSON in ./packages
-java -jar hades.jar install index compact fhir.db \
+java -jar hades.jar install fhir.db \
     --dist hl7.fhir.r4.core@4.0.1 \
     --dist hl7.terminology.r4@7.0.1 \
     --cache-dir packages
@@ -342,19 +356,20 @@ package directory to a SQLite container later with
 
 | Command | Purpose |
 |---------|---------|
-| `serve <paths…> [--port N] [--bind-address A]` | Start the FHIR server. Each path opens a Hermes SNOMED store, a Hades SQLite container, or a directory of FHIR JSON resources (auto-detected). |
-| `install <dest-db> --dist <id>… [--cache-dir DIR]` | Download and import one or more distributions (SNOMED CT or FHIR package) into the destination database. Distribution ids may carry `@<version>`. Run `index`/`compact` after. |
-| `import <dest-db> <sources…>` | Import sources into a destination database. Auto-detects RF2 (SNOMED), LOINC release archive, or FHIR JSON / NPM-package directory. Cannot be chained with other commands. |
+| `serve <paths…> [--port N] [--bind-address A] [--default URL=VERSION]…` | Start the FHIR server. Each path opens a Hermes SNOMED store, a Hades SQLite container, or a directory of FHIR JSON resources (auto-detected). Use `--default URL=VERSION` (repeatable) when multiple providers claim the same canonical URL — bare-URL requests resolve to the chosen version. |
+| `install <dest-db> --dist <id>… [--no-index] [--cache-dir DIR]` | Download and import one or more distributions (SNOMED CT or FHIR package) into the destination database. Auto-indexes when done; pass `--no-index` to skip (for layered loads). Distribution ids may carry `@<version>`. |
+| `import <dest-db> <sources…> [--no-index]` | Import sources into a destination database. Auto-detects RF2 (SNOMED), LOINC release archive, or FHIR JSON / NPM-package directory. Auto-indexes when done. |
 | `list <paths…>` | List importable files under given paths |
 | `available [--dist <id>…]` | List installable terminologies, or releases/versions for the given ids |
-| `index <paths…>` | Build search indices on each database (no-op for FHIR-tx containers; release sources are skipped) |
-| `compact <paths…>` | Compact the underlying store (LMDB compact for Hermes, VACUUM for SQLite) |
+| `index <paths…>` | Rebuild search indices on each database. Useful for explicit recovery or to finish a layered load. Release sources are silently skipped. |
+| `compact <paths…>` | Compact the underlying store (LMDB compact for Hermes, VACUUM for SQLite). Optional space optimisation. |
 | `status <paths…> [--format json\|edn]` | Show database status |
 
-Commands (other than `import`) can be chained on a single command line and
-execute in the order given, sharing positional paths and flags — for
-example `install index compact snomed.db --dist uk.nhs/sct-clinical
---api-key trud.txt`.
+Commands can be chained on a single command line and execute in the
+order given, sharing positional paths and flags — for example
+`install compact snomed.db --dist uk.nhs/sct-clinical --api-key
+trud.txt`. `index` and `compact` silently skip release source paths
+so they're safe to chain after `import`.
 
 # Example usage
 

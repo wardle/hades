@@ -3,6 +3,7 @@
   orchestration that drives `serve` and `status`."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
+            [com.eldrix.hades.impl.cli :as cli]
             [com.eldrix.hades.impl.paths :as paths]
             [com.eldrix.hades.impl.sqlite.db :as db])
   (:import (clojure.lang ExceptionInfo)
@@ -14,38 +15,33 @@
   (try (f) nil
        (catch ExceptionInfo e (:reason (ex-data e)))))
 
-;; The functions are private; call them through the var.
-(def ^:private import-from         (requiring-resolve 'com.eldrix.hades.cmd/import-from))
-(def ^:private install             (requiring-resolve 'com.eldrix.hades.cmd/install))
+(defn- validate [cmd args opts]
+  (cli/validate-invocation (cli/commands cmd) args opts))
 
 ;; ---------------------------------------------------------------------------
-;; Arity tests
+;; Arity tests — declarative `:args` / `:requires-opt` spec on each command,
+;; enforced in cmd's `invoke-command` via `cli/validate-invocation`.
 ;; ---------------------------------------------------------------------------
 
 (deftest import-arity
-  (testing "import with 0 positionals throws ::missing-args"
-    (is (= :com.eldrix.hades.cmd/missing-args
-           (reason-of #(import-from {} [])))))
-  (testing "import with 1 positional throws ::missing-args (no source given)"
-    (is (= :com.eldrix.hades.cmd/missing-args
-           (reason-of #(import-from {} ["snomed.db"])))))
-  (testing "import with 2 positionals passes the arity check (then fails on detection)"
-    ;; Detection on a non-existent path will throw a different exception
-    ;; (not ::missing-args). We only assert the arity check has passed.
-    (let [r (reason-of #(import-from {} ["snomed.db" "/nonexistent/source/path"]))]
-      (is (not= :com.eldrix.hades.cmd/missing-args r)))))
+  (testing "import with 0 positionals fails arity check"
+    (is (some? (validate "import" [] {}))))
+  (testing "import with 1 positional fails arity check"
+    (is (some? (validate "import" ["snomed.db"] {}))))
+  (testing "import with 2 positionals satisfies arity"
+    (is (nil? (validate "import" ["snomed.db" "/some/source"] {})))))
 
 (deftest install-arity
-  (testing "install with no --dist throws ::missing-args"
-    (is (= :com.eldrix.hades.cmd/missing-args
-           (reason-of #(install {:dist []} ["snomed.db"])))))
-  (testing "install with --dist but no positional throws ::missing-args"
-    (is (= :com.eldrix.hades.cmd/missing-args
-           (reason-of #(install {:dist ["hl7.fhir.r4.core@4.0.1"]} [])))))
-  (testing "install with --dist and >1 positional throws ::missing-args"
-    (is (= :com.eldrix.hades.cmd/missing-args
-           (reason-of #(install {:dist ["hl7.fhir.r4.core@4.0.1"]}
-                                ["a.db" "b.db"]))))))
+  (testing "install with no --dist fails because :dist is required"
+    (is (some? (validate "install" ["snomed.db"] {:dist []}))))
+  (testing "install with --dist but no positional fails arity"
+    (is (some? (validate "install" [] {:dist [{:id "hl7.fhir.r4.core" :version "4.0.1"}]}))))
+  (testing "install with --dist and >1 positional fails arity"
+    (is (some? (validate "install" ["a.db" "b.db"]
+                         {:dist [{:id "hl7.fhir.r4.core" :version "4.0.1"}]}))))
+  (testing "install with --dist and exactly one positional satisfies the spec"
+    (is (nil? (validate "install" ["snomed.db"]
+                        {:dist [{:id "hl7.fhir.r4.core" :version "4.0.1"}]})))))
 
 ;; ---------------------------------------------------------------------------
 ;; providers-for-path orchestration

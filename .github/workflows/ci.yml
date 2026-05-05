@@ -110,13 +110,11 @@ jobs:
           mkdir -p .hades
           umask 077
           printf '%s' "$MLDS_PASSWORD" > .hades/mlds-password.txt
-          clojure -M:run install .hades/snomed-intl-20250201.db \
+          clojure -M:run install compact .hades/snomed-intl-20250201.db \
             --dist ihtsdo.mlds/167@2025-02-01 \
             --username "$MLDS_USERNAME" \
             --password .hades/mlds-password.txt
           rm -f .hades/mlds-password.txt
-          clojure -M:run index   .hades/snomed-intl-20250201.db
-          clojure -M:run compact .hades/snomed-intl-20250201.db
 
       - uses: actions/cache/save@v5
         if: always() && steps.provision.outcome == 'success'
@@ -127,7 +125,7 @@ jobs:
   provision-snomed-uk:
     needs: prepare-deps
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
@@ -173,12 +171,10 @@ jobs:
           mkdir -p .hades
           umask 077
           printf '%s' "$TRUD_API_KEY" > .hades/trud-api-key.txt
-          clojure -M:run install .hades/snomed-uk-monolith.db \
+          clojure -M:run install compact .hades/snomed-uk-monolith.db \
             --dist uk.nhs/sct-monolith \
             --api-key .hades/trud-api-key.txt
           rm -f .hades/trud-api-key.txt
-          clojure -M:run index   .hades/snomed-uk-monolith.db
-          clojure -M:run compact .hades/snomed-uk-monolith.db
 
       - uses: actions/cache/save@v5
         if: always() && steps.provision.outcome == 'success'
@@ -244,8 +240,7 @@ jobs:
             echo "::error::Could not locate LoincTableCore/LoincTableCore.csv inside the LOINC zip."
             exit 1
           fi
-          clojure -M:run import  .hades/loinc-2.81.db "$release_dir"
-          clojure -M:run index compact .hades/loinc-2.81.db
+          clojure -M:run import compact .hades/loinc-2.81.db "$release_dir"
           rm -rf "$extract_dir"
 
       - uses: actions/cache/save@v5
@@ -297,7 +292,7 @@ jobs:
         id: provision
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          clojure -M:run install index compact .hades/fhir-smoke.db \
+          clojure -M:run install compact .hades/fhir-smoke.db \
             --dist hl7.terminology.r4@7.0.1 \
             --dist hl7.fhir.us.core@6.1.0 \
             --dist hl7.fhir.uv.ips@2.0.0 \

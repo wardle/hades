@@ -17,13 +17,18 @@
    :default-fn (fn [_] (System/getProperty "java.io.tmpdir"))
    :default-desc ""])
 
+(def fhir-cache-dir-opt
+  [nil "--cache-dir PATH" "FHIR package download cache directory (optional)"
+   :default-fn (fn [_] (str (System/getProperty "java.io.tmpdir") "/hades-fhir-packages"))
+   :default-desc ""])
+
 (def uk-trud-opts
   [[nil "--api-key PATH" "File containing the TRUD API key"
     :missing "--api-key PATH is required for uk.nhs distributions"]
    cache-dir-opt])
 
 (def fhir-opts
-  [cache-dir-opt])
+  [fhir-cache-dir-opt])
 
 (def mlds-opts
   [[nil "--username USER" "MLDS username"
@@ -35,6 +40,12 @@
   "Strip an optional `@<version>` suffix from an installable identifier."
   [s]
   (when s (first (str/split s #"@" 2))))
+
+(defn parse-dist
+  "Parse a `--dist` value `id[@version]` into `{:id ... :version ...}`."
+  [s]
+  (let [[id version] (str/split s #"@" 2)]
+    {:id id :version version}))
 
 (defn snomed-distribution?
   "SNOMED CT distribution ids are `<region>.<provider>/<id>`."
@@ -74,9 +85,15 @@
    :format       [nil "--format FMT" "Output format ('json' or 'edn')"
                   :parse-fn keyword :validate [#{:json :edn} "Format must be 'json' or 'edn'"]]
    :default      [nil "--default URL=VERSION" "Bind a bare canonical URL to VERSION. Repeatable."
-                  :multi true :default [] :update-fn conj :default-desc ""]
+                  :multi true :default {} :default-desc ""
+                  :parse-fn #(str/split % #"=" 2)
+                  :validate [#(= 2 (count %)) "Must be URL=VERSION"]
+                  :update-fn (fn [m [k v]] (assoc m k v))]
    :dist         [nil "--dist DIST" "Distribution id (optional @<version>). Repeatable."
-                  :multi true :default [] :update-fn conj :default-desc ""]
+                  :multi true :default [] :default-desc ""
+                  :parse-fn parse-dist
+                  :update-fn conj]
+   :no-index     [nil "--no-index" "Skip auto-indexing the destination after install/import. Use when chaining multiple install/import calls into one database; finish with `hades index <db>` (or one final unflagged install/import)."]
    :verbose      ["-v" "--verbose"]
    :progress     [nil "--progress" "Show progress reporting"]
    :help         ["-h" "--help"]})
@@ -110,6 +127,7 @@
 
 (def commands*
   [{:cmd  "list" :usage "list <paths...>"
+    :args {:min 1 :hint "<paths...>"}
     :desc "List importable contents (auto-detects sources)."
     :long (str/join \newline
             ["List the contents of each path. Source kind is auto-detected:"
@@ -127,6 +145,7 @@
              "  hades list .hades/snomed-intl-20250201.db"])
     :opts [(option :help)]}
    {:cmd  "import" :usage "import <dest-db> <sources...>"
+    :args {:min 2 :hint "<dest-db> <sources...>"}
     :desc "Import sources into a destination database."
     :long (str/join \newline
             ["Import one or more local terminology sources into a destination"
@@ -136,10 +155,18 @@
              "Existing Hades databases (Hermes, FHIR-tx) are not importable —"
              "use `serve` directly."
              ""
+             "Auto-indexes the destination after import — the resulting DB is"
+             "queryable by `serve` immediately. Pass `--no-index` to skip when"
+             "you'll be calling install/import again into the same database;"
+             "finish that workflow with `hades index <db>` or one final"
+             "unflagged install/import."
+             ""
              "Examples:"
              "  hades import snomed.db /path/to/snomed-rf2/"
-             "  hades import fhir.db   packages/hl7.fhir.r4.core-4.0.1/package"])
-    :opts [(option :help)]}
+             "  hades import loinc.db /path/to/Loinc_2.81/"
+             "  hades import fhir.db  packages/hl7.fhir.r4.core-4.0.1/package"
+             "  hades import --no-index snomed.db /path/to/intl-rf2/"])
+    :opts [(option :no-index) (option :help)]}
    {:cmd  "available" :usage "available [--dist <id>...]"
     :desc "List installable distributions, or releases for one."
     :long (str/join \newline
@@ -155,6 +182,8 @@
              "  hades available --dist hl7.fhir.r4.core"])
     :opts #(make-distribution-options [(option :dist) (option :progress) (option :help)] %)}
    {:cmd  "install" :usage "install <dest-db> --dist <id>..."
+    :args {:min 1 :max 1 :hint "<dest-db>"}
+    :requires-opt :dist
     :desc "Download and import one or more distributions into a destination database."
     :long (str/join \newline
             ["Download a distribution and import it into the destination database"
@@ -166,29 +195,36 @@
              "credentials). Run `hades install --dist <id> --help` to see what a"
              "specific distribution accepts."
              ""
-             "After install, run `index` and `compact` to finish — these can be"
-             "chained on one line and share the destination path."
+             "Auto-indexes the destination after install — the resulting DB is"
+             "queryable by `serve` immediately. Pass `--no-index` to skip when"
+             "you'll be calling install/import again into the same database;"
+             "finish that workflow with `hades index <db>` or one final"
+             "unflagged install/import."
              ""
              "Examples:"
              "  hades install snomed.db --dist uk.nhs/sct-clinical --api-key trud.txt"
              "  hades install fhir.db   --dist hl7.fhir.r4.core@4.0.1"
-             "  hades install index compact snomed.db --dist uk.nhs/sct-clinical \\"
-             "                                       --api-key trud.txt"])
-    :opts #(make-distribution-options [(option :dist) (option :progress) (option :help)] %)}
+             "  hades install --no-index snomed.db --dist uk.nhs/sct-clinical --api-key trud.txt"])
+    :opts #(make-distribution-options [(option :dist) (option :progress) (option :no-index) (option :help)] %)}
    {:cmd  "index" :usage "index <paths...>"
+    :args {:min 1 :hint "<paths...>"}
     :desc "Build search indices on each database."
     :long (str/join \newline
-            ["Build search indices on each database. SNOMED (Hermes) databases"
-             "require this after import; FHIR-tx SQLite containers index at import"
-             "time and the command is a silent no-op for them. Release source"
-             "directories (RF2, LOINC, FHIR JSON) are silently skipped."
+            ["Build search indices on each database. Required after import"
+             "for both SNOMED (Hermes) databases and FHIR-tx SQLite containers"
+             "— `$expand` text filters and `descendant-of` rely on it."
+             "Release source directories (RF2, LOINC, FHIR JSON) are silently"
+             "skipped so chains like `import index compact <db> <release-dir>`"
+             "work uniformly."
              ""
              "Examples:"
              "  hades index snomed.db"
              "  hades install index compact snomed.db --dist uk.nhs/sct-clinical \\"
-             "                                       --api-key trud.txt"])
+             "                                       --api-key trud.txt"
+             "  hades import index compact loinc.db /path/to/Loinc_2.81/"])
     :opts [(option :help)]}
    {:cmd  "compact" :usage "compact <paths...>"
+    :args {:min 1 :hint "<paths...>"}
     :desc "Reduce on-disk size of each database."
     :long (str/join \newline
             ["Reduce on-disk size of each database:"
@@ -204,6 +240,7 @@
              "  hades compact snomed.db"])
     :opts [(option :help)]}
    {:cmd  "status" :usage "status <paths...>"
+    :args {:min 1 :hint "<paths...>"}
     :desc "Show service status across given paths."
     :long (str/join \newline
             ["Boot the same service that `serve` would across the given paths and"
@@ -221,6 +258,7 @@
            [nil "--refsets" "Show installed refsets (SNOMED)"]
            (option :help)]}
    {:cmd  "serve" :usage "serve <paths...>"
+    :args {:min 1 :hint "<paths...>"}
     :desc "Start the FHIR terminology server."
     :long (str/join \newline
             ["Start the Hades FHIR terminology server. Each positional path is a"
@@ -273,6 +311,34 @@
         vals
         (map (partial apply max-key count))
         (sort-by second))))
+
+(defn validate-invocation
+  "Return nil if `actual-args` and `opts` satisfy `cmd-entry`'s declarative
+  spec, otherwise an error message string. Spec keys:
+    `:args` — `{:min N :max M :hint STR}`
+    `:requires-opt` — option key that must be present (truthy & non-empty)."
+  [{:keys [cmd args requires-opt]} actual-args opts]
+  (let [{:keys [min max hint]} args
+        n (count actual-args)
+        suffix (when hint (str ": " hint))
+        present? (fn [v] (and v (or (not (coll? v)) (seq v))))]
+    (cond
+      (and min (< n min))
+      (str "'" cmd "' requires "
+           (cond
+             (and max (= max min)) (str "exactly " min " argument" (when (> min 1) "s"))
+             (= 1 min) "at least one argument"
+             :else (str "at least " min " arguments"))
+           suffix)
+
+      (and max (> n max))
+      (str "'" cmd "' takes "
+           (if (zero? max) "no positional arguments"
+               (str "at most " max " argument" (when (> max 1) "s")))
+           suffix)
+
+      (and requires-opt (not (present? (get opts requires-opt))))
+      (str "'" cmd "' requires --" (name requires-opt)))))
 
 (defn parse-cli
   "Parse command-line arguments. Returns a map with:

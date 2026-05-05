@@ -10,20 +10,20 @@
             (is (nil? errors))
             (is (= ["install"] cmds))
             (is (= ["snomed.db"] (vec arguments)))
-            (is (= ["uk.nhs/sct-clinical"] (:dist options)))
+            (is (= [{:id "uk.nhs/sct-clinical" :version nil}] (:dist options)))
             (is (= "api-key.txt" (:api-key options))))}
 
    {:s    "install carries the @version suffix through to :dist"
     :args ["install" "snomed.db" "--dist" "uk.nhs/sct-clinical@2025-02-01" "--api-key=api-key.txt"]
     :test (fn [{:keys [options errors]}]
             (is (nil? errors))
-            (is (= ["uk.nhs/sct-clinical@2025-02-01"] (:dist options))))}
+            (is (= [{:id "uk.nhs/sct-clinical" :version "2025-02-01"}] (:dist options))))}
 
    {:s    "install with FHIR package id (no slash) via --dist"
     :args ["install" "fhir.db" "--dist" "hl7.fhir.r4.core@4.0.1"]
     :test (fn [{:keys [options errors]}]
             (is (nil? errors))
-            (is (= ["hl7.fhir.r4.core@4.0.1"] (:dist options))))}
+            (is (= [{:id "hl7.fhir.r4.core" :version "4.0.1"}] (:dist options))))}
 
    {:s    "install uk.nhs/* without --api-key fails at parse time"
     :args ["install" "snomed.db" "--dist" "uk.nhs/sct-clinical"]
@@ -48,7 +48,7 @@
     :args ["available" "--dist" "hl7.fhir.r4.core"]
     :test (fn [{:keys [options errors]}]
             (is (nil? errors))
-            (is (= ["hl7.fhir.r4.core"] (:dist options))))}
+            (is (= [{:id "hl7.fhir.r4.core" :version nil}] (:dist options))))}
 
    {:s    "available with --dist for SNOMED requires --api-key"
     :args ["available" "--dist" "uk.nhs/sct-clinical"]
@@ -192,9 +192,14 @@
            "--default=http://example.com/cs=2.0"]
     :test (fn [{:keys [options errors]}]
             (is (nil? errors))
-            (is (= ["http://snomed.info/sct=http://snomed.info/sct/900000000000207008/version/20250201"
-                    "http://example.com/cs=2.0"]
+            (is (= {"http://snomed.info/sct" "http://snomed.info/sct/900000000000207008/version/20250201"
+                    "http://example.com/cs" "2.0"}
                    (:default options))))}
+
+   {:s    "--default rejects values without `=`"
+    :args ["serve" "snomed.db" "--default" "no-equals-sign"]
+    :test (fn [{:keys [errors]}]
+            (is (some #(re-find #"URL=VERSION" %) errors)))}
 
    {:s    "list with no paths parses cleanly (impl enforces the at-least-one rule)"
     :args ["list"]

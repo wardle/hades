@@ -53,15 +53,6 @@
   ([reason msg data]
    (throw (ex-info msg (assoc data :reason reason)))))
 
-(defn- require-positional!
-  "Ensure the command got at least `n` positional arguments."
-  [cmd n args]
-  (when (< (count args) n)
-    (cli-error ::missing-args
-               (str "'" cmd "' requires "
-                    (if (= 1 n) "at least one path"
-                        (str "at least " n " arguments"))))))
-
 ;;; Subcommand implementations
 
 (defn- summarise-resources
@@ -134,6 +125,30 @@
                      (summarise-resources (:resources result))))
     result))
 
+(defn- index-one [{:keys [kind path]}]
+  (case kind
+    :hermes-db
+    (do (println (str "  → index: " path))
+        (hermes/index path)
+        (with-open [svc (hermes/open path {:quiet true})]
+          (log-module-dependency-problems svc)))
+    :fhir-tx-db
+    (do (println (str "  → index: " path))
+        (sqlite-index/index! path))
+    ;; Release sources (rf2, loinc, fhir-json) — silently skipped so a
+    ;; chained pipeline that mixes release sources with built artefacts
+    ;; doesn't fail spuriously.
+    nil))
+
+(defn- compact-one [{:keys [kind path]}]
+  (case kind
+    :hermes-db  (do (println (str "  → compact: " path)) (hermes/compact path))
+    :fhir-tx-db (do (println (str "  → vacuum: " path))  (sqlite-db/vacuum! path))
+    nil))
+
+(defn- build-index [_opts paths]
+  (run! index-one (mapcat sources/find-sources! paths)))
+
 (defn- import-into!
   "Import release sources into the destination database `file`.
 
@@ -167,12 +182,10 @@
 
 (defn- import-from
   "`import <dest-db> <sources...>` — first positional is destination."
-  [_opts args]
-  (when (< (count args) 2)
-    (cli-error ::missing-args
-               "'import' requires <dest-db> followed by one or more source paths"))
-  (let [[dest & srcs] args]
-    (import-into! dest srcs)))
+  [{:keys [no-index]} [dest & srcs]]
+  (import-into! dest srcs)
+  (when-not no-index
+    (run! index-one (sources/find-sources! dest))))
 
 (defn- list-rf2 [dir]
   (let [files (importer/importable-files dir)
@@ -263,91 +276,73 @@
       (println (str "  ! " path ": " (ex-message e))))))
 
 (defn- list-from [_ args]
-  (require-positional! "list" 1 args)
   (run! list-under args))
 
-(defn- split-id-version [s]
-  (str/split s #"@" 2))
-
-(defn- fhir-cache-dir [opts]
-  (or (:cache-dir opts)
-      (str (System/getProperty "java.io.tmpdir") "/hades-fhir-packages")))
-
 (defn- fetch-source!
-  "Resolve `<id>[@<version>]` to a local directory of importable resources.
+  "Resolve a parsed `--dist` value to a local directory of importable resources.
   SNOMED → RF2 release dir via Hermes; FHIR package → unpacked tarball."
-  [opts spec]
-  (let [[id version] (split-id-version spec)]
-    (cond
-      (cli/snomed-distribution? id)
-      (try
-        (some-> (download/download id (cond-> (dissoc opts :dist)
-                                        version (assoc :release-date version)))
-                .toString)
-        (catch IllegalArgumentException _
-          (cli-error ::unknown-distribution
-                     (str "Unrecognised SNOMED distribution: " id ". "
-                          "Run `hades available` for a list."))))
+  [opts {:keys [id version]}]
+  (cond
+    (cli/snomed-distribution? id)
+    (try
+      (some-> (download/download id (cond-> (dissoc opts :dist)
+                                      version (assoc :release-date version)))
+              .toString)
+      (catch IllegalArgumentException _
+        (cli-error ::unknown-distribution
+                   (str "Unrecognised SNOMED distribution: " id ". "
+                        "Run `hades available` for a list."))))
 
-      (cli/fhir-package? id)
-      (let [v (or version
-                  (try (get-in (fhir-package/metadata id) [:dist-tags :latest])
-                       (catch ExceptionInfo _ nil))
-                  (cli-error ::unknown-distribution
-                             (str "Unrecognised FHIR package or no version found: " id)))]
-        (.getPath ^java.io.File (fhir-package/download! id v (fhir-cache-dir opts))))
+    (cli/fhir-package? id)
+    (let [v (or version
+                (try (get-in (fhir-package/metadata id) [:dist-tags :latest])
+                     (catch ExceptionInfo _ nil))
+                (cli-error ::unknown-distribution
+                           (str "Unrecognised FHIR package or no version found: " id)))]
+      (.getPath ^java.io.File (fhir-package/download! id v (:cache-dir opts))))
 
-      :else
-      (cli-error ::unknown-distribution
-                 (str "Unrecognised distribution identifier: " id ". "
-                      "Expected `<region>.<provider>/<id>` (SNOMED) "
-                      "or reverse-DNS lowercase (FHIR package).")))))
+    :else
+    (cli-error ::unknown-distribution
+               (str "Unrecognised distribution identifier: " id ". "
+                    "Expected `<region>.<provider>/<id>` (SNOMED) "
+                    "or reverse-DNS lowercase (FHIR package)."))))
 
 (defn- list-source!
-  "Print the available versions for one --dist spec. Returns true on
-  success, false if the registry/listing failed or the id was
+  "Print the available versions for one parsed `--dist` value. Returns
+  true on success, false if the registry/listing failed or the id was
   unrecognised."
-  [opts spec]
-  (let [[id _] (split-id-version spec)
-        banner (str "\n=== " id " ===")]
-    (println banner)
-    (try
-      (cond
-        (cli/snomed-distribution? id)
-        (do (download/download id (-> opts (dissoc :dist) (assoc :release-date "list")))
-            true)
+  [opts {:keys [id]}]
+  (println (str "\n=== " id " ==="))
+  (try
+    (cond
+      (cli/snomed-distribution? id)
+      (do (download/download id (-> opts (dissoc :dist) (assoc :release-date "list")))
+          true)
 
-        (cli/fhir-package? id)
-        (do (fhir-package/print-versions id) true)
+      (cli/fhir-package? id)
+      (do (fhir-package/print-versions id) true)
 
-        :else
-        (do (println (str "  ! unrecognised id: " id)) false))
-      (catch IllegalArgumentException _
-        (println (str "  ! unrecognised distribution: " id))
-        false)
-      (catch ExceptionInfo e
-        (println (str "  ! " (ex-message e)))
-        false))))
+      :else
+      (do (println (str "  ! unrecognised id: " id)) false))
+    (catch IllegalArgumentException _
+      (println (str "  ! unrecognised distribution: " id))
+      false)
+    (catch ExceptionInfo e
+      (println (str "  ! " (ex-message e)))
+      false)))
 
 (defn- install
-  "`install <dest-db> --dist <id>...` — exactly one positional, one or
-  more `--dist` flags."
-  [{:keys [dist] :as opts} args]
-  (when (empty? dist)
-    (cli-error ::missing-args
-               (str "'install' requires at least one --dist <id>. "
-                    "Run `hades available` to see installable terminologies.")))
-  (when (not= 1 (count args))
-    (cli-error ::missing-args
-               "'install' takes exactly one positional argument: the destination database path"))
-  (let [dest (first args)]
-    (try
-      (doseq [spec dist]
-        (when-let [path (fetch-source! opts spec)]
-          (import-into! dest [path])))
-      (catch ConnectException e
-        (cli-error ::network-error
-                   (str "Could not connect to remote server: " (ex-message e)))))))
+  "`install <dest-db> --dist <id>...`"
+  [{:keys [dist] :as opts} [dest]]
+  (try
+    (doseq [d dist]
+      (when-let [path (fetch-source! opts d)]
+        (import-into! dest [path])))
+    (when-not (:no-index opts)
+      (run! index-one (sources/find-sources! dest)))
+    (catch ConnectException e
+      (cli-error ::network-error
+                 (str "Could not connect to remote server: " (ex-message e))))))
 
 (defn- available [{:keys [dist] :as opts} args]
   (when (seq args)
@@ -364,36 +359,21 @@
       (println "\n=== FHIR packages ===")
       (fhir-package/print-known))))
 
-(defn- index-one [{:keys [kind path]}]
-  (case kind
-    :hermes-db
-    (do (println (str "  → index: " path))
-        (hermes/index path)
-        (with-open [svc (hermes/open path {:quiet true})]
-          (log-module-dependency-problems svc)))
-    :fhir-tx-db
-    (do (println (str "  → index: " path))
-        (sqlite-index/index! path))
-    ;; Release sources (rf2, loinc, fhir-json) — silently skipped so a
-    ;; chained pipeline that mixes release sources with built artefacts
-    ;; doesn't fail spuriously.
-    nil))
-
-(defn- compact-one [{:keys [kind path]}]
-  (case kind
-    :hermes-db  (do (println (str "  → compact: " path)) (hermes/compact path))
-    :fhir-tx-db (do (println (str "  → vacuum: " path))  (sqlite-db/vacuum! path))
-    nil))
-
-(defn- build-index [_opts paths]
-  (require-positional! "index" 1 paths)
-  (run! index-one (mapcat sources/find-sources! paths)))
-
 (defn- compact [_opts paths]
-  (require-positional! "compact" 1 paths)
   (run! compact-one (mapcat sources/find-sources! paths)))
 
-(declare build-svc)
+(defn- log-catalogue-summary [svc]
+  (log/info "service catalogue"
+            {:codesystem-count (count (protos/cs-metadata svc))
+             :valueset-count   (count (protos/vs-metadata svc))
+             :conceptmap-count (count (protos/cm-metadata svc))}))
+
+(defn- build-svc
+  "Open CLI positional paths as a Hades service."
+  [{:keys [default]} paths]
+  (let [svc (hades/open paths {:defaults default})]
+    (log-catalogue-summary svc)
+    svc))
 
 (defn- print-status-table [{:keys [codesystems valuesets conceptmaps]}]
   (let [more-line (fn [n shown]
@@ -416,7 +396,6 @@
       (pp/print-table (take 30 conceptmaps)))))
 
 (defn- status [{fmt :format :as opts} args]
-  (require-positional! "status" 1 args)
   (let [svc (build-svc opts args)]
     (try
       (let [st {:codesystems (sort-by (juxt :url :version) (protos/cs-metadata svc))
@@ -428,30 +407,6 @@
           (print-status-table st)))
       (finally
         (hades/close svc)))))
-
-(defn- log-catalogue-summary [svc]
-  (log/info "service catalogue"
-            {:codesystem-count (count (protos/cs-metadata svc))
-             :valueset-count   (count (protos/vs-metadata svc))
-             :conceptmap-count (count (protos/cm-metadata svc))}))
-
-(defn- parse-default-bindings
-  "Parse repeatable CLI `--default URL=VERSION` values into {url version}."
-  [params]
-  (into {}
-        (keep (fn [^String s]
-                (let [idx (.lastIndexOf s "=")]
-                  (when (pos? idx)
-                    [(.substring s 0 idx) (.substring s (inc idx))]))))
-        params))
-
-(defn- build-svc
-  "Open CLI positional paths as a Hades service."
-  [{:keys [default]} paths]
-  (require-positional! "serve" 1 paths)
-  (let [svc (hades/open paths {:defaults (parse-default-bindings default)})]
-    (log-catalogue-summary svc)
-    svc))
 
 (defn- write-metadata [meta path]
   (spit path (with-out-str (json/pprint meta)))
@@ -478,12 +433,6 @@
    "compact"   {:fn compact}
    "serve"     {:fn serve}
    "status"    {:fn status}})
-
-(def ^:private chain-incompatible
-  "Commands that cannot be mixed with others on a single command line
-  because their positional arguments mean something different from the
-  rest (e.g. `import dest src...`)."
-  #{"import"})
 
 (defn- usage
   ([options-summary]
@@ -524,8 +473,7 @@
   one-line error rather than a stack trace."
   [e]
   (and (instance? ExceptionInfo e)
-       (#{::missing-args
-          ::mixed-sources
+       (#{::mixed-sources
           ::unimportable-kind
           ::unknown-distribution
           ::network-error
@@ -533,9 +481,11 @@
           :unknown-source-kind}     ; raised from sources/find-sources!
         (:reason (ex-data e)))))
 
-(defn- invoke-command [cmd opts args]
+(defn- invoke-command [cmd-name opts args]
   (try
-    ((:fn cmd) opts args)
+    (if-let [err (cli/validate-invocation (cli/commands cmd-name) args opts)]
+      (do (print-error err) false)
+      ((:fn (commands cmd-name)) opts args))
     (catch ExceptionInfo e
       (if (friendly-error? e)
         (do (print-error (ex-message e)) false)
@@ -571,14 +521,10 @@
           (print-error (str "unknown command: " (str/join " " unknown))))
         (exit 2 (usage summary)))
 
-      (and (some chain-incompatible cmds) (> (count cmds) 1))
-      (exit 2 (str "ERROR: '" (first (filter chain-incompatible cmds))
-                   "' cannot be combined with other commands"))
-
       :else
       (loop [[cmd & more] cmds]
         (when cmd
-          (let [ok (invoke-command (commands cmd) options arguments)]
+          (let [ok (invoke-command cmd options arguments)]
             (if (false? ok)
               (System/exit 1)
               (recur more))))))))
