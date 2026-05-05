@@ -5,6 +5,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [com.eldrix.hades.impl.issues :as issues]
+            [com.eldrix.hades.impl.property-filter :as property-filter]
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.snomed.batch :as batch]
             [com.eldrix.hades.impl.snomed.expansion :as expansion]
@@ -371,15 +372,24 @@
   parent-relationships, concrete-values) rather than `extended-concept`,
   whose transitive `parent-relationships-expanded` is unused here and
   accounts for ~65% of its cost. All displays resolve in one batched
-  LMDB txn pair."
-  [svc lang-refset-ids code']
+  LMDB txn pair.
+
+  `properties` (optional) is the FHIR `_property=…` filter — see
+  `property-filter/parse`. Slice codes
+  `designation`/`parent`/`child` gate their respective sections; any
+  other entry is a typed-property code (`inactive`,
+  `sufficientlyDefined`, or a SNOMED attribute id)."
+  [svc lang-refset-ids code' properties]
   (when-let [concept (hermes/concept svc code')]
-    (let [direct-rels  (hermes/parent-relationships svc code')
-          parents      (get direct-rels snomed/IsA)
-          attrs        (dissoc direct-rels snomed/IsA)
-          children     (hermes/child-relationships-of-type svc code' snomed/IsA)
-          concrete     (hermes/concrete-values svc code')
-          descriptions (hermes/descriptions svc code')
+    (let [{:keys [want? want-typed?]} (property-filter/parse properties)
+          direct-rels  (hermes/parent-relationships svc code')
+          parents      (when (want? "parent") (get direct-rels snomed/IsA))
+          attrs        (when want-typed? (dissoc direct-rels snomed/IsA))
+          children     (when (want? "child")
+                         (hermes/child-relationships-of-type svc code' snomed/IsA))
+          concrete     (when want-typed? (hermes/concrete-values svc code'))
+          descriptions (when (want? "designation")
+                         (hermes/descriptions svc code'))
           display-ids  (-> #{code' snomed/Synonym snomed/FullySpecifiedName}
                            (into parents)
                            (into children)
@@ -389,32 +399,41 @@
           displays     (batch/preferred-terms svc lang-refset-ids display-ids)]
       {:displays   displays
        :properties (concat
-                     [{:code :inactive :value (not (:active concept))}
-                      {:code :sufficientlyDefined :value (= snomed/Defined (:definitionStatusId concept))}]
+                     (cond-> []
+                       (want? "inactive")
+                       (conj {:code :inactive :value (not (:active concept))})
+                       (want? "sufficientlyDefined")
+                       (conj {:code :sufficientlyDefined
+                              :value (= snomed/Defined (:definitionStatusId concept))}))
                      (map (fn [pid] {:code :parent :value (keyword (str pid))
                                      :description (get displays pid)}) parents)
                      (map (fn [cid] {:code :child :value (keyword (str cid))
                                      :description (get displays cid)}) children)
-                     (mapcat (fn [[tid vids]]
-                               (map (fn [vid] {:code         (keyword (str tid))
-                                               :code-display (get displays tid)
-                                               :value        (keyword (str vid))
-                                               :description  (get displays vid)})
-                                    vids))
-                             attrs)
-                     (map (fn [{:keys [typeId value]}]
-                            {:code         (keyword (str typeId))
-                             :code-display (get displays typeId)
-                             :value        value})
-                          concrete))
-       :designations (into []
-                       (comp (filter :active)
-                         (map (fn [d] {:language (keyword (:languageCode d))
-                                       :use      {:system  snomed-system-uri
-                                                  :code    (str (:typeId d))
-                                                  :display (get displays (:typeId d))}
-                                       :value    (:term d)})))
-                       descriptions)})))
+                     (when want-typed?
+                       (mapcat (fn [[tid vids]]
+                                 (when (want? (str tid))
+                                   (map (fn [vid] {:code         (keyword (str tid))
+                                                   :code-display (get displays tid)
+                                                   :value        (keyword (str vid))
+                                                   :description  (get displays vid)})
+                                        vids)))
+                               attrs))
+                     (when want-typed?
+                       (keep (fn [{:keys [typeId value]}]
+                               (when (want? (str typeId))
+                                 {:code         (keyword (str typeId))
+                                  :code-display (get displays typeId)
+                                  :value        value}))
+                             concrete)))
+       :designations (when (want? "designation")
+                       (into []
+                             (comp (filter :active)
+                                   (map (fn [d] {:language (keyword (:languageCode d))
+                                                 :use      {:system  snomed-system-uri
+                                                            :code    (str (:typeId d))
+                                                            :display (get displays (:typeId d))}
+                                                 :value    (:term d)})))
+                             descriptions))})))
 
 (defn- refinement-pair-seq
   "Walk a parsed :refinements vec — which may contain grouped sets or
@@ -433,11 +452,11 @@
   Returns nil when the concept is unknown. The `hermes/concept` gate up
   front keeps the not-found fast path to a single concept-record read,
   with no locale or version work."
-  [svc code code' {:keys [version displayLanguage]}]
+  [svc code code' {:keys [version displayLanguage properties]}]
   (when (hermes/concept svc code')
     (let [lang-refset-ids (hermes/match-locale svc displayLanguage true)
           {:keys [displays properties designations]}
-          (concept-properties svc lang-refset-ids code')
+          (concept-properties svc lang-refset-ids code' properties)
           ver (or version (version-uri svc))]
       {;; FHIR $lookup `name` parameter — tx.fhir.org and the
        ;; tx-ecosystem fixtures use the `system|version-uri` form here
@@ -462,7 +481,7 @@
   the rendered canonical expression. Returns nil when parsing fails or
   the focus concept is unknown. `match-locale` / `version-uri` are paid
   only when the expression parses and the focus is real."
-  [svc code {:keys [version displayLanguage]}]
+  [svc code {:keys [version displayLanguage properties]}]
   (when-let [parsed (try (hermes/parse-expression svc code) (catch Exception _ nil))]
     (when-let [focus-id (some-> parsed :subExpression :focusConcepts first :conceptId)]
       (when (hermes/concept svc focus-id)
@@ -471,17 +490,22 @@
                                                        {:terms :update :definition-status :auto
                                                         :language-refset-ids lang-refset-ids})
                             (catch Exception _ code))
-              base         (concept-properties svc lang-refset-ids focus-id)
-              refine-pairs (refinement-pair-seq (:refinements (:subExpression parsed)))
+              base         (concept-properties svc lang-refset-ids focus-id properties)
+              {:keys [want? want-typed?]} (property-filter/parse properties)
+              refine-pairs (when want-typed?
+                             (refinement-pair-seq (:refinements (:subExpression parsed))))
               refine-ids   (into #{} cat refine-pairs)
               refine-disp  (batch/preferred-terms svc lang-refset-ids refine-ids)
               displays     (merge (:displays base) refine-disp)
-              refine-props (mapv (fn [[tid vid]]
-                                   {:code         (keyword (str tid))
-                                    :code-display (get displays tid)
-                                    :value        (keyword (str vid))
-                                    :description  (get displays vid)})
-                                 refine-pairs)
+              refine-props (when want-typed?
+                             (into []
+                                   (keep (fn [[tid vid]]
+                                           (when (want? (str tid))
+                                             {:code         (keyword (str tid))
+                                              :code-display (get displays tid)
+                                              :value        (keyword (str vid))
+                                              :description  (get displays vid)})))
+                                   refine-pairs))
           ver (or version (version-uri svc))]
           {:name         (str snomed-system-uri "|" ver)
            :version      ver
@@ -573,11 +597,14 @@
                           :details-code "invalid-code"
                           :text         msg
                           :expression   ["code"]}]}))
-          ;; Post-coordinated expression: full validation including MRCM
-          ;; Structural errors (concept-not-found, attribute-invalid) → result: false
-          ;; MRCM constraint issues (attribute-not-in-domain, value-out-of-range) → result: true, informational
+          ;; Post-coordinated expression: full validation including MRCM.
+          ;; Structural errors (parse-error, concept-not-found,
+          ;; attribute-invalid, syntax-error) → result: false. MRCM
+          ;; constraint issues (attribute-not-in-domain,
+          ;; value-out-of-range) → result: true, informational.
           (let [all-errors (hermes/validate-expression svc code)
-                structural-types #{:concept-not-found :concept-inactive :attribute-invalid :syntax-error}
+                structural-types #{:parse-error :concept-not-found :concept-inactive
+                                   :attribute-invalid :syntax-error}
                 structural (filter #(structural-types (:error %)) all-errors)
                 mrcm-issues (remove #(structural-types (:error %)) all-errors)
                 lang-ids (hermes/match-locale svc displayLanguage true)

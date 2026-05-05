@@ -8,7 +8,7 @@
            com.cnuernber/charred          {:mvn/version "1.038"}
            ch.qos.logback/logback-classic {:mvn/version "1.5.32"}
 
-           com.eldrix/hermes              {:mvn/version "1.4.1607"}
+           com.eldrix/hermes              {:mvn/version "1.4.1611"}
            com.google.re2j/re2j           {:mvn/version "1.8"}
            io.pedestal/pedestal.service   {:mvn/version "0.8.1"}
            io.pedestal/pedestal.jetty     {:mvn/version "0.8.1"}

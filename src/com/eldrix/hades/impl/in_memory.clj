@@ -28,6 +28,7 @@
             [com.eldrix.hades.impl.display :as display]
             [com.eldrix.hades.impl.fhir-extract :as fhir-extract]
             [com.eldrix.hades.impl.issues :as issues]
+            [com.eldrix.hades.impl.property-filter :as property-filter]
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.vs-validate :as vs-validate])
   (:import (com.google.re2j Pattern)))
@@ -200,7 +201,7 @@
   (cs-resource [_ _params]
     (cs-resource-from-meta meta))
 
-  (cs-lookup [_ {:keys [system code displayLanguage]}]
+  (cs-lookup [_ {:keys [system code displayLanguage properties]}]
     (if-let [[concept _] (if case-sensitive?
                             (when-let [c (get code-index code)] [c false])
                             (ci-lookup code-index ci-index code))]
@@ -208,8 +209,11 @@
             url     (:url meta)
             version (:version meta)
             actual-code (:code concept)
-            parents (get (:parents hierarchy) actual-code)
-            children (get (:children hierarchy) actual-code)
+            {:keys [want? want-typed?]} (property-filter/parse properties)
+            parents      (when (want? "parent")
+                           (get (:parents hierarchy) actual-code))
+            children     (when (want? "child")
+                           (get (:children hierarchy) actual-code))
             props (:properties concept)
             inactive? (concept-inactive? concept)
             abstract? (concept-abstract? property-uri-map concept)
@@ -226,7 +230,8 @@
          :definition  (:definition concept)
          :abstract    abstract?
          :properties  (concat
-                        [{:code :inactive :value (boolean inactive?)}]
+                        (when (want? "inactive")
+                          [{:code :inactive :value (boolean inactive?)}])
                         (when parents
                           (map (fn [p] {:code :parent
                                         :value (keyword p)
@@ -237,13 +242,15 @@
                                         :value (keyword c)
                                         :description (:display (get code-index c))})
                                children))
-                        (keep (fn [prop]
-                                (let [pc (get prop "code")
-                                      v (fhir-extract/typed-property-value prop)]
-                                  (when (and pc (some? v) (not (#{"parent" "child"} pc)))
-                                    {:code (keyword pc) :value v})))
-                              props))
-         :designations (:designations concept)})
+                        (when want-typed?
+                          (keep (fn [prop]
+                                  (let [pc (get prop "code")
+                                        v (fhir-extract/typed-property-value prop)]
+                                    (when (and pc (some? v) (not (#{"parent" "child"} pc))
+                                               (want? pc))
+                                      {:code (keyword pc) :value v})))
+                                props)))
+         :designations (when (want? "designation") (:designations concept))})
       (issues/unknown-code-lookup (or system (:url meta)) code)))
 
   (cs-validate-code [_ {:keys [code display displayLanguage]}]

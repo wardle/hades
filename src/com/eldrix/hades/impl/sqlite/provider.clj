@@ -25,6 +25,7 @@
             [com.eldrix.hades.impl.compose :as compose]
             [com.eldrix.hades.impl.display :as display]
             [com.eldrix.hades.impl.issues :as issues]
+            [com.eldrix.hades.impl.property-filter :as property-filter]
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.sqlite.db :as db]
             [com.eldrix.hades.impl.vs-validate :as vs-validate]
@@ -514,15 +515,7 @@
             (let [actual-code (:concept/code row)
                   inactive? (int->bool (:concept/inactive row))
                   abstract? (int->bool (:concept/abstract row))
-                  ;; FHIR `_property=…` filter. When unset, return the
-                  ;; full lookup; when set, restrict to those slices.
-                  ;; "designation"/"parent"/"child" are slice keys; any
-                  ;; other entry is a typed-property code.
-                  want         (when (seq properties) (set properties))
-                  slice-keys   #{"designation" "parent" "child"}
-                  want?        (fn [k] (or (nil? want) (contains? want k)))
-                  want-typed?  (or (nil? want)
-                                   (some #(not (slice-keys %)) want))
+                  {:keys [want? want-typed?]} (property-filter/parse properties)
                   display-langs (display/parse-display-language displayLanguage)
                   ;; If the caller asks for designations explicitly we
                   ;; must return all of them. When designations are only
@@ -552,7 +545,12 @@
                :definition  (:concept/definition row)
                :abstract    (boolean abstract?)
                :properties  (concat
-                              [{:code :inactive :value (boolean inactive?)}]
+                              ;; `inactive` is a typed concept property
+                              ;; (http://hl7.org/fhir/concept-properties#inactive),
+                              ;; not a slice — gate by name not by the
+                              ;; slice flag.
+                              (when (want? "inactive")
+                                [{:code :inactive :value (boolean inactive?)}])
                               (when parents
                                 (mapv (fn [{:keys [code display]}]
                                         (cond-> {:code :parent :value (keyword code)}

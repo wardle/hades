@@ -41,10 +41,22 @@
    {:id :lookup/minimal
     :fn (fn [svc]
           (hades/lookup svc {:system snomed-uri :code (str multiple-sclerosis)}))}
-   {:id :lookup/full
+   ;; FHIR `_property=*` wildcard — same observable output as no
+   ;; filter, but goes through the `property-filter/parse` predicate
+   ;; bundle on every section. A wide gap vs `:lookup/minimal` would
+   ;; flag the gating overhead.
+   {:id :lookup/property-wildcard
     :fn (fn [svc]
           (hades/lookup svc {:system snomed-uri :code (str multiple-sclerosis)
-                             :property ["designation" "parent" "child" "definition"]}))}
+                             :properties ["*"]}))}
+   ;; FHIR `_property=` filter — slice-only path. Skips designations,
+   ;; concrete-values and attribute relationships entirely. Should be
+   ;; meaningfully cheaper than `:lookup/full` if the filter is doing
+   ;; its job.
+   {:id :lookup/property-parent-only
+    :fn (fn [svc]
+          (hades/lookup svc {:system snomed-uri :code (str multiple-sclerosis)
+                             :properties ["parent"]}))}
 
    ;; --- $validate-code ----------------------------------------------------
    {:id :validate-code/plain
@@ -59,6 +71,26 @@
           (hades/validate-code svc
             {:url    (expand-url (str "ecl/<<" disease))
              :system snomed-uri :code (str diabetes-mellitus)}))}
+   ;; Display-mismatch path — exercises the descriptions scan + active
+   ;; display enumeration + invalid-display issue building. Hot when
+   ;; clients send displays drifted from the current release.
+   {:id :validate-code/wrong-display
+    :fn (fn [svc]
+          (hades/validate-code svc {:system snomed-uri :code (str diabetes-mellitus)
+                                    :display "completely-wrong-label"}))}
+   ;; CodeableConcept aggregation — the composite layer fans out to
+   ;; per-coding $validate-code and selects a winner. Mirrors the
+   ;; common HAPI/IPS workload that ships several codings per
+   ;; observation. Three codings: one valid SNOMED, one wrong-system,
+   ;; one wrong-code.
+   {:id :validate-code/codeable-concept
+    :fn (fn [svc]
+          (hades/validate-codeable-concept
+            svc
+            [{:system snomed-uri :code (str diabetes-mellitus)}
+             {:system "http://example.com/fake" :code "x"}
+             {:system snomed-uri :code "999999999"}]
+            {:url (expand-url (str "ecl/<<" disease))}))}
 
    ;; --- $subsumes — all four branches -------------------------------------
    {:id :subsumes/equivalent
@@ -125,6 +157,22 @@
     :fn (fn [svc]
           (hades/expand svc {:url (str snomed-uri "?fhir_vs")
                              :filter "diabetes" :count 100}))}
+   ;; Refset-driven implicit VS — different Lucene path from ECL/isa
+   ;; (`q-memberOf` + per-page inactive check). 900000000000527005 is
+   ;; the SAME-AS historical-association refset; ships in every
+   ;; International release and contains thousands of members.
+   {:id :expand/refset
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url "refset/900000000000527005")
+                             :count 100}))}
+   ;; Paginated ECL with `displayLanguage` — exercises locale-specific
+   ;; designation selection at scale. Different cost profile from
+   ;; `:lookup/full` (single concept) because designations are read
+   ;; per row across the page.
+   {:id :expand/with-display-language
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url (str "ecl/<<" clinical-finding))
+                             :count 100 :displayLanguage "en-US"}))}
 
    ;; --- $expand via hand-built compose (bypasses URL parsing) -------------
    {:id :compose/is-a
