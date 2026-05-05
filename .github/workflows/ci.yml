@@ -121,15 +121,18 @@ jobs:
       - name: Provision pinned LOINC DB
         if: steps.loinc-cache.outputs.cache-hit != 'true'
         env:
-          LOINC_RELEASE_URL: ${{ secrets.LOINC_RELEASE_URL }}
+          GH_TOKEN: ${{ secrets.LOINC_ARCHIVE_TOKEN }}
         run: |
-          if [ -z "$LOINC_RELEASE_URL" ]; then
-            echo "::error::LOINC_RELEASE_URL secret is not set. The URL must return the LOINC 2.81 zip (typical: a presigned S3 URL)."
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::LOINC_ARCHIVE_TOKEN secret is not set. Mint a fine-grained PAT with Contents: read on wardle/loinc-releases."
             exit 1
           fi
           mkdir -p .hades
           extract_dir=$(mktemp -d)
-          curl -fsSL --retry 3 --retry-delay 5 "$LOINC_RELEASE_URL" -o "$extract_dir/loinc.zip"
+          gh release download 2.81 \
+            --repo wardle/loinc-releases \
+            --pattern 'Loinc_2.81.zip' \
+            --output "$extract_dir/loinc.zip"
           unzip -q "$extract_dir/loinc.zip" -d "$extract_dir/release"
           # The zip may unpack to release/LoincTableCore/... or
           # release/Loinc_2.81/LoincTableCore/... — find whichever.
