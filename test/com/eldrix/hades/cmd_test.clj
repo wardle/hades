@@ -175,24 +175,29 @@
           (close-bundle! bundle))
         (finally (delete-tree! root))))))
 
-(deftest providers-for-path-stops-at-hermes-db-boundary
-  (testing "a hermes-db dir inside the path is detected, not its internals"
+(deftest providers-for-path-recognises-hermes-db-via-manifest
+  (testing "a hermes-db dir inside the path is recognised by its manifest;
+             open fails at hermes/open with a non-orchestration error"
     (let [root (mk-tmp-dir "fake-hermes")]
       (try
-        ;; Construct something that looks like a Hermes DB so the walker
-        ;; emits :hermes-db. We don't actually open it (that needs real
-        ;; LMDB data) — we just verify the walker stops descending into
-        ;; it and would have errored at the Hermes-open boundary, not
-        ;; at a stray .json we plant inside.
+        ;; Build a directory that satisfies the manifest-driven
+        ;; recogniser: real-looking manifest.edn + the three linked
+        ;; artefacts. The contents are stubs — `hermes/open` will fail
+        ;; on the empty LMDB/Lucene dirs, which is exactly the error
+        ;; we want to surface (provider-level, not walker-level).
         (let [hermes-dir (io/file root "snomed.db")]
-          (spit-file! (io/file hermes-dir "manifest.edn") "{}")
+          (spit-file! (io/file hermes-dir "manifest.edn")
+                      (pr-str {:version "lmdb/18"
+                               :store   "store.db"
+                               :search  "search.db"
+                               :members "members.db"}))
           (.mkdirs (io/file hermes-dir "store.db"))
-          (spit-file! (io/file hermes-dir "rogue.json")
-                      "{\"resourceType\":\"CodeSystem\",\"url\":\"http://example.com/x\"}"))
-        ;; The walker stopped at the hermes-db boundary, so the JSON
-        ;; inside was not picked up. The fake Hermes DB fails at
-        ;; `hermes/open`, NOT at the walker — and crucially not with
-        ;; either of our orchestration error reasons.
+          (.mkdirs (io/file hermes-dir "search.db"))
+          (.mkdirs (io/file hermes-dir "members.db")))
+        ;; The walker recognised the hermes-db; `bundle-for-path` then
+        ;; calls `hermes/open` which throws on the stub LMDB store.
+        ;; Crucially the failure is NOT one of the walker's
+        ;; orchestration error reasons.
         (let [thrown (try (paths/bundle-for-path (.getPath root))
                           nil
                           (catch Throwable t t))
@@ -202,5 +207,5 @@
           (is (not= :unknown-source-kind reason)
               "walker found the hermes-db, did not return empty")
           (is (not= :com.eldrix.hades.impl.paths/release-source-not-served reason)
-              "rogue JSON inside the hermes-db was not surfaced"))
+              "the hermes-db wasn't classified as a release source"))
         (finally (delete-tree! root))))))

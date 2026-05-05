@@ -1,7 +1,9 @@
 (ns com.eldrix.hades.impl.snomed
   "Implementation of Hades protocols for SNOMED CT.
   A thin wrapper around the Hermes SNOMED terminology service"
-  (:require [clojure.string :as str]
+  (:require [clojure.edn :as edn]
+            [clojure.java.io :as io]
+            [clojure.string :as str]
             [com.eldrix.hades.impl.issues :as issues]
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.snomed.batch :as batch]
@@ -11,6 +13,7 @@
             [com.eldrix.hermes.snomed :as snomed]
             [lambdaisland.uri :as uri])
   (:import (com.eldrix.hermes.snomed Description)
+           (java.io File)
            (java.time.format DateTimeFormatter)))
 
 (set! *warn-on-reflection* true)
@@ -856,3 +859,52 @@
 
         :else
         (unmapped (str "Cannot translate — unsupported ConceptMap " (or (:url params) "")))))))
+
+;; ---------------------------------------------------------------------------
+;; Recognisers
+;; ---------------------------------------------------------------------------
+
+(defn- rf2-recognise
+  "Recognise a single SNOMED CT RF2 component file by IHTSDO release
+  filename convention. Annotations carry the parsed component, version
+  date, content-subtype and content-type; `:dir` is the file's parent
+  (the directory the importer reads from)."
+  [^File f _probe?]
+  (when (.isFile f)
+    (when-let [{:keys [component] :as parsed}
+               (snomed/parse-snomed-filename (.getName f))]
+      (when component
+        (-> (select-keys parsed [:component :version-date :content-subtype :content-type])
+            (assoc :dir (.getParentFile f)))))))
+
+(def rf2-recogniser
+  {:id          :rf2
+   :importable? true
+   :database?   false
+   :recognise   rf2-recognise})
+
+(defn- hermes-db-recognise
+  "Recognise a Hermes SNOMED database by its `manifest.edn`. We read
+  the manifest, require its `:version` to match Hermes'
+  `expected-manifest`, and confirm every linked artefact exists.
+
+  Hermes' `expected-manifest` is private, but we share the author —
+  reaching in via the var means schema drift (a renamed `:store`,
+  a new `:reasoner` key, a bumped `lmdb/N`) is picked up automatically
+  by re-resolving against the upstream definition."
+  [^File f _probe?]
+  (when (and (.isFile f) (= "manifest.edn" (.getName f)))
+    (when-let [manifest (try (edn/read-string (slurp f)) (catch Exception _ nil))]
+      (let [expected @#'com.eldrix.hermes.core/expected-manifest
+            root     (.getParentFile f)
+            linked   (vals (dissoc expected :version))]
+        (when (and (= (:version manifest) (:version expected))
+                   (every? string? linked)
+                   (every? #(.exists (io/file root %)) linked))
+          {:dir root :version (:version manifest)})))))
+
+(def hermes-db-recogniser
+  {:id          :hermes-db
+   :importable? false
+   :database?   true
+   :recognise   hermes-db-recognise})

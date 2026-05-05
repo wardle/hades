@@ -24,19 +24,17 @@
              (recur (into acc events))))
          acc)))))
 
-(deftest infer-version-from-directory
-  (testing "version inferred from a `Loinc_X.YZ` directory name"
-    (is (= "2.82" (loinc/infer-version (io/file "/tmp/Loinc_2.82"))))
-    (is (= "2.82" (loinc/infer-version (io/file "/tmp/Loinc_2.82-rc1"))))
-    (is (= "1.0"  (loinc/infer-version (io/file "/tmp/loinc-1.0"))))
-    (is (nil?     (loinc/infer-version (io/file "/tmp/no-version-here")))))
-  (testing "explicit :version overrides directory inference"
+(deftest read-version-from-table-core
+  (testing "version derived from max(VersionLastChanged) in LoincTableCore.csv"
+    (is (= "2.74" (loinc/read-version (io/file fixture-root)))
+        "fixture rows are tagged 2.73 / 2.74 → max is 2.74"))
+  (testing "explicit :version overrides content-derived version"
     (let [data (release-data fixture-root {:version "9.99"})
           meta (first (by-type data :codesystem-meta))]
       (is (= "9.99" (:version meta)))))
-  (testing "missing version + un-parseable directory name throws"
+  (testing "release without a readable LoincTableCore.csv throws"
     (is (thrown? clojure.lang.ExceptionInfo
-                 (release-data "/tmp/no-version-here")))))
+                 (release-data "/tmp/no-such-loinc-release")))))
 
 (deftest codesystem-meta-shape
   (let [data (release-data fixture-root {:version "2.82"})

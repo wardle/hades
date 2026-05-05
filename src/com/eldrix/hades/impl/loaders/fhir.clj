@@ -174,6 +174,24 @@
           ;; ingestion of the rest of the directory.
           [(skipped (.getPath f) nil :parse-error)])))))
 
+(defn load-files
+  "Parse each FHIR JSON `File` into fhir-data, returning a flat seq.
+  Use this when you already have a list of files (e.g. from
+  `sources/tx-file-seq` filtering `:fhir-json` entries).
+
+  Soft skips (`.index.json`, unsupported `resourceType`, nested Bundle,
+  malformed JSON sidecars) appear as `:type :skipped` entries with one
+  of `:reason` values `:index-json`, `:unsupported-resource-type`,
+  `:nested-bundle`, `:parse-error`. Hard failures (oversized file)
+  throw `ex-info` with `:reason :max-bytes-exceeded`.
+
+  Options:
+    :max-bytes  per-file cap (default `default-max-bytes`, 64 MiB)."
+  ([files] (load-files files nil))
+  ([files {:keys [max-bytes]}]
+   (let [max (long (or max-bytes default-max-bytes))]
+     (mapcat #(file->fhir-data % max) files))))
+
 (defn load-paths
   "Walk `root` (a path string, `File`, or `Path`) and return a flat
   seq of fhir-data. `root` may be a single `.json` file or a directory.
@@ -181,17 +199,46 @@
   Symlinks are followed: the operator chose `root`, so files reachable
   from it are in scope by definition.
 
-  Soft skips (`.index.json`, unsupported `resourceType`, nested Bundle,
-  malformed JSON sidecars) appear as `:type :skipped` entries in the
-  returned seq with one of `:reason` values `:index-json`,
-  `:unsupported-resource-type`, `:nested-bundle`, `:parse-error`.
-  Hard failures (oversized file) throw `ex-info` with `:reason
-  :max-bytes-exceeded`.
-
-  Options:
-    :max-bytes  per-file cap (default `default-max-bytes`, 64 MiB)."
+  Prefer `load-files` when you already have the file list (the walker
+  does its own discovery and doesn't need this entry point's recursion)."
   ([root] (load-paths root nil))
-  ([root {:keys [max-bytes]}]
-   (let [^File canonical-root (.getCanonicalFile (io/file root))
-         max (long (or max-bytes default-max-bytes))]
-     (mapcat #(file->fhir-data % max) (file-seq canonical-root)))))
+  ([root opts]
+   (load-files (file-seq (.getCanonicalFile (io/file root))) opts)))
+
+;; ---------------------------------------------------------------------------
+;; Recogniser
+;; ---------------------------------------------------------------------------
+
+(def ^:private json-detect-max-bytes
+  "Cap on file size when sniffing for FHIR JSON. The header is in the
+  first few KiB; arbitrarily large JSON in the tree is almost certainly
+  not what we're looking for and parsing it would be wasteful."
+  (* 16 1024 1024))
+
+(def ^:private fhir-resource-types
+  ["CodeSystem" "ValueSet" "ConceptMap" "Bundle"])
+
+(defn- fhir-json-recognise [^File f _probe?]
+  (when (and (.isFile f)
+             (str/ends-with? (str/lower-case (.getName f)) ".json")
+             (<= (.length f) json-detect-max-bytes))
+    (try
+      (with-open [r (io/reader f)]
+        (let [buf  (char-array 8192)
+              n    (.read r buf)
+              head (String. buf 0 (max 0 n))]
+          (when (str/includes? head "\"resourceType\"")
+            (some (fn [t]
+                    (when (str/includes? head (str "\"" t "\""))
+                      {:resource-type t}))
+                  fhir-resource-types))))
+      (catch Exception _ nil))))
+
+(def fhir-json-recogniser
+  "Recognises a FHIR JSON resource (CodeSystem, ValueSet, ConceptMap or
+  Bundle). Both axes — importable into a FTRM container, *and* directly
+  servable as an in-memory provider."
+  {:id          :fhir-json
+   :importable? true
+   :database?   true
+   :recognise   fhir-json-recognise})

@@ -4,6 +4,7 @@
   (:require [clojure.data.json :as json]
             [clojure.core.async :as async]
             [clojure.pprint :as pp]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.impl.cli :as cli]
@@ -20,6 +21,7 @@
             [com.eldrix.hermes.download :as download]
             [com.eldrix.hermes.importer :as importer])
   (:import (clojure.lang ExceptionInfo)
+           (java.io File)
            (java.net ConnectException)
            (java.time LocalDate)
            (java.time.format DateTimeFormatter)))
@@ -67,125 +69,103 @@
   (log/info "rf2 import" {:file file :sources (count dirs) :paths (vec dirs)})
   (hermes/import-snomed file dirs :exclude importer/default-exclude))
 
-(defn- pipe-loinc-sources!
-  "Stream LOINC sources into `out-ch`. Forwards every fhir-data item from
-  each source channel onto `out-ch`. Stops at the first sign of trouble:
-  consumer-closed `out-ch`, or a `:stream-error` from the producer (the
-  error is forwarded so the consumer raises). Returns true on clean
-  completion, false if any source aborted early.
-
-  On abort paths we close the source channel so the LOINC producer
-  thread (parked on `>!!` to its bounded buffer) unblocks and exits;
-  otherwise it would grind through the whole release filling buffer
-  space no consumer is reading."
-  [srcs out-ch]
-  (let [error? (fn [fd]
-                 (cond
-                   (and (map? fd) (= :stream-error (:type fd))) true
-                   (sequential? fd) (some #(= :stream-error (:type %)) fd)
-                   :else false))]
-    (loop [[src & more] (seq srcs)]
-      (if-not src
-        true
-        (let [src-ch (loinc-loader/stream-release src)
-              outcome
-              (loop []
-                (if-let [fd (async/<!! src-ch)]
-                  (cond
-                    (error? fd)               (do (async/>!! out-ch fd) :error)
-                    (async/>!! out-ch fd)     (recur)
-                    :else                     :closed)
-                  :done))]
-          (case outcome
-            :done   (recur more)
-            :closed (do (async/close! src-ch) false)
-            :error  (do (async/close! src-ch) false)))))))
-
-(defn- import-loinc! [file srcs]
-  (let [ch (async/chan 256)
-        _producer
-        (async/thread
-          (try
-            (pipe-loinc-sources! srcs ch)
-            (catch Throwable t
-              (async/>!! ch {:type :stream-error :ex t}))
-            (finally
-              (async/close! ch))))
+(defn- import-loinc! [file roots]
+  (let [ch     (loinc-loader/stream-releases roots)
         result (sqlite-index/import-fhir-data file ch {:loader-type "loinc-csv"})]
     (log/info "loinc import complete"
-              (merge {:file file :sources (count srcs)}
+              (merge {:file file :sources (count roots)}
                      (summarise-resources (:resources result))))
     result))
 
-(defn- import-fhir-json! [file srcs]
-  (let [data-fn #(mapcat fhir-loader/load-paths srcs)
-        result (sqlite-index/build! file data-fn {:loader-type "fhir-json"})]
+(defn- import-fhir-json! [file files]
+  (let [result (sqlite-index/build! file #(fhir-loader/load-files files)
+                                    {:loader-type "fhir-json"})]
     (log/info "fhir-json import complete"
-              (merge {:file file :files (count srcs)}
+              (merge {:file file :files (count files)}
                      (summarise-resources (:resources result))))
     result))
 
-(defn- index-one [{:keys [kind path]}]
+(s/fdef index-one
+  :args (s/cat :entry ::sources/entry))
+
+(defn- index-one [{:keys [kind ^File file ^File dir]}]
   (case kind
     :hermes-db
-    (do (println (str "  → index: " path))
-        (hermes/index path)
-        (with-open [svc (hermes/open path {:quiet true})]
-          (log-module-dependency-problems svc)))
+    (let [path (.getPath dir)]
+      (println (str "  → index: " path))
+      (hermes/index path)
+      (with-open [svc (hermes/open path {:quiet true})]
+        (log-module-dependency-problems svc)))
     :fhir-tx-db
-    (do (println (str "  → index: " path))
-        (sqlite-index/index! path))
-    ;; Release sources (rf2, loinc, fhir-json) — silently skipped so a
-    ;; chained pipeline that mixes release sources with built artefacts
-    ;; doesn't fail spuriously.
+    (let [path (.getPath file)]
+      (println (str "  → index: " path))
+      (sqlite-index/index! path))
+    ;; Release-only entries (rf2, loinc) — silently skipped so a chained
+    ;; pipeline that mixes release sources with built artefacts doesn't
+    ;; fail spuriously. fhir-json gets here too but indexing it is a no-op.
     nil))
 
-(defn- compact-one [{:keys [kind path]}]
+(s/fdef compact-one
+  :args (s/cat :entry ::sources/entry))
+
+(defn- compact-one [{:keys [kind ^File file ^File dir]}]
   (case kind
-    :hermes-db  (do (println (str "  → compact: " path)) (hermes/compact path))
-    :fhir-tx-db (do (println (str "  → vacuum: " path))  (sqlite-db/vacuum! path))
+    :hermes-db  (let [path (.getPath dir)]  (println (str "  → compact: " path)) (hermes/compact path))
+    :fhir-tx-db (let [path (.getPath file)] (println (str "  → vacuum: " path))  (sqlite-db/vacuum! path))
     nil))
+
+(defn- files-or-throw [paths]
+  (let [files (vec (mapcat sources/tx-file-seq paths))]
+    (if (seq files)
+      files
+      (cli-error :unknown-source-kind
+                 (str "Couldn't find any terminology sources under "
+                      (str/join ", " paths))
+                 {:paths (vec paths)}))))
 
 (defn- build-index [_opts paths]
-  (run! index-one (mapcat sources/find-sources! paths)))
+  (run! index-one (files-or-throw paths)))
 
 (defn- import-into!
   "Import release sources into the destination database `file`.
 
   Each input path is walked for recognisable files: RF2 components,
   LOINC table-core markers, FHIR JSON resources. A TRUD bundle with
-  several sibling RF2 trees yields RF2 findings across all of them
+  several sibling RF2 trees yields RF2 entries across all of them
   (Hermes recurses from each unique parent dir, so non-standard
   layouts work). RF2 (Hermes LMDB+Lucene) and FHIR-data (FTRM SQLite)
   are different storage formats and cannot share one `file`."
   [file paths]
-  (let [findings (vec (mapcat sources/find-sources! paths))
-        by-kind  (group-by :kind findings)
-        unimport (concat (by-kind :hermes-db) (by-kind :fhir-tx-db))
-        rf2-dirs        (sources/rf2-roots   findings)
-        loinc-dirs      (sources/loinc-roots findings)
-        fhir-json-paths (mapv :path (by-kind :fhir-json))]
+  (let [files     (files-or-throw paths)
+        ;; database-only = built artefact, can't be an import source
+        unimport  (filter #(and (:database? %) (not (:importable? %))) files)
+        rf2-dirs  (->> files (filter #(= :rf2 (:kind %))) (map :dir) distinct
+                       (mapv #(.getPath ^File %)))
+        loinc-dirs (->> files (filter #(= :loinc (:kind %))) (map :dir) distinct
+                        (mapv #(.getPath ^File %)))
+        fhir-json-files (->> files (filter #(= :fhir-json (:kind %))) (mapv :file))]
     (when (seq unimport)
       (cli-error ::unimportable-kind
                  (str "Cannot import already-built artefacts: "
-                      (str/join ", " (map :path unimport))
+                      (str/join ", " (map #(.getPath ^File (:file %)) unimport))
                       ". Use `serve` to open them directly.")
-                 {:paths (mapv :path unimport)}))
-    (when (and (seq rf2-dirs) (or (seq loinc-dirs) (seq fhir-json-paths)))
+                 {:paths (mapv #(.getPath ^File (:file %)) unimport)}))
+    (when (and (seq rf2-dirs) (or (seq loinc-dirs) (seq fhir-json-files)))
       (cli-error ::mixed-sources
                  (str "Cannot mix SNOMED RF2 with LOINC / FHIR JSON in one "
                       "import — they target different database formats.")
-                 {:rf2 rf2-dirs :loinc loinc-dirs :fhir-json fhir-json-paths}))
+                 {:rf2 rf2-dirs :loinc loinc-dirs
+                  :fhir-json (mapv #(.getPath ^File %) fhir-json-files)}))
     (when (seq rf2-dirs)        (import-rf2!       file rf2-dirs))
     (when (seq loinc-dirs)      (import-loinc!     file loinc-dirs))
-    (when (seq fhir-json-paths) (import-fhir-json! file fhir-json-paths))))
+    (when (seq fhir-json-files) (import-fhir-json! file fhir-json-files))))
 
 (defn- import-from
   "`import <dest-db> <sources...>` — first positional is destination."
   [{:keys [no-index]} [dest & srcs]]
   (import-into! dest srcs)
   (when-not no-index
-    (run! index-one (sources/find-sources! dest))))
+    (run! index-one (files-or-throw [dest]))))
 
 (defn- list-rf2 [dir]
   (let [files (importer/importable-files dir)
@@ -216,8 +196,8 @@
                      {:resource "ValueSets (AnswerLists)" :count (get counts :valueset 0)}
                      {:resource "ConceptMaps (MapTo)"     :count (get counts :conceptmap 0)}])))
 
-(defn- list-fhir-json [paths]
-  (let [data (mapcat fhir-loader/load-paths paths)
+(defn- list-fhir-json [files]
+  (let [data (fhir-loader/load-files files)
         cs (->> data (filter #(= :codesystem-meta (:type %)))
                 (map #(select-keys % [:url :version])))
         vs (->> data (filter #(= :valueset (:type %)))
@@ -225,8 +205,8 @@
         cm (->> data (filter #(= :conceptmap (:type %)))
                 (map #(select-keys % [:url :version])))
         skipped (filter #(= :skipped (:type %)) data)]
-    (println (str "\n=== FHIR JSON resources (" (count paths) " file"
-                  (when (not= 1 (count paths)) "s") ") ==="))
+    (println (str "\n=== FHIR JSON resources (" (count files) " file"
+                  (when (not= 1 (count files)) "s") ") ==="))
     (println (str "  CodeSystems: " (count cs)
                   "  ValueSets: "   (count vs)
                   "  ConceptMaps: " (count cm)
@@ -252,26 +232,28 @@
 
 (defn- list-under [path]
   (try
-    (let [findings (sources/find-sources path)
-          rf2-dirs   (sources/rf2-roots   findings)
-          loinc-dirs (sources/loinc-roots findings)
-          fhir-paths (mapv :path (filter #(= :fhir-json   (:kind %)) findings))
-          fhir-tx    (filter #(= :fhir-tx-db (:kind %)) findings)
-          hermes     (filter #(= :hermes-db  (:kind %)) findings)]
+    (let [files      (sources/tx-file-seq path)
+          rf2-dirs   (->> files (filter #(= :rf2 (:kind %))) (map :dir) distinct
+                          (mapv #(.getPath ^File %)))
+          loinc-dirs (->> files (filter #(= :loinc (:kind %))) (map :dir) distinct
+                          (mapv #(.getPath ^File %)))
+          fhir-files (->> files (filter #(= :fhir-json (:kind %))) (mapv :file))
+          fhir-tx    (filter #(= :fhir-tx-db (:kind %)) files)
+          hermes     (filter #(= :hermes-db  (:kind %)) files)]
       (println (str "\n# " path
                     " — RF2: " (count rf2-dirs)
                     "  LOINC: " (count loinc-dirs)
-                    "  FHIR JSON: " (count fhir-paths)
+                    "  FHIR JSON: " (count fhir-files)
                     "  FTRM: " (count fhir-tx)
                     "  Hermes-DB: " (count hermes)))
-      (if (empty? findings)
+      (if (empty? files)
         (println "  ! no recognised terminology sources")
         (do (run! list-rf2        rf2-dirs)
             (run! list-loinc      loinc-dirs)
-            (when (seq fhir-paths)
-              (list-fhir-json fhir-paths))
-            (run! list-fhir-tx-db (map :path fhir-tx))
-            (run! list-hermes-db  (map :path hermes)))))
+            (when (seq fhir-files)
+              (list-fhir-json fhir-files))
+            (run! list-fhir-tx-db (map #(.getPath ^File (:file %)) fhir-tx))
+            (run! list-hermes-db  (map #(.getPath ^File (:dir %))  hermes)))))
     (catch ExceptionInfo e
       (println (str "  ! " path ": " (ex-message e))))))
 
@@ -299,7 +281,7 @@
                      (catch ExceptionInfo _ nil))
                 (cli-error ::unknown-distribution
                            (str "Unrecognised FHIR package or no version found: " id)))]
-      (.getPath ^java.io.File (fhir-package/download! id v (:cache-dir opts))))
+      (.getPath ^File (fhir-package/download! id v (:cache-dir opts))))
 
     :else
     (cli-error ::unknown-distribution
@@ -339,7 +321,7 @@
       (when-let [path (fetch-source! opts d)]
         (import-into! dest [path])))
     (when-not (:no-index opts)
-      (run! index-one (sources/find-sources! dest)))
+      (run! index-one (files-or-throw [dest])))
     (catch ConnectException e
       (cli-error ::network-error
                  (str "Could not connect to remote server: " (ex-message e))))))
@@ -360,7 +342,7 @@
       (fhir-package/print-known))))
 
 (defn- compact [_opts paths]
-  (run! compact-one (mapcat sources/find-sources! paths)))
+  (run! compact-one (files-or-throw paths)))
 
 (defn- log-catalogue-summary [svc]
   (log/info "service catalogue"
@@ -478,7 +460,7 @@
           ::unknown-distribution
           ::network-error
           :com.eldrix.hades.impl.paths/release-source-not-served
-          :unknown-source-kind}     ; raised from sources/find-sources!
+          :unknown-source-kind}     ; raised from files-or-throw / paths/bundle-for-path
         (:reason (ex-data e)))))
 
 (defn- invoke-command [cmd-name opts args]

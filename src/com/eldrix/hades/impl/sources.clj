@@ -1,246 +1,125 @@
 (ns com.eldrix.hades.impl.sources
-  "Discover terminology files and built artefacts under a path.
+  "Walk a path and recognise terminology files.
 
-  Detection is filename- and content-based: walk the tree and ask of
-  each file `is this an RF2 component? a LOINC table? a FHIR JSON? a
-  built FTRM container?`. Distribution layouts (TRUD bundles, vendor
-  repackagings, nested vs flat extracts) are out of scope — if the
-  files are recognisable, the source is recognisable. The only
-  directory-level boundary is a Hermes built database, which is a
-  self-contained artefact we don't want to descend into.
+  `tx-file-seq` returns a flat sequence of entries, one per recognised
+  file. Each entry has the shape:
 
-  `find-sources` walks `path` and returns a vector of findings:
+      {:file        java.io.File   ; the file that was recognised
+       :kind        :rf2 | :loinc | :fhir-json | :hermes-db | :fhir-tx-db
+       :importable? boolean        ; can be fed to an importer
+       :database?   boolean        ; can be opened as a provider
+       :dir         java.io.File   ; only on kinds whose unit is a directory
+       ;; …kind-specific annotations (:component, :version, :resource-type, …)}
 
-      [{:kind <kind> :path <path>} ...]
+  `:importable?` and `:database?` are role flags declared on the
+  recogniser; consumers filter by them. `:file` is what was recognised;
+  `:dir` is the consumer-facing handle for kinds where the natural unit
+  is a directory (RF2 release, LOINC release, Hermes DB).
 
-  Recognised kinds:
-    :rf2         — single SNOMED CT RF2 component file (sct2_*.txt etc.)
-    :loinc       — LoincTableCore.csv (the canonical LOINC marker)
-    :fhir-json   — FHIR JSON resource file (CodeSystem/ValueSet/...)
-    :hermes-db   — built Hermes SNOMED database directory
-    :fhir-tx-db  — built FHIR terminology SQLite container (FTRM)
-
-  Per-file emission for terminology data lets the dispatcher decide
-  how to aggregate: RF2 files get rolled up to their containing dirs
-  before being handed to Hermes; LOINC files have their release root
-  inferred (parent of `LoincTableCore/`) before being handed to the
-  LOINC loader; FHIR JSON files are passed through directly."
+  Recognition is delegated to per-provider recognisers — see
+  `impl/snomed`, `impl/loaders/loinc`, `impl/loaders/fhir`,
+  `impl/sqlite/db`. Each one knows how to recognise its own files; the
+  walker is just glue."
   (:require [clojure.java.io :as io]
+            [clojure.spec.alpha :as s]
             [clojure.string :as str]
-            [com.eldrix.hermes.snomed :as snomed])
-  (:import (java.io File RandomAccessFile)))
+            [com.eldrix.hades.impl.loaders.fhir :as fhir]
+            [com.eldrix.hades.impl.loaders.loinc :as loinc]
+            [com.eldrix.hades.impl.snomed :as snomed]
+            [com.eldrix.hades.impl.sqlite.db :as sqlite-db])
+  (:import (java.io File)))
 
 (set! *warn-on-reflection* true)
 
 ;; ---------------------------------------------------------------------------
-;; File-level detectors
+;; Specs — the contracts between the walker, its registry, and consumers.
 ;; ---------------------------------------------------------------------------
 
-(defn- rf2-file?
-  "Any file whose name parses as a SNOMED CT RF2 component filename
-  (per the IHTSDO release file naming convention). Layout-agnostic."
-  [^File f]
-  (and (.isFile f)
-       (some? (:component (snomed/parse-snomed-filename (.getName f))))))
+(s/def ::kind        #{:rf2 :loinc :fhir-json :hermes-db :fhir-tx-db})
+(s/def ::file        #(instance? File %))
+(s/def ::dir         ::file)
+(s/def ::importable? boolean?)
+(s/def ::database?   boolean?)
 
-(defn- loinc-marker-file?
-  "The canonical LOINC marker. Other LOINC CSVs (PartLink, Hierarchy,
-  AnswerList, …) have generic names that could collide with non-LOINC
-  data; `LoincTableCore.csv` is distinctive enough to anchor a release
-  on its own."
-  [^File f]
-  (and (.isFile f)
-       (= "LoincTableCore.csv" (.getName f))))
+;; A recogniser-fn takes a `File` plus a `probe?` boolean and returns
+;; either nil (not mine) or a map of kind-specific annotations.
+(s/def ::recognise   ifn?)
+(s/def ::id          ::kind)
 
-(def ^:private json-detect-max-bytes
-  "Skip files larger than this when sniffing for FHIR JSON. The header is
-  in the first few KiB; arbitrarily large JSON in the tree is almost
-  certainly not what we're looking for and parsing it would be wasteful."
-  (* 16 1024 1024))
+(s/def ::recogniser
+  (s/keys :req-un [::id ::importable? ::database? ::recognise]))
 
-(defn- json-with-fhir-resource? [^File f]
-  (and (.isFile f)
-       (str/ends-with? (str/lower-case (.getName f)) ".json")
-       (<= (.length f) json-detect-max-bytes)
-       (try
-         (with-open [r (io/reader f)]
-           ;; Read just enough to find `"resourceType"` — header is always
-           ;; near the start of a FHIR resource. Substring check on the
-           ;; first 8 KiB is enough.
-           (let [buf (char-array 8192)
-                 n   (.read r buf)
-                 head (String. buf 0 (max 0 n))]
-             (and (str/includes? head "\"resourceType\"")
-                  (some #(str/includes? head (str "\"" % "\""))
-                        ["CodeSystem" "ValueSet" "ConceptMap" "Bundle"]))))
-         (catch Exception _ false))))
+;; The walker's return entries: walker-supplied fields plus the
+;; recogniser's annotations. `:dir` is opt-un because only kinds whose
+;; natural unit is a directory carry it (RF2 / LOINC / Hermes-DB).
+(s/def ::entry
+  (s/keys :req-un [::file ::kind ::importable? ::database?]
+          :opt-un [::dir]))
 
-(def ^:private fhir-tx-application-id
-  "ASCII 'FTRM' = 0x4654524D, the FHIR-tx container application_id."
-  0x4654524D)
+(def ^:private recognisers
+  "Ordered registry. First match wins. Order matters when a file could
+  plausibly satisfy more than one recogniser; today the kinds are
+  distinctive enough that order is for clarity, not correctness."
+  [sqlite-db/fhir-tx-db-recogniser
+   snomed/hermes-db-recogniser
+   snomed/rf2-recogniser
+   loinc/loinc-recogniser
+   fhir/fhir-json-recogniser])
 
-(defn- read-be-int32 [^RandomAccessFile raf offset]
-  (.seek raf (long offset))
-  (let [b0 (bit-and (.read raf) 0xff)
-        b1 (bit-and (.read raf) 0xff)
-        b2 (bit-and (.read raf) 0xff)
-        b3 (bit-and (.read raf) 0xff)]
-    (bit-or (bit-shift-left b0 24)
-            (bit-shift-left b1 16)
-            (bit-shift-left b2 8)
-            b3)))
-
-(defn- has-fhir-tx-header? [^File f]
-  ;; SQLite file header: bytes 0–15 are "SQLite format 3\0";
-  ;; application_id is a 4-byte big-endian int at offset 68.
-  (and (.isFile f)
-       (>= (.length f) 100)
-       (try
-         (with-open [raf (RandomAccessFile. f "r")]
-           (let [magic (byte-array 16)]
-             (.readFully raf magic)
-             (and (= "SQLite format 3" (String. magic 0 15))
-                  (= fhir-tx-application-id (read-be-int32 raf 68)))))
-         (catch Exception _ false))))
-
-;; ---------------------------------------------------------------------------
-;; Directory-level boundary (only one: a built Hermes DB)
-;; ---------------------------------------------------------------------------
-
-(defn- has-hermes-layout? [^File root]
-  ;; Hermes packs an LMDB store + Lucene index into a directory with
-  ;; `manifest.edn` at the top and `store.db` as a subdirectory. We
-  ;; treat this as a self-contained artefact — descend stops here.
-  (and (.isDirectory root)
-       (.exists (io/file root "manifest.edn"))
-       (.isDirectory (io/file root "store.db"))))
+;; Validate the registry at load time so a misshapen recogniser fails
+;; here rather than during a walk. Cheap; runs once per ns load.
+(when-let [bad (seq (remove #(s/valid? ::recogniser %) recognisers))]
+  (throw (ex-info (str "Invalid recogniser(s) in registry: "
+                       (s/explain-str (s/coll-of ::recogniser) bad))
+                  {:invalid bad})))
 
 (defn- skip-dir?
-  "Skip dot-directories and common build / cache directories during
-  recursive detection. Without this, running `list .` in a project root
-  walks `.git`, `.lsp`, `node_modules`, etc., producing surprises."
+  "Skip dot-directories and common build/cache directories. Without
+  this, walking a project root descends into `.git`, `node_modules`,
+  `target`, etc., producing surprises."
   [^File f]
   (and (.isDirectory f)
        (let [n (.getName f)]
          (or (str/starts-with? n ".")
              (#{"node_modules" "target" "build" "out"} n)))))
 
-;; ---------------------------------------------------------------------------
-;; Walk
-;; ---------------------------------------------------------------------------
-
-(defn- file-kind
-  "First file-level detector to match wins. Order matters: an FTRM
-  container is a SQLite file with a specific header, so it must be
-  checked before any generic content sniff. RF2 / LOINC / FHIR JSON
-  filename or header checks are mutually exclusive in practice."
-  [^File f]
-  (cond
-    (has-fhir-tx-header? f)        :fhir-tx-db
-    (rf2-file? f)                  :rf2
-    (loinc-marker-file? f)         :loinc
-    (json-with-fhir-resource? f)   :fhir-json))
-
-(defn- descend?
-  "True when `tree-seq` should walk into `f`'s children. Skip-dirs and
-  recognised Hermes-DB containers terminate descent."
-  [^File f]
-  (and (.isDirectory f)
-       (not (skip-dir? f))
-       (not (has-hermes-layout? f))))
-
 (defn- list-children [^File f]
-  ;; Sorted for deterministic order; `.listFiles` returns nil for
-  ;; unreadable dirs.
   (sort-by #(.getName ^File %) (or (.listFiles f) [])))
 
-(defn- node->finding [^File f]
-  (cond
-    (.isFile f)      (when-let [k (file-kind f)] {:kind k :path (.getPath f)})
-    (.isDirectory f) (when (has-hermes-layout? f) {:kind :hermes-db :path (.getPath f)})))
+(defn- recognise-file
+  "Apply each recogniser to `f` in order; first to claim it wins.
+  Returns a complete entry, or nil when no recogniser claims the file.
+  The returned entry is asserted against `::entry` so a misbehaving
+  recogniser is caught at the boundary (asserts are a no-op when
+  `*compile-asserts*` is false)."
+  [^File f probe?]
+  (reduce (fn [_ {:keys [id importable? database? recognise]}]
+            (when-let [ann (recognise f probe?)]
+              (reduced (s/assert ::entry
+                                 (assoc ann
+                                        :file        f
+                                        :kind        id
+                                        :importable? importable?
+                                        :database?   database?)))))
+          nil
+          recognisers))
 
-(defn find-sources
-  "Walk `path` and return a vector of `{:kind :path}` findings.
+(defn tx-file-seq
+  "Walk `path` and return a flat seq of recognised terminology entries.
+  See the namespace docstring for the entry shape. Returns `[]` when
+  `path` doesn't exist or contains nothing recognisable.
 
-  `path` may be a file or a directory. If `path` is itself recognised
-  (a Hermes DB directory, an FTRM file, an RF2 component file, etc.)
-  one finding is returned for it; otherwise the walker descends,
-  emitting a finding per recognised file. Returns `[]` when no marker
-  matched anywhere under `path`."
-  [path]
-  (let [^File root (io/file path)]
-    (if (.exists root)
-      (into [] (keep node->finding) (tree-seq descend? list-children root))
-      [])))
-
-(def ^:private kinds-help
-  "Hermes SNOMED database (manifest.edn + store.db/), FHIR-tx SQLite container (application_id 'FTRM'), SNOMED RF2 component files (sct2_*.txt etc.), LOINC (LoincTableCore.csv), FHIR JSON (*.json with a CodeSystem/ValueSet/ConceptMap/Bundle).")
-
-(defn find-sources!
-  "Like `find-sources` but throws `ex-info` when the walk yields no
-  findings. Useful for subcommands where an empty input is always an
-  operator error (`import`, `serve`, `index`, `compact`)."
-  [path]
-  (let [r (find-sources path)]
-    (if (seq r)
-      r
-      (throw (ex-info
-               (str "Couldn't find any terminology sources under " path
-                    ". Looked for: " kinds-help)
-               {:reason :unknown-source-kind :path path})))))
-
-;; ---------------------------------------------------------------------------
-;; Aggregation helpers — turn per-file findings into loader-ready inputs
-;; ---------------------------------------------------------------------------
-
-(defn rf2-roots
-  "Given a seq of `:rf2` findings, return the unique containing
-  directories. Hermes' importer walks recursively from each, so we
-  don't need to compute a notional `release root` — passing the
-  immediate parent of every component file is sufficient (and
-  deduplicating means we don't visit the same files twice)."
-  [findings]
-  (->> findings
-       (filter #(= :rf2 (:kind %)))
-       (map (fn [{:keys [path]}] (.getPath (.getParentFile (io/file path)))))
-       distinct
-       vec))
-
-(defn loinc-roots
-  "Given a seq of `:loinc` findings (each pointing at a
-  LoincTableCore.csv file), return the unique release-root directories
-  the LOINC loader expects. Standard release: file lives at
-  `<root>/LoincTableCore/LoincTableCore.csv`, so the root is the
-  grandparent. Flat extract: file lives at `<root>/LoincTableCore.csv`,
-  so the root is the parent."
-  [findings]
-  (->> findings
-       (filter #(= :loinc (:kind %)))
-       (map (fn [{:keys [path]}]
-              (let [f (io/file path)
-                    parent (.getParentFile f)]
-                (.getPath (if (= "LoincTableCore" (.getName parent))
-                            (.getParentFile parent)
-                            parent)))))
-       distinct
-       vec))
-
-;; ---------------------------------------------------------------------------
-;; Legacy single-kind shims
-;; ---------------------------------------------------------------------------
-
-(defn detect
-  "Legacy single-kind shim. Returns the kind of the first finding under
-  `path`, or nil when none is found. Prefer `find-sources` for new code."
-  [path]
-  (some-> (first (find-sources path)) :kind))
-
-(defn detect!
-  "Legacy single-kind shim. Like `detect` but throws `ex-info` when no
-  marker matched."
-  [path]
-  (or (detect path)
-      (throw (ex-info
-               (str "Couldn't recognise " path " as a terminology source. "
-                    "Looked for: " kinds-help)
-               {:reason :unknown-source-kind :path path}))))
+  `:probe?` (default false) lets recognisers opt into more expensive
+  enrichment of annotations — e.g. opening a database to count
+  resources. Off the cheap walking path."
+  ([path] (tx-file-seq path {}))
+  ([path {:keys [probe?] :or {probe? false}}]
+   (let [^File root (io/file path)]
+     (if (.exists root)
+       (into []
+             (comp (filter #(.isFile ^File %))
+                   (keep #(recognise-file % probe?)))
+             (tree-seq #(and (.isDirectory ^File %) (not (skip-dir? %)))
+                       list-children
+                       root))
+       []))))

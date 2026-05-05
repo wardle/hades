@@ -24,7 +24,7 @@
             [clojure.string :as str]
             [next.jdbc :as jdbc])
   (:import (com.zaxxer.hikari HikariConfig HikariDataSource)
-           (java.io Closeable)))
+           (java.io Closeable File)))
 
 (set! *warn-on-reflection* true)
 
@@ -35,6 +35,7 @@
   0x4654524D)
 
 (def schema-version 1)
+
 
 (def ^:private schema-resource
   "com/eldrix/hades/sqlite/schema-v1.sql")
@@ -104,8 +105,34 @@
 ;; Identity check
 ;; ---------------------------------------------------------------------------
 
-(defn- empty-file? [^java.io.File f]
+(defn- empty-file? [^File f]
   (or (not (.exists f)) (zero? (.length f))))
+
+(defn fhir-tx-db?
+  "True when `f` is a FHIR terminology SQLite container — i.e. opening
+  it via the SQLite JDBC driver succeeds and the `application_id`
+  PRAGMA matches the FTRM stamp. Uses the proper API rather than
+  peeking at the SQLite file header so any future change to how the
+  stamp is written is honoured automatically. Cost is one un-pooled
+  JDBC connection (~5 ms)."
+  [^File f]
+  (and (.isFile f)
+       (try
+         (let [ds (jdbc/get-datasource (jdbc-spec (.getPath f)))]
+           (with-open [conn (jdbc/get-connection ds)]
+             (= application-id
+                (long (or (read-pragma conn "application_id") 0)))))
+         (catch Exception _ false))))
+
+(def fhir-tx-db-recogniser
+  "Recognises a FHIR terminology SQLite container (FTRM). Returns no
+  extra annotations on the cheap path; opening to count resources is
+  left to the consumer."
+  {:id          :fhir-tx-db
+   :importable? false
+   :database?   true
+   :recognise   (fn [^File f _probe?]
+                  (when (fhir-tx-db? f) {}))})
 
 (defn- check-identity! [conn path]
   (let [aid (long (or (read-pragma conn "application_id") 0))]

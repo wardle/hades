@@ -1,6 +1,7 @@
 (ns com.eldrix.hades.impl.paths
   "Open terminology artefact paths as Hades provider bundles."
-  (:require [clojure.tools.logging.readable :as log]
+  (:require [clojure.spec.alpha :as s]
+            [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.impl.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.impl.loaders.fhir :as fhir-loader]
@@ -8,7 +9,8 @@
             [com.eldrix.hades.impl.sources :as sources]
             [com.eldrix.hades.impl.sqlite.db :as sqlite-db]
             [com.eldrix.hades.impl.sqlite.provider :as sqlite-provider]
-            [com.eldrix.hermes.core :as hermes]))
+            [com.eldrix.hermes.core :as hermes])
+  (:import (java.io Closeable File)))
 
 (set! *warn-on-reflection* true)
 
@@ -36,15 +38,18 @@
   ([a b] (merge-with into a b))
   ([a b & more] (reduce merge-bundles (merge-bundles a b) more)))
 
-(defn bundle-for-finding
-  "Open one built artefact finding as a provider bundle.
+(s/fdef open-database
+  :args (s/cat :entry ::sources/entry))
 
-  FHIR JSON and release-source findings are handled by `bundle-for-path`,
-  not here."
-  [{:keys [kind path]}]
+(defn open-database
+  "Open one built-database entry as a provider bundle. Dispatches on
+  `:kind`; uses `:dir` for Hermes (the DB is a directory) and `:file`
+  for FTRM (the DB is a file)."
+  [{:keys [kind ^File file ^File dir]}]
   (case kind
     :hermes-db
-    (let [hermes-svc (hermes/open path)
+    (let [path       (.getPath dir)
+          hermes-svc (hermes/open path)
           releases   (mapv :term (hermes/release-information hermes-svc))]
       (log/info "registered provider"
                 {:source path :kind :hermes-db :releases releases})
@@ -52,7 +57,8 @@
        :closers   [#(.close hermes-svc)]})
 
     :fhir-tx-db
-    (let [{:keys [datasource codesystem valueset conceptmap naming-system]}
+    (let [path (.getPath file)
+          {:keys [datasource codesystem valueset conceptmap naming-system]}
           (sqlite-provider/open-providers path)
           providers (filterv some? [codesystem valueset conceptmap])]
       (log/info "registered provider"
@@ -61,18 +67,18 @@
                        (summarise-resources (sqlite-db/list-resources datasource))))
       {:providers      providers
        :naming-systems (when naming-system [naming-system])
-       :closers        (when (instance? java.io.Closeable datasource)
-                         [#(.close ^java.io.Closeable datasource)])})))
+       :closers        (when (instance? Closeable datasource)
+                         [#(.close ^Closeable datasource)])})))
 
 (defn- aggregate-fhir-json
-  "Build one in-memory provider set from FHIR JSON files under one input path."
-  [root paths]
-  (let [data (mapcat fhir-loader/load-paths paths)
+  "Build one in-memory provider set from FHIR JSON files."
+  [root files]
+  (let [data (fhir-loader/load-files files)
         {:keys [providers supplements totals]}
         (load-fhir/build-from-fhir-data data)]
     (log/info "registered provider"
               (merge {:source root :kind :fhir-json
-                      :files (count paths)
+                      :files (count files)
                       :supplements (count supplements)}
                      (select-keys totals [:codesystems :valuesets :conceptmaps])))
     {:providers   providers
@@ -82,24 +88,26 @@
   "Walk `path` and return the provider bundle for every recognised built
   artefact under it.
 
-  Hermes DB directories and FHIR terminology SQLite containers open as
-  closeable providers. FHIR JSON resources are aggregated into one
-  in-memory provider set per input path. Release-source findings (RF2 and
-  LOINC CSVs) are rejected because they must be imported before opening."
+  Hermes DB directories and FHIR-tx SQLite containers open as closeable
+  providers. FHIR JSON resources are aggregated into one in-memory
+  provider set per input path. Release-only sources (RF2, LOINC) are
+  rejected — they must be imported before opening."
   [path]
-  (let [findings (sources/find-sources! path)
-        by-kind  (group-by :kind findings)
-        release  (concat (by-kind :rf2) (by-kind :loinc))]
+  (let [files     (sources/tx-file-seq path)
+        release   (filter #(and (:importable? %) (not (:database? %))) files)
+        databases (filter #(#{:hermes-db :fhir-tx-db} (:kind %)) files)
+        json      (filter #(= :fhir-json (:kind %)) files)]
+    (when (empty? files)
+      (throw (ex-info (str "Couldn't find any terminology sources under " path)
+                      {:reason :unknown-source-kind :path path})))
     (when (seq release)
       (throw (ex-info (str "Path contains release sources - run import first: " path)
                       {:reason ::release-source-not-served
                        :path path
-                       :release-paths (mapv :path release)})))
-    (let [boundary  (concat (by-kind :hermes-db) (by-kind :fhir-tx-db))
-          fhir-json (by-kind :fhir-json)
-          groups    (cond-> (mapv bundle-for-finding boundary)
-                      (seq fhir-json)
-                      (conj (aggregate-fhir-json path (mapv :path fhir-json))))]
+                       :release-paths (mapv #(.getPath ^File (:file %)) release)})))
+    (let [groups (cond-> (mapv open-database databases)
+                   (seq json)
+                   (conj (aggregate-fhir-json path (mapv :file json))))]
       (reduce merge-bundles empty-bundle groups))))
 
 (defn bundle-for-paths

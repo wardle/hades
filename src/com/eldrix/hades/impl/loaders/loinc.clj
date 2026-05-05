@@ -35,25 +35,13 @@
   (:require [charred.api :as charred]
             [clojure.core.async :as async]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [com.eldrix.hades.impl.canonical :as canonical])
   (:import (java.io Closeable File)))
 
 (set! *warn-on-reflection* true)
 
 (def system-uri "http://loinc.org")
-
-;; ---------------------------------------------------------------------------
-;; Version detection
-;; ---------------------------------------------------------------------------
-
-(defn infer-version
-  "Best-effort version from the release directory name, e.g.
-  `Loinc_2.82` → `\"2.82\"`. Returns nil when no match. Tolerates
-  trailing suffixes (`Loinc_2.82-rc1`)."
-  [^File root]
-  (let [n (.getName root)]
-    (when-let [[_ v] (re-find #"(?i)Loinc[_-]?(\d+(?:\.\d+)*)" n)]
-      v)))
 
 ;; ---------------------------------------------------------------------------
 ;; CSV row maps
@@ -499,12 +487,30 @@
           (when-let [concept (part-row->concept version path row)]
             (put-fhir-data! ch concept)))))))
 
+(defn read-version
+  "Return the highest `VersionLastChanged` value across all rows of
+  `LoincTableCore.csv` under `canonical-root`. Every release bumps at
+  least one concept's last-changed marker, so `max(VersionLastChanged)`
+  is the release version itself — content-derived, immune to
+  operator-renamed unzip directories. Returns nil when the file is
+  absent or carries no recognisable version values."
+  [^File canonical-root]
+  (let [^File f (io/file canonical-root "LoincTableCore" "LoincTableCore.csv")]
+    (when (.exists f)
+      (->> (reduce-csv-rows
+             (fn [acc row]
+               (let [v (get row "VersionLastChanged")]
+                 (cond-> acc (not (str/blank? v)) (conj v))))
+             #{} f)
+           (sort canonical/semver-compare)
+           last))))
+
 (defn- release-version [^File canonical-root version]
-  (let [v (or version (infer-version canonical-root))]
+  (let [v (or version (read-version canonical-root))]
     (when (str/blank? v)
-      (throw (ex-info (str "LOINC version not provided and could not "
-                           "be inferred from directory name: "
-                           (.getName canonical-root))
+      (throw (ex-info (str "LOINC version could not be derived from "
+                           "LoincTableCore.csv under: "
+                           (.getPath canonical-root))
                       {:reason :missing-version
                        :source-path (.getPath canonical-root)})))
     v))
@@ -535,3 +541,74 @@
          (finally
            (async/close! ch))))
      ch)))
+
+(defn- stream-error?
+  "True when a fhir-data item (or batch of items) carries a stream
+  failure raised by a per-release producer."
+  [fd]
+  (cond
+    (and (map? fd) (= :stream-error (:type fd))) true
+    (sequential? fd) (some #(= :stream-error (:type %)) fd)
+    :else false))
+
+(defn stream-releases
+  "Return a channel multiplexing batched fhir-data from every LOINC
+  release in `roots`. Each release is streamed via `stream-release`;
+  outputs are forwarded onto the returned channel in order. The
+  returned channel is closed when all releases finish, when a
+  release's `:stream-error` item is propagated and aborts streaming,
+  or when the consumer closes the channel.
+
+  When a producer-side error closes the input channel mid-stream, the
+  source channel is also closed so the LOINC producer thread parked
+  on `>!!` to its bounded buffer unblocks rather than grinding through
+  the rest of the release into nothing."
+  ([roots] (stream-releases roots nil))
+  ([roots opts]
+   (let [out-ch (async/chan 256)]
+     (async/thread
+       (try
+         (loop [[root & more] (seq roots)]
+           (when root
+             (let [src-ch  (stream-release root opts)
+                   outcome (loop []
+                             (if-let [fd (async/<!! src-ch)]
+                               (cond
+                                 (stream-error? fd)
+                                 (do (async/>!! out-ch fd) :error)
+
+                                 (async/>!! out-ch fd) (recur)
+                                 :else :closed)
+                               :done))]
+               (case outcome
+                 :done   (recur more)
+                 :closed (async/close! src-ch)
+                 :error  (async/close! src-ch)))))
+         (catch Throwable t
+           (async/>!! out-ch {:type :stream-error :ex t}))
+         (finally
+           (async/close! out-ch))))
+     out-ch)))
+
+;; ---------------------------------------------------------------------------
+;; Recogniser
+;; ---------------------------------------------------------------------------
+
+(defn- loinc-recognise
+  "Anchor a LOINC release on `LoincTableCore.csv` — distinctive enough
+  to identify a release on its own. The release root is the parent
+  (flat layout) or grandparent (`<root>/LoincTableCore/LoincTableCore.csv`).
+  Version resolution is the loader's concern; this stays cheap."
+  [^File f _probe?]
+  (when (and (.isFile f) (= "LoincTableCore.csv" (.getName f)))
+    (let [parent (.getParentFile f)
+          root   (if (= "LoincTableCore" (.getName parent))
+                   (.getParentFile parent)
+                   parent)]
+      {:dir root})))
+
+(def loinc-recogniser
+  {:id          :loinc
+   :importable? true
+   :database?   false
+   :recognise   loinc-recognise})
