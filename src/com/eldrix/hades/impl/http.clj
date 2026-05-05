@@ -293,12 +293,12 @@
                 (log/error ex "Unhandled exception")))
             (assoc context :response (exception-response ex)))})
 
-(defn- with-svc
+(defn inject-svc
   "Inject the configured service onto each request as ::svc. The
   base service is shared across requests; per-request overlays derive
   from it via `with-overlays`."
   [svc]
-  {:name ::with-svc
+  {:name ::inject-svc
    :enter (fn [context]
             (assoc-in context [:request ::svc] svc))})
 
@@ -319,11 +319,7 @@
                 (seq providers)
                 (update-in [:request ::svc] #(hades/with-overlays % providers {:supplements supplements})))))})
 
-;; ---------------------------------------------------------------------------
-;; Helpers shared across handlers
-;; ---------------------------------------------------------------------------
-
-(defn- merge-flags
+(defn merge-flags
   "Merge request flags into operation params (flat). Used by every
   handler before delegating to `core/*`."
   [op-params flags]
@@ -699,7 +695,7 @@
     (-> (conn/default-connector-map (:host opts) (:port opts))
         (conn/with-interceptors [content-negotiation catch-all-error
                                  (with-max-body (:max-body-bytes opts))
-                                 (with-svc svc) tx-overlay fhir-not-found])
+                                 (inject-svc svc) tx-overlay fhir-not-found])
         (conn/with-routes (routes opts))
         (jetty/create-connector {:join? false}))))
 
