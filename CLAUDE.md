@@ -401,6 +401,20 @@ keys to Hades-specific strings.
 Run before writing any code. The purpose is to ensure the change is in the right
 place and flows data correctly.
 
+0. **Consume what already exists before producing anything new.**
+   - **Grep for existing helpers** before writing a utility (comparator,
+     parser, formatter, predicate). Check `src/` and `deps.edn`. If
+     something with a similar name or job exists, reuse it. Do not
+     introduce a "fallback" alongside a new mechanism unless the
+     fallback is clearly justified — duplicate logic is dead code in
+     waiting.
+   - **Cite the existing code you checked.** State explicitly: "I
+     grepped for X / Y / Z; nothing matches" or "found `ns/foo`,
+     reusing it." This forces the consultation step.
+   - **Consult relevant memories.** When a memory covers this area
+     (specs, naming, idioms, refactors, conventions), name the
+     memory you're applying. If unsure whether one applies, name the
+     closest and proceed.
 1. **Identify the FHIR spec requirement.** What section of the FHIR spec governs
    this behaviour? If you can't point to a spec section, you may be solving the
    wrong problem or optimising for a test rather than the specification.
@@ -419,6 +433,34 @@ place and flows data correctly.
 5. **Check for secret channels.** Does this change require smuggling data through
    metadata, dynamic vars, or `:ctx`-in-params? If yes, redesign. The data
    should be an explicit parameter or part of a return value spec.
+
+### Refactors preserve observable behaviour
+
+A "tidy this up", "simplify this", "rename this", or "remove this useless
+binding" request **never** changes observable behaviour. If your edit changes
+any of the following, stop and confirm with the user before proceeding:
+
+- **Lazy → eager** evaluation (a thunk replaced by its called result).
+- **Thunk → value**, or **value → thunk**.
+- **Deferred → immediate** computation (e.g. computing a value at the call
+  site that the callee was meant to compute on demand).
+- **Sync → async**, or async semantics (channel buffer sizes, error
+  propagation, abort handling).
+- **Ordering** of side effects, log output, or returned items.
+- **Error semantics** (what's thrown, when, with what `:reason`).
+- **Public API shape** (arities, parameter order, return shape, naming).
+
+When in doubt, list the invariants you're maintaining as part of the change.
+The smallest refactor still has a contract. Name it before changing it.
+
+### Naming public functions
+
+Before naming a public fn, write the call-site that uses it and check
+whether the name communicates without context. If the answer needs
+domain knowledge a fresh reader won't have, propose two alternatives
+instead of one and let the user pick. Mirror Clojure-core idioms when
+the shape matches: `*-seq` is a flat sequence; `*-tree` is hierarchical;
+predicates end in `?`; conversions use `->`.
 
 ### After making changes (verification checklist)
 
@@ -457,6 +499,21 @@ Run after every task. All items must pass.
 11. **New public functions have tests.**
 12. **Specs exist for public API boundaries** — input params and return values.
 13. **Changes match the task requirements** — not more, not less.
+
+#### Self-review the diff
+
+14. **Re-read the diff before reporting done.** Check for:
+    - Helpers you wrote that the project already has (you should have
+      caught this in step 0 above — but verify).
+    - Parallel/redundant logic kept "as fallback" when one path is
+      sufficient. If you can't justify both, delete one.
+    - Verbose forms where idioms exist (fully-qualified spec keywords
+      where an alias is in scope, `let` bindings used exactly once,
+      explicit constructions where threading would be clearer).
+    - Features beyond what was asked (extra options, defensive
+      validation, new abstractions). Remove unless explicitly justified.
+    - Behaviour-preserving refactors that silently changed semantics
+      (see "Refactors preserve observable behaviour" above).
 
 ### Before releasing (release checklist)
 
