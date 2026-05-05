@@ -9,24 +9,27 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-# PRs from forks do not have access to repo secrets; build-data fails
-# fast with a clear message in that case. Tests and conformance for
-# external contributors run after merge.
+# PRs from forks do not have access to repo secrets; the provisioning
+# jobs fail fast with a clear message in that case. Tests and
+# conformance for external contributors run after merge.
+#
+# Provisioning is split into one job per artefact so a failure in one
+# (e.g. TRUD or LOINC archive download) does not discard the others'
+# work. Each job uses the actions/cache restore + save split with
+# `if: always()` on save, so the cache persists even if a later step
+# in the same job fails.
 
 jobs:
-  # Single provisioning job. Produces every artefact the test and
-  # conformance jobs consume:
-  #
-  #   .hades/snomed-intl-20250201.db      — pinned SNOMED CT (Hermes)
-  #   .hades/loinc-2.81.db                — pinned LOINC (SQLite)
-  #   .hades/fhir-packages/<id>-<ver>/    — extracted FHIR JSON (in-memory provider)
-  #   .hades/fhir-smoke.db                — same FHIR packages, SQLite container
-  #
-  # Each is cached on its pinned version key and only rebuilt on cache
-  # miss. Bump the corresponding cache key when rolling forward.
-  build-data:
+  # ---------------------------------------------------------------------------
+  # Pre-warm the Maven / git deps cache for the union of every alias
+  # downstream jobs use. Without this, the first job to finish saves a
+  # partial cache and `actions/cache@v5` treats the key as immutable —
+  # so heavier-dep jobs (notably conformance, which pulls HAPI FHIR
+  # validation, OkHttp, etc.) re-download every run.
+  # ---------------------------------------------------------------------------
+  prepare-deps:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
 
@@ -40,6 +43,7 @@ jobs:
           cli: latest
 
       - uses: actions/cache@v5
+        id: deps-cache
         with:
           path: |
             ~/.m2/repository
@@ -48,38 +52,53 @@ jobs:
           key: deps-${{ hashFiles('deps.edn') }}
           restore-keys: deps-
 
-      - uses: actions/cache@v5
-        id: snomed-cache
+      - name: Pre-fetch deps for all downstream aliases
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          clojure -P -A:run:check:lint/kondo:test
+          clojure -P -X:conformance
+
+  # ---------------------------------------------------------------------------
+  # Provisioning: one job per artefact, all run in parallel.
+  # Each artefact is cached on its pinned version key and only rebuilt on
+  # cache miss. Bump the corresponding cache key when rolling forward.
+  # ---------------------------------------------------------------------------
+
+  provision-snomed-intl:
+    needs: prepare-deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: DeLaGuardo/setup-clojure@13.6.0
+        with:
+          cli: latest
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+          key: deps-${{ hashFiles('deps.edn') }}
+          restore-keys: deps-
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v5
+        id: cache
         with:
           path: .hades/snomed-intl-20250201.db
           key: snomed-intl-20250201-v1
 
-      - name: Compute weekly UK SNOMED cache key
-        id: snomed-uk-week
-        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/cache@v5
-        id: snomed-uk-cache
-        with:
-          path: .hades/snomed-uk-monolith.db
-          key: snomed-uk-monolith-${{ steps.snomed-uk-week.outputs.week }}-v1
-
-      - uses: actions/cache@v5
-        id: loinc-cache
-        with:
-          path: .hades/loinc-2.81.db
-          key: loinc-2.81-v1
-
-      - uses: actions/cache@v5
-        id: fhir-cache
-        with:
-          path: |
-            .hades/fhir-packages
-            .hades/fhir-smoke.db
-          key: fhir-pkgs-terminology7.0.1-uscore6.1.0-ips2.0.0-v1
-
-      - name: Provision pinned SNOMED DB
-        if: steps.snomed-cache.outputs.cache-hit != 'true'
+      - name: Provision pinned SNOMED Intl DB
+        id: provision
+        if: steps.cache.outputs.cache-hit != 'true'
         env:
           MLDS_USERNAME: ${{ secrets.MLDS_USERNAME }}
           MLDS_PASSWORD: ${{ secrets.MLDS_PASSWORD }}
@@ -99,8 +118,51 @@ jobs:
           clojure -M:run index   .hades/snomed-intl-20250201.db
           clojure -M:run compact .hades/snomed-intl-20250201.db
 
+      - uses: actions/cache/save@v5
+        if: always() && steps.provision.outcome == 'success'
+        with:
+          path: .hades/snomed-intl-20250201.db
+          key: snomed-intl-20250201-v1
+
+  provision-snomed-uk:
+    needs: prepare-deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: DeLaGuardo/setup-clojure@13.6.0
+        with:
+          cli: latest
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+          key: deps-${{ hashFiles('deps.edn') }}
+          restore-keys: deps-
+          fail-on-cache-miss: true
+
+      - name: Compute monthly UK SNOMED cache key
+        id: month
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: .hades/snomed-uk-monolith.db
+          key: snomed-uk-monolith-${{ steps.month.outputs.month }}-v1
+
       - name: Provision UK SNOMED Monolith DB
-        if: steps.snomed-uk-cache.outputs.cache-hit != 'true'
+        id: provision
+        if: steps.cache.outputs.cache-hit != 'true'
         env:
           TRUD_API_KEY: ${{ secrets.TRUD_API_KEY }}
         run: |
@@ -118,8 +180,47 @@ jobs:
           clojure -M:run index   .hades/snomed-uk-monolith.db
           clojure -M:run compact .hades/snomed-uk-monolith.db
 
+      - uses: actions/cache/save@v5
+        if: always() && steps.provision.outcome == 'success'
+        with:
+          path: .hades/snomed-uk-monolith.db
+          key: snomed-uk-monolith-${{ steps.month.outputs.month }}-v1
+
+  provision-loinc:
+    needs: prepare-deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: DeLaGuardo/setup-clojure@13.6.0
+        with:
+          cli: latest
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+          key: deps-${{ hashFiles('deps.edn') }}
+          restore-keys: deps-
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: .hades/loinc-2.81.db
+          key: loinc-2.81-v2
+
       - name: Provision pinned LOINC DB
-        if: steps.loinc-cache.outputs.cache-hit != 'true'
+        id: provision
+        if: steps.cache.outputs.cache-hit != 'true'
         env:
           GH_TOKEN: ${{ secrets.LOINC_ARCHIVE_TOKEN }}
         run: |
@@ -143,25 +244,79 @@ jobs:
             echo "::error::Could not locate LoincTableCore/LoincTableCore.csv inside the LOINC zip."
             exit 1
           fi
-          clojure -M:run import .hades/loinc-2.81.db "$release_dir"
+          clojure -M:run import  .hades/loinc-2.81.db "$release_dir"
+          clojure -M:run index compact .hades/loinc-2.81.db
           rm -rf "$extract_dir"
 
-      # The install CLI downloads + extracts + imports in one shot:
-      #   --cache-dir lands extracted JSON at <cache>/<id>-<version>/package/
-      #   <dest>      builds the SQLite container from the same JSON
-      # Both artefacts feed the parity test in the test job (in-memory
-      # vs SQLite, same data, two engines).
+      - uses: actions/cache/save@v5
+        if: always() && steps.provision.outcome == 'success'
+        with:
+          path: .hades/loinc-2.81.db
+          key: loinc-2.81-v2
+
+  # The install CLI downloads + extracts + imports in one shot:
+  #   --cache-dir lands extracted JSON at <cache>/<id>-<version>/package/
+  #   <dest>      builds the SQLite container from the same JSON
+  # Both artefacts feed the parity test in the test job (in-memory vs
+  # SQLite, same data, two engines).
+  provision-fhir:
+    needs: prepare-deps
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: DeLaGuardo/setup-clojure@13.6.0
+        with:
+          cli: latest
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+          key: deps-${{ hashFiles('deps.edn') }}
+          restore-keys: deps-
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: |
+            .hades/fhir-packages
+            .hades/fhir-smoke.db
+          key: fhir-pkgs-terminology7.0.1-uscore6.1.0-ips2.0.0-v2
+
       - name: Provision pinned FHIR packages (in-memory + SQLite)
-        if: steps.fhir-cache.outputs.cache-hit != 'true'
+        id: provision
+        if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          clojure -M:run install .hades/fhir-smoke.db \
+          clojure -M:run install index compact .hades/fhir-smoke.db \
             --dist hl7.terminology.r4@7.0.1 \
             --dist hl7.fhir.us.core@6.1.0 \
             --dist hl7.fhir.uv.ips@2.0.0 \
             --cache-dir .hades/fhir-packages
 
+      - uses: actions/cache/save@v5
+        if: always() && steps.provision.outcome == 'success'
+        with:
+          path: |
+            .hades/fhir-packages
+            .hades/fhir-smoke.db
+          key: fhir-pkgs-terminology7.0.1-uscore6.1.0-ips2.0.0-v2
+
+  # ---------------------------------------------------------------------------
+  # Test + conformance: each restores only the caches it actually consumes.
+  # ---------------------------------------------------------------------------
+
   test:
-    needs: build-data
+    needs: [provision-snomed-intl, provision-snomed-uk, provision-loinc, provision-fhir]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -176,7 +331,7 @@ jobs:
         with:
           cli: latest
 
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         with:
           path: |
             ~/.m2/repository
@@ -184,35 +339,36 @@ jobs:
             ~/.deps.clj
           key: deps-${{ hashFiles('deps.edn') }}
           restore-keys: deps-
+          fail-on-cache-miss: true
 
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         with:
           path: .hades/snomed-intl-20250201.db
           key: snomed-intl-20250201-v1
           fail-on-cache-miss: true
 
-      - name: Compute weekly UK SNOMED cache key
-        id: snomed-uk-week
-        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      - name: Compute monthly UK SNOMED cache key
+        id: month
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         with:
           path: .hades/snomed-uk-monolith.db
-          key: snomed-uk-monolith-${{ steps.snomed-uk-week.outputs.week }}-v1
+          key: snomed-uk-monolith-${{ steps.month.outputs.month }}-v1
           fail-on-cache-miss: true
 
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         with:
           path: .hades/loinc-2.81.db
-          key: loinc-2.81-v1
+          key: loinc-2.81-v2
           fail-on-cache-miss: true
 
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         with:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-terminology7.0.1-uscore6.1.0-ips2.0.0-v1
+          key: fhir-pkgs-terminology7.0.1-uscore6.1.0-ips2.0.0-v2
           fail-on-cache-miss: true
 
       - name: Compile check
@@ -234,7 +390,7 @@ jobs:
         run: clojure -M:test
 
   conformance:
-    needs: build-data
+    needs: [provision-snomed-intl, provision-loinc]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -249,7 +405,7 @@ jobs:
         with:
           cli: latest
 
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         with:
           path: |
             ~/.m2/repository
@@ -257,23 +413,24 @@ jobs:
             ~/.deps.clj
           key: deps-${{ hashFiles('deps.edn') }}
           restore-keys: deps-
+          fail-on-cache-miss: true
 
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         with:
           path: .hades/snomed-intl-20250201.db
           key: snomed-intl-20250201-v1
           fail-on-cache-miss: true
 
-      - uses: actions/cache@v5
+      - uses: actions/cache/restore@v5
         with:
           path: .hades/loinc-2.81.db
-          key: loinc-2.81-v1
+          key: loinc-2.81-v2
           fail-on-cache-miss: true
 
-      # Cache the tx-ecosystem clone keyed on the pinned commit. Bump the
-      # key when `tx-ecosystem-pinned-rev` in conformance_test.clj moves.
-      # `ensure-test-data!` will clone on a miss and `git checkout` on a
-      # stale hit (defensive — keys should not collide).
+      # Cache the tx-ecosystem clone keyed on the pinned commit. Bump
+      # the key when `tx-ecosystem-pinned-rev` in conformance_test.clj
+      # moves. `ensure-test-data!` will clone on a miss and `git
+      # checkout` on a stale hit (defensive — keys should not collide).
       - uses: actions/cache@v5
         with:
           path: .hades/tx-ecosystem

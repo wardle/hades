@@ -123,28 +123,32 @@ path. Build takes a few minutes; the resulting `snomed.db/` is around 2 GB.
 ## 2. Build LOINC
 
 LOINC isn't distributed via a registry — point `import` at the unzipped
-release directory:
+release directory, then build the search index and compact the
+container:
 
 ```shell
 java -jar hades.jar import loinc.db /tmp/Loinc_2.81/
+java -jar hades.jar index compact loinc.db
 ```
 
-LOINC builds into a SQLite container; no separate `index` or `compact`
-step is needed.
+`import` cannot be chained with other commands, so it's two
+invocations. `index` builds the ancestor closure and full-text
+search; `compact` runs `VACUUM` on the SQLite container.
 
 ## 3. Install FHIR conformance packages
 
 ```shell
-java -jar hades.jar install fhir.db \
+java -jar hades.jar install index compact fhir.db \
     --dist hl7.fhir.r4.core@4.0.1 \
     --dist hl7.terminology.r4@7.0.1 \
     --dist hl7.fhir.uv.ips@2.0.0
 ```
 
 Packages are pulled from `packages.fhir.org` and loaded into a SQLite
-container. To serve in-memory instead — faster lookups, larger heap —
-add `--cache-dir packages/` and `serve` the extracted directories
-directly (see [FHIR packages](#fhir-packages) below).
+container; `index` and `compact` run on the same path on the same
+line. To serve in-memory instead — faster lookups, larger heap — add
+`--cache-dir packages/` and `serve` the extracted directories directly
+(see [FHIR packages](#fhir-packages) below).
 
 ## 4. Check what you've got
 
@@ -246,8 +250,13 @@ There is no registry — manual download is required for licensing reasons,
 but no API key is involved.
 
 ```shell
-java -jar hades.jar import loinc.db /path/to/Loinc_2.81/
+java -jar hades.jar import  loinc.db /path/to/Loinc_2.81/
+java -jar hades.jar index compact loinc.db
 ```
+
+`import` brings in the raw rows; `index` builds the ancestor closure
+and the FTS tables (so `descendant-of` filters and text search work);
+`compact` runs `VACUUM`.
 
 What's exposed:
 
@@ -303,7 +312,7 @@ package directory directly for in-memory operation:
 
 ```shell
 # Install once, keep the extracted JSON in ./packages
-java -jar hades.jar install fhir.db \
+java -jar hades.jar install index compact fhir.db \
     --dist hl7.fhir.r4.core@4.0.1 \
     --dist hl7.terminology.r4@7.0.1 \
     --cache-dir packages
