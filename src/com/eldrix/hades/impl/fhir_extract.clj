@@ -5,6 +5,8 @@
   concept `:properties` stay as raw FHIR string-keyed property maps so
   every consumer applies the same value-extraction rules.")
 
+(set! *warn-on-reflection* true)
+
 (def value-keys
   "FHIR `value[x]` polymorphic keys, in priority order."
   ["valueCode" "valueCoding" "valueString" "valueInteger"

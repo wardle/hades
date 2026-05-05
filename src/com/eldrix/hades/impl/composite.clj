@@ -27,6 +27,8 @@
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.supplement :as supplement]))
 
+(set! *warn-on-reflection* true)
+
 ;; ---------------------------------------------------------------------------
 ;; Lookup helpers — pure, operate on catalogue maps
 ;; ---------------------------------------------------------------------------
@@ -298,11 +300,12 @@
       (when-let [cs (find-codesystem this key)]
         (protos/cs-resource cs (assoc params :system canonical)))))
 
-  (cs-lookup [this {:keys [system version] :as params}]
+  (cs-lookup [this {:keys [system code version] :as params}]
     (let [canonical (resolve-canonical naming-systems system)
           lookup-key (canonical/versioned-uri canonical version)]
-      (when-let [cs (find-codesystem this lookup-key)]
-        (protos/cs-lookup cs (assoc params :system canonical)))))
+      (if-let [cs (find-codesystem this lookup-key)]
+        (protos/cs-lookup cs (assoc params :system canonical))
+        (issues/unknown-system-lookup system code))))
 
   (cs-validate-code [this {:keys [system code version] :as params}]
     (let [canonical (resolve-canonical naming-systems system)
@@ -496,6 +499,12 @@
 (defn- detect-duplicates [entries resource-type]
   (->> entries
        (filter #(not (:supplement? %)))
+       ;; Wildcard entries are per-provider routing hints saying "I'll
+       ;; answer any version under this URL", not catalogue rows that
+       ;; compete with another provider. Two providers each claiming a
+       ;; wildcard for the same URL is genuine ambiguity, but it surfaces
+       ;; through the bare-URL contest below, not as `:duplicate-resource`.
+       (remove #(= canonical/wildcard-version (:version %)))
        (group-by (juxt :url :version))
        (keep (fn [[[url ver] es]]
                (let [providers (into #{} (map :provider) es)]
@@ -518,52 +527,85 @@
         latest))))
 
 (defn- bare-url-binding
-  "Pick the impl for the bare URL. One entry → use it. Multiple →
-  consult `defaults`, else pick semver-latest, else throw
-  `:ambiguous-default`. The semver-latest convention matches the FHIR
-  tx-ecosystem expectation: when a request bundles multiple versions
-  of a CodeSystem and the operation doesn't pin one, the latest wins."
+  "Pick the impl for the bare URL. The contest is over distinct provider
+  identities, not raw entries — a single provider that advertises N
+  versioned URIs for the same URL (e.g. one Hermes service composing
+  multiple SNOMED modules) is one candidate, not N. One distinct
+  provider → use it. Multiple → consult `defaults`, else pick
+  semver-latest across the entries, else throw `:ambiguous-default`.
+  The semver-latest convention matches the FHIR tx-ecosystem
+  expectation: when a request bundles multiple versions of a CodeSystem
+  and the operation doesn't pin one, the latest wins."
   [resource-type url url-entries defaults]
-  (cond
-    (= 1 (count url-entries))
-    (:provider (first url-entries))
+  (let [providers (distinct (map :provider url-entries))]
+    (cond
+      (= 1 (count providers))
+      (first providers)
 
-    (contains? defaults url)
-    (let [ver (get defaults url)
-          e (some #(when (= ver (:version %)) %) url-entries)]
-      (or (:provider e)
-          (throw (ex-info (str ":defaults references unknown version for "
-                               resource-type " '" url "': " ver)
-                          {:reason :unknown-default :url url :version ver}))))
+      (contains? defaults url)
+      (let [ver (get defaults url)
+            e (some #(when (= ver (:version %)) %) url-entries)]
+        (or (:provider e)
+            (throw (ex-info (str ":defaults references unknown version for "
+                                 resource-type " '" url "': " ver)
+                            {:reason :unknown-default :url url :version ver}))))
 
-    :else
-    (if-let [latest (pick-latest-semver url-entries)]
-      (:provider latest)
-      (throw (ex-info (str "Ambiguous default version for " resource-type
-                           " '" url "': set `:defaults {\"" url
-                           "\" \"<version>\"}` to bind the bare URL.")
-                      {:reason :ambiguous-default :url url
-                       :versions (mapv :version url-entries)})))))
+      :else
+      (if-let [latest (pick-latest-semver url-entries)]
+        (:provider latest)
+        (throw (ex-info (str "Ambiguous default version for " resource-type
+                             " '" url "': set `:defaults {\"" url
+                             "\" \"<version>\"}` to bind the bare URL.")
+                        {:reason :ambiguous-default :url url
+                         :versions (mapv :version url-entries)}))))))
 
 (defn- index-by-key
   "Build the `{url|version → provider}` catalogue plus bare-URL bindings.
   Wildcard (`version=\"*\"`) entries register under `url|*` only; they
   don't compete for bare-URL binding."
   [entries defaults resource-type]
-  (let [by-url-ver (reduce (fn [acc {:keys [url version provider]}]
+  (let [concrete-entries (remove #(= canonical/wildcard-version (:version %))
+                                 entries)
+        by-url-ver (reduce (fn [acc {:keys [url version provider]}]
                              (assoc acc (versioned-key url version) provider))
-                           {} entries)
+                           {} concrete-entries)
         by-url (group-by :url
-                         (remove #(= canonical/wildcard-version (:version %))
-                                 entries))
+                         concrete-entries)
         bare-bindings (reduce-kv
                         (fn [m url url-entries]
                           (if (seq url-entries)
                             (assoc m url (bare-url-binding
                                            resource-type url url-entries defaults))
                             m))
-                        {} by-url)]
-    (merge by-url-ver bare-bindings)))
+                        {} by-url)
+        wildcard-bindings
+        (reduce-kv
+          (fn [m url wildcard-entries]
+            (let [providers (distinct (map :provider wildcard-entries))
+                  selected (get bare-bindings url)
+                  bind (fn [provider]
+                         (assoc m (versioned-key url canonical/wildcard-version)
+                                  provider))]
+              (cond
+                (and selected (some #{selected} providers))
+                (bind selected)
+
+                (= 1 (count providers))
+                (bind (first providers))
+
+                :else
+                (throw (ex-info (str "Ambiguous wildcard provider for "
+                                     resource-type " '" url
+                                     "': set `:defaults {\"" url
+                                     "\" \"<version>\"}` to bind the wildcard.")
+                                {:reason :ambiguous-default
+                                 :url url
+                                 :versions [canonical/wildcard-version]})))))
+          {}
+          (group-by :url
+                    (filter #(= canonical/wildcard-version (:version %))
+                            entries)))]
+    (merge by-url-ver wildcard-bindings bare-bindings)))
 
 (defn from-providers
   "Build a TerminologyService from a sequence of provider impls.

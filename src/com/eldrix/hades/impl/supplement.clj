@@ -11,6 +11,8 @@
             [com.eldrix.hades.impl.fhir-extract :as fhir-extract]
             [com.eldrix.hades.impl.protocols :as protos]))
 
+(set! *warn-on-reflection* true)
+
 (defn- supplement-properties->result-properties
   "Convert raw FHIR property maps from a supplement into the
   keyword-keyed `{:code :value}` shape used by `cs-lookup` results.
@@ -57,10 +59,12 @@
     (protos/cs-resource base params))
 
   (cs-lookup [_ params]
-    (when-let [r (protos/cs-lookup base params)]
-      (if-let [extras (get supplement-lookup (result-code->str (:code r)))]
-        (augment-lookup-result r extras)
-        r)))
+    (let [r (protos/cs-lookup base params)]
+      (if (:not-found r)
+        r
+        (if-let [extras (get supplement-lookup (result-code->str (:code r)))]
+          (augment-lookup-result r extras)
+          r))))
 
   (cs-validate-code [_ {:keys [code display displayLanguage] :as params}]
     (let [base-result (protos/cs-validate-code base params)

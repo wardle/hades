@@ -13,6 +13,8 @@
             [com.eldrix.hades.impl.display :as display]
             [com.eldrix.hades.impl.protocols :as protos]))
 
+(set! *warn-on-reflection* true)
+
 (s/def ::filter (s/nilable string?))
 (s/def ::activeOnly (s/nilable boolean?))
 (s/def ::offset (s/nilable nat-int?))
@@ -60,9 +62,10 @@
     (keep (fn [c]
             (let [code (get c "code")
                   provided-display (get c "display")
-                  looked-up (when system
+                  raw       (when system
                               (protos/cs-lookup svc (cond-> {:system system :code code}
-                                                      version (assoc :version version))))]
+                                                      version (assoc :version version))))
+                  looked-up (when-not (:not-found raw) raw)]
               (when (or looked-up (nil? system))
                 (let [display-langs (display/parse-display-language (:displayLanguage params))
                       lang-display (when (and (seq display-langs) looked-up)

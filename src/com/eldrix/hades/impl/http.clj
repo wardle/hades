@@ -24,6 +24,8 @@
   (:import (java.net URLDecoder)
            (java.nio.charset StandardCharsets)))
 
+(set! *warn-on-reflection* true)
+
 (def ^:private json-write-opts
   {:escape-js-separators false
    :escape-slash         false})
@@ -241,7 +243,7 @@
   (when-let [{:keys [message issues]} (composite/check-supplement-refs svc vs-url params)]
     {:status 404
      :body   (wire/operation-outcome
-               (or issues [{:severity "error" :type "not-found" :text message}]))}))
+              (or issues [{:severity "error" :type "not-found" :text message}]))}))
 
 ;; ---------------------------------------------------------------------------
 ;; Shared interceptors
@@ -300,50 +302,22 @@
    :enter (fn [context]
             (assoc-in context [:request ::svc] svc))})
 
-(def ^:private overlay-param-markers
-  ["system-version="
-   "force-system-version="
-   "check-system-version="
-   "useSupplement"
-   "property="
-   "displayLanguage="
-   "valueSetVersion="
-   "lenient-display-validation="])
-
-(defn- needs-full-ctx?
-  [request]
-  (or (= :post (:request-method request))
-      (let [^String qs (:query-string request)]
-        (and qs (boolean (some #(.contains qs ^String %) overlay-param-markers))))))
-
-(def ^:private fast-path-flags (request-flags {:query-params {} :post-params []}))
-
-(def derive-svc
-  "Parse query/post params onto `::params` + `::flags`, and —
-  when the request carries `tx-resource` Parameters — derive a per-request
-  service via `core/with-overlays` and replace `::svc`."
-  {:name  ::derive-svc
-   :enter (fn [context]
-            (let [request (:request context)
-                  base-svc (::svc request)]
-              (if (needs-full-ctx? request)
-                (let [params  (params-for-request request)
-                      tx-res  (post-resources params "tx-resource")
-                      {:keys [providers supplements]} (build-overlay-providers tx-res)
-                      svc     (if (seq providers)
-                                (hades/with-overlays base-svc providers
-                                  {:supplements supplements})
-                                base-svc)
-                      flags   (request-flags params)]
-                  (-> context
-                      (assoc-in [:request ::params] params)
-                      (assoc-in [:request ::flags]  flags)
-                      (assoc-in [:request ::svc]    svc)))
-                (-> context
-                    (assoc-in [:request ::params]
-                              {:query-params (parse-query (:query-string request))
-                               :post-params  []})
-                    (assoc-in [:request ::flags] fast-path-flags)))))})
+(def tx-overlay
+  "Parse query/post params onto `::params` + `::flags`, and — when the
+  request carries `tx-resource` Parameters — derive a per-request service
+  via `core/with-overlays` and replace `::svc`. Mounted globally; runs
+  on every operation."
+  {:name  ::tx-overlay
+   :enter (fn [{:keys [request] :as context}]
+            (let [params   (params-for-request request)
+                  tx-res   (post-resources params "tx-resource")
+                  {:keys [providers supplements]} (build-overlay-providers tx-res)]
+              (cond-> (-> context
+                          (assoc-in [:request ::params] params)
+                          (assoc-in [:request ::flags]  (request-flags params)))
+                ;; if we have any overlay providers, create a new hades service with them
+                (seq providers)
+                (update-in [:request ::svc] #(hades/with-overlays % providers {:supplements supplements})))))})
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers shared across handlers
@@ -366,57 +340,30 @@
 ;; CodeSystem $lookup
 ;; ---------------------------------------------------------------------------
 
-(defn- cs-lookup-enter [context]
-  (let [{::keys [svc params flags]} (:request context)
-        coding   (post-coding params "coding")
+(defn- cs-lookup
+  [{::keys [svc params flags] :as request}]
+  (let [coding   (post-coding params "coding")
         system   (or (get-first params "system") (get coding "system"))
         code     (or (get-first params "code") (get coding "code"))
         version  (get-first params "version")
-        display-lang (pick-display-language params (:request context) flags)]
-    (if-let [supp-err (supplements-missing-response svc nil flags)]
-      (assoc context :response supp-err)
-      (let [lookup-params (-> (cond-> {:system system :code code}
-                                version      (assoc :version version)
-                                display-lang (assoc :displayLanguage display-lang))
-                              (merge-flags flags))
-            result (when (and system code)
-                     (hades/lookup svc lookup-params))]
-        (-> context
-            (assoc-in [:request ::lookup-params] lookup-params)
-            (assoc :response {:status 200 :body result}))))))
-
-(defn- cs-lookup-leave [context]
-  (let [response (:response context)]
-    (cond
-      (not= 200 (:status response)) context
-
-      (nil? (:body response))
-      (let [{:keys [system code]} (get-in context [:request ::lookup-params])
-            svc (get-in context [:request ::svc])
-            message (if (composite/find-codesystem svc system)
-                      (str "Unknown code '" code "' in code system '" system "'")
-                      (str "Unknown code system: " system))]
-        (assoc context :response
-               {:status 404
-                :body   (wire/operation-outcome
-                          [{:severity "error" :type "not-found" :text message}])}))
-
-      (map? (:body response))
-      (update-in context [:response :body] wire/lookup->parameters)
-
-      :else context)))
-
-(def cs-lookup-handler  {:name ::cs-lookup-handler  :enter cs-lookup-enter})
-(def cs-lookup-response {:name ::cs-lookup-response :leave cs-lookup-leave})
+        display-lang (pick-display-language params request flags)]
+    (or (supplements-missing-response svc nil flags)
+        (let [lookup-params (-> (cond-> {:system system :code code}
+                                  version      (assoc :version version)
+                                  display-lang (assoc :displayLanguage display-lang))
+                                (merge-flags flags))
+              result (hades/lookup svc lookup-params)]
+          (if (:not-found result)
+            {:status 404 :body (wire/operation-outcome (:issues result))}
+            {:status 200 :body (wire/lookup->parameters result)})))))
 
 ;; ---------------------------------------------------------------------------
 ;; CodeSystem $validate-code
 ;; ---------------------------------------------------------------------------
 
-(defn- cs-validate-enter [context]
-  (let [{::keys [svc params flags]} (:request context)]
-    (if-let [supp-err (supplements-missing-response svc nil flags)]
-      (assoc context :response supp-err)
+(defn- cs-validate-code
+  [{::keys [svc params flags] :as request}]
+  (or (supplements-missing-response svc nil flags)
       (let [coding   (post-coding params "coding")
             coding?  (and coding (get coding "code"))
             system   (or (get-first params "url")
@@ -427,34 +374,26 @@
             display  (or (get-first params "display")
                          (when coding? (get coding "display")))
             version  (get-first params "version")
-            display-lang (pick-display-language params (:request context) flags)
+            display-lang (pick-display-language params request flags)
             vp       (-> (cond-> {:system system :code code}
                            display      (assoc :display display)
                            version      (assoc :version version)
                            display-lang (assoc :displayLanguage display-lang))
                          (merge-flags flags))
-            result       (hades/validate-code svc vp)
-            input-mode   (if coding? :coding :code)
-            result-final (if (:issues result)
-                           (update result :issues wire/adjust-issue-expressions input-mode nil)
-                           result)]
-        (assoc context :response {:status 200 :body result-final})))))
-
-(defn- cs-validate-leave [context]
-  (if (= 200 (get-in context [:response :status]))
-    (update-in context [:response :body] wire/validate->parameters)
-    context))
-
-(def cs-validate-handler  {:name ::cs-validate-handler  :enter cs-validate-enter})
-(def cs-validate-response {:name ::cs-validate-response :leave cs-validate-leave})
+            input-mode (if coding? :coding :code)
+            result     (hades/validate-code svc vp)
+            result'    (if (:issues result)
+                         (update result :issues wire/adjust-issue-expressions input-mode nil)
+                         result)]
+        {:status 200 :body (wire/validate->parameters result')})))
 
 ;; ---------------------------------------------------------------------------
 ;; CodeSystem $subsumes
 ;; ---------------------------------------------------------------------------
 
-(defn- cs-subsumes-enter [context]
-  (let [{::keys [svc params]} (:request context)
-        codingA (post-coding params "codingA")
+(defn- cs-subsumes
+  [{::keys [svc params]}]
+  (let [codingA (post-coding params "codingA")
         codingB (post-coding params "codingB")
         codeA   (get-first params "codeA")
         codeB   (get-first params "codeB")
@@ -466,15 +405,7 @@
                       {:systemA (get codingA "system") :codeA (get codingA "code")
                        :systemB (get codingB "system") :codeB (get codingB "code")})
         result  (when subs-params (hades/subsumes svc subs-params))]
-    (assoc context :response {:status 200 :body result})))
-
-(defn- cs-subsumes-leave [context]
-  (if (= 200 (get-in context [:response :status]))
-    (update-in context [:response :body] wire/subsumes->parameters)
-    context))
-
-(def cs-subsumes-handler  {:name ::cs-subsumes-handler  :enter cs-subsumes-enter})
-(def cs-subsumes-response {:name ::cs-subsumes-response :leave cs-subsumes-leave})
+    {:status 200 :body (when result (wire/subsumes->parameters result))}))
 
 ;; ---------------------------------------------------------------------------
 ;; ValueSet $validate-code
@@ -492,26 +423,25 @@
               ver  (assoc :version ver))))
         (get cc "coding" [])))
 
-(defn- vs-validate-enter [context]
-  (let [{::keys [svc params flags]} (:request context)
-        url (get-first params "url")]
-    (if-let [supp-err (supplements-missing-response svc url flags)]
-      (assoc context :response supp-err)
-      (let [cc        (post-codeable-concept params "codeableConcept")
-            codings   (seq (get cc "coding"))
-            coding    (post-coding params "coding")
-            coding?   (and coding (get coding "code"))
-            value-set-version (:value-set-version flags)
-            display-lang (pick-display-language params (:request context) flags)
-            base      (-> (cond-> {:url url}
+(defn- vs-validate-code
+  [{::keys [svc params flags] :as request}]
+  (let [url (get-first params "url")]
+    (or (supplements-missing-response svc url flags)
+        (let [cc      (post-codeable-concept params "codeableConcept")
+              codings (seq (get cc "coding"))
+              coding  (post-coding params "coding")
+              coding? (and coding (get coding "code"))
+              value-set-version (:value-set-version flags)
+              display-lang (pick-display-language params request flags)
+              base    (-> (cond-> {:url url}
                             value-set-version (assoc :valueSetVersion value-set-version)
                             display-lang      (assoc :displayLanguage display-lang))
                           (merge-flags flags))
-            result    (cond
+              result  (cond
                         codings
                         (let [r (hades/validate-codeable-concept svc
-                                  (cc-codings cc (get-first params "systemVersion"))
-                                  base)]
+                                                                 (cc-codings cc (get-first params "systemVersion"))
+                                                                 base)]
                           (assoc r :codeableConcept cc))
 
                         :else
@@ -524,33 +454,16 @@
                               version (or (get-first params "systemVersion")
                                           (when coding? (get coding "version")))]
                           (hades/validate-code svc
-                            (cond-> (assoc base :system system :code code)
-                              display (assoc :display display)
-                              version (assoc :version version)))))
-            input-mode (cond codings :codeableConcept coding? :coding :else :code)
-            result' (if (:issues result)
-                      (update result :issues wire/adjust-issue-expressions input-mode nil)
-                      result)]
-        (-> context
-            (assoc-in [:request ::input-mode] input-mode)
-            (assoc :response {:status 200 :body result'}))))))
-
-(defn- vs-validate-leave [context]
-  (let [response (:response context)
-        result   (:body response)]
-    (cond
-      (not= 200 (:status response)) context
-
-      (:not-found result)
-      (assoc context :response
-             {:status 404
-              :body   (wire/operation-outcome (:issues result))})
-
-      :else
-      (update-in context [:response :body] wire/validate->parameters))))
-
-(def vs-validate-handler  {:name ::vs-validate-handler  :enter vs-validate-enter})
-(def vs-validate-response {:name ::vs-validate-response :leave vs-validate-leave})
+                                               (cond-> (assoc base :system system :code code)
+                                                 display (assoc :display display)
+                                                 version (assoc :version version)))))
+              input-mode (cond codings :codeableConcept coding? :coding :else :code)
+              result' (if (:issues result)
+                        (update result :issues wire/adjust-issue-expressions input-mode nil)
+                        result)]
+          (if (:not-found result')
+            {:status 404 :body (wire/operation-outcome (:issues result'))}
+            {:status 200 :body (wire/validate->parameters result')})))))
 
 ;; ---------------------------------------------------------------------------
 ;; ValueSet $expand
@@ -572,140 +485,108 @@
         [(hades/with-overlays svc [provider]) synth-url])
       [svc nil])))
 
-(defn- vs-expand-enter [context]
-  (let [{::keys [params flags] base-svc ::svc} (:request context)
-        url-param      (get-first params "url")
+(defn- vs-expand
+  [{::keys [params flags] base-svc ::svc :as request}]
+  (let [url-param      (get-first params "url")
         [svc synth-url] (inline-valueset-svc base-svc params url-param)
         url            (or url-param synth-url)]
-    (if-let [supp-err (supplements-missing-response svc url flags)]
-      (assoc context :response supp-err)
-      (let [active-only? (get-bool params "activeOnly")
-            filter-value (get-first params "filter")
-            display-lang (pick-display-language params (:request context) flags)
-            include-desig? (get-bool params "includeDesignations")
-            count-value    (get-int params "count")
-            offset-value   (get-int params "offset")
-            exclude-nested-present? (some? (get-first params "excludeNested"))
-            exclude-nested? (let [v (get-bool params "excludeNested")]
-                              (if (nil? v) true v))
-            req-properties (:properties flags)
-            expand-params  (-> (cond-> {:url             url
-                                        :activeOnly      active-only?
-                                        :filter          filter-value
-                                        :displayLanguage display-lang
-                                        :count           count-value
-                                        :offset          offset-value}
-                                 (seq req-properties) (assoc :properties req-properties))
-                               (merge-flags flags))
-            result (hades/expand svc expand-params)]
-        (-> context
-            (assoc-in [:request ::svc] svc)
-            (assoc-in [:request ::expand-context]
-                      {:url url
-                       :active-only? active-only?
-                       :filter-value filter-value
-                       :count-value count-value
-                       :offset-value offset-value
-                       :include-designations? include-desig?
-                       :exclude-nested-present? exclude-nested-present?
-                       :exclude-nested? exclude-nested?
-                       :display-language display-lang})
-            (assoc :response {:status 200 :body result}))))))
+    (or (supplements-missing-response svc url flags)
+        (let [active-only? (get-bool params "activeOnly")
+              filter-value (get-first params "filter")
+              display-lang (pick-display-language params request flags)
+              include-desig? (get-bool params "includeDesignations")
+              count-value    (get-int params "count")
+              offset-value   (get-int params "offset")
+              exclude-nested-present? (some? (get-first params "excludeNested"))
+              exclude-nested? (let [v (get-bool params "excludeNested")]
+                                (if (nil? v) true v))
+              req-properties (:properties flags)
+              expand-params  (-> (cond-> {:url             url
+                                          :activeOnly      active-only?
+                                          :filter          filter-value
+                                          :displayLanguage display-lang
+                                          :count           count-value
+                                          :offset          offset-value}
+                                   (seq req-properties) (assoc :properties req-properties))
+                                 (merge-flags flags))
+              result   (hades/expand svc expand-params)
+              max-size (::max-expansion-size request)
+              error-issue (first (filter #(= "error" (:severity %)) (:issues result)))]
+          (cond
+            (nil? result)
+            {:status 404
+             :body   (wire/operation-outcome
+                      [{:severity "error" :type "not-found"
+                        :text (str "A definition for the value Set '" url "' could not be found")}])}
 
-(def ^:private max-expansion-size-key ::max-expansion-size)
+            error-issue
+            {:status 404 :body (wire/operation-outcome (:issues result))}
 
-(defn- vs-expand-leave [context]
-  (let [response (:response context)
-        result   (:body response)
-        request  (:request context)
-        svc      (::svc request)
-        flags    (::flags request)
-        exp-ctx  (::expand-context request)
-        url      (:url exp-ctx)
-        max-size (get request max-expansion-size-key)
-        error-issue (first (filter #(= "error" (:severity %)) (:issues result)))]
-    (cond
-      (not= 200 (:status response)) context
+            (and max-size (nil? count-value) (> (or (:total result) 0) max-size))
+            {:status 422
+             :body   (wire/operation-outcome
+                      [{:severity "error" :type "too-costly"
+                        :text (str "The value set '" url "' expansion has too many codes to display (>"
+                                   max-size ")")}])}
 
-      (nil? result)
-      (assoc context :response
-             {:status 404
-              :body   (wire/operation-outcome
-                        [{:severity "error" :type "not-found"
-                          :text (str "A definition for the value Set '" url "' could not be found")}])})
-
-      error-issue
-      (assoc context :response
-             {:status 404
-              :body   (wire/operation-outcome (:issues result))})
-
-      (and max-size
-           (nil? (:count-value exp-ctx))
-           (> (or (:total result) 0) max-size))
-      (let [msg (str "The value set '" url "' expansion has too many codes to display (>"
-                     max-size ")")]
-        (assoc context :response
-               {:status 422
-                :body   (wire/operation-outcome
-                          [{:severity "error" :type "too-costly" :text msg}])}))
-
-      :else
-      (let [{:keys [check-system-version force-system-version system-version]} flags
-            used-cs  (:used-codesystems result)
-            compose-pinned (into #{} (keep :system) (:compose-pins result))
-            vs-meta  (when-let [vs (composite/find-valueset svc url)]
-                       (protos/vs-resource vs {}))
-            vs-version-uri (let [v (:version vs-meta)]
-                             (if v (str url "|" v) url))
-            version-error (when check-system-version
-                            (some (fn [{cs-uri :uri}]
-                                    (let [[sys resolved] (canonical/parse-versioned-uri cs-uri)]
-                                      (when-let [pattern (get check-system-version sys)]
-                                        (when (and resolved
-                                                   (not (canonical/version-matches? pattern resolved)))
-                                          {:severity "error" :type "exception"
-                                           :details-code "version-error"
-                                           :text (str "The version '" resolved "' is not allowed for system '"
-                                                       sys "': required to be '" pattern
-                                                       "' by a version-check parameter")}))))
-                                  used-cs))]
-        (if version-error
-          (assoc context :response
-                 {:status 422
-                  :body   (wire/operation-outcome [version-error])})
-          (let [effective-lang (or (:display-language exp-ctx)
-                                   (:display-language result))
-                expansion-params (-> (wire/build-version-echo-params
-                                       {:force-system-version force-system-version
-                                        :system-version system-version
-                                        :check-system-version check-system-version
-                                        :compose-pinned compose-pinned})
-                                     (into (wire/build-cs-warning-params used-cs))
-                                     (into (wire/build-vs-warning-params vs-meta vs-version-uri))
-                                     (into (wire/build-used-codesystem-params used-cs))
-                                     (into (wire/build-issues-param (:issues result)))
-                                     (into (wire/build-echo-params
-                                             (assoc exp-ctx :display-language effective-lang))))
-                {:keys [offset-value include-designations?]} exp-ctx
-                paged-result (update result :concepts vec)
-                vs-map (wire/expansion->valueset paged-result
-                         {:vs-meta vs-meta
-                          :url url
-                          :offset-value offset-value
-                          :expansion-params expansion-params
-                          :include-designations? include-designations?})]
-            (assoc context :response {:status 200 :body vs-map})))))))
-
-(def vs-expand-handler  {:name ::vs-expand-handler  :enter vs-expand-enter})
-(def vs-expand-response {:name ::vs-expand-response :leave vs-expand-leave})
+            :else
+            (let [{:keys [check-system-version force-system-version system-version]} flags
+                  used-cs        (:used-codesystems result)
+                  compose-pinned (into #{} (keep :system) (:compose-pins result))
+                  vs-meta        (when-let [vs (composite/find-valueset svc url)]
+                                   (protos/vs-resource vs {}))
+                  vs-version-uri (let [v (:version vs-meta)]
+                                   (if v (str url "|" v) url))
+                  version-error  (when check-system-version
+                                   (some (fn [{cs-uri :uri}]
+                                           (let [[sys resolved] (canonical/parse-versioned-uri cs-uri)]
+                                             (when-let [pattern (get check-system-version sys)]
+                                               (when (and resolved
+                                                          (not (canonical/version-matches? pattern resolved)))
+                                                 {:severity "error" :type "exception"
+                                                  :details-code "version-error"
+                                                  :text (str "The version '" resolved "' is not allowed for system '"
+                                                             sys "': required to be '" pattern
+                                                             "' by a version-check parameter")}))))
+                                         used-cs))]
+              (if version-error
+                {:status 422 :body (wire/operation-outcome [version-error])}
+                (let [effective-lang   (or display-lang (:display-language result))
+                      expansion-params (-> (wire/build-version-echo-params
+                                            {:force-system-version force-system-version
+                                             :system-version system-version
+                                             :check-system-version check-system-version
+                                             :compose-pinned compose-pinned})
+                                           (into (wire/build-cs-warning-params used-cs))
+                                           (into (wire/build-vs-warning-params vs-meta vs-version-uri))
+                                           (into (wire/build-used-codesystem-params used-cs))
+                                           (into (wire/build-issues-param (:issues result)))
+                                           (into (wire/build-echo-params
+                                                  {:url url
+                                                   :active-only? active-only?
+                                                   :filter-value filter-value
+                                                   :count-value count-value
+                                                   :offset-value offset-value
+                                                   :include-designations? include-desig?
+                                                   :exclude-nested-present? exclude-nested-present?
+                                                   :exclude-nested? exclude-nested?
+                                                   :display-language effective-lang})))
+                      paged-result     (update result :concepts vec)
+                      vs-map (wire/expansion->valueset paged-result
+                                                       {:vs-meta vs-meta
+                                                        :url url
+                                                        :offset-value offset-value
+                                                        :expansion-params expansion-params
+                                                        :include-designations? include-desig?})]
+                  {:status 200 :body vs-map}))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; ConceptMap $translate
 ;; ---------------------------------------------------------------------------
 
-(defn- cm-translate-enter [context]
-  (let [{::keys [svc params flags]} (:request context)
-        coding  (post-coding params "coding")
+(defn- cm-translate
+  [{::keys [svc params flags]}]
+  (let [coding  (post-coding params "coding")
         url     (get-first params "url")
         system  (or (get-first params "system") (get coding "system"))
         code    (or (get-first params "code")   (get coding "code"))
@@ -721,31 +602,16 @@
                     (merge-flags flags))
         result  (when (and code (or url system))
                   (hades/translate svc tparams))]
-    (-> context
-        (assoc-in [:request ::translate-params] tparams)
-        (assoc :response {:status 200 :body result}))))
-
-(defn- cm-translate-leave [context]
-  (let [response (:response context)]
     (cond
-      (not= 200 (:status response)) context
+      (map? result)
+      {:status 200 :body (wire/translate->parameters result)}
 
-      (nil? (:body response))
-      (let [{:keys [url system]} (get-in context [:request ::translate-params])
-            target (or url system)
-            msg (str "A definition for ConceptMap '" target "' could not be found")]
-        (assoc context :response
-               {:status 404
-                :body   (wire/operation-outcome
-                          [{:severity "error" :type "not-found" :text msg}])}))
-
-      (map? (:body response))
-      (update-in context [:response :body] wire/translate->parameters)
-
-      :else context)))
-
-(def cm-translate-handler  {:name ::cm-translate-handler  :enter cm-translate-enter})
-(def cm-translate-response {:name ::cm-translate-response :leave cm-translate-leave})
+      :else
+      {:status 404
+       :body   (wire/operation-outcome
+                [{:severity "error" :type "not-found"
+                  :text (str "A definition for ConceptMap '" (or url system)
+                             "' could not be found")}])})))
 
 ;; ---------------------------------------------------------------------------
 ;; Metadata endpoints
@@ -756,16 +622,13 @@
         host   (or (get-in request [:headers "host"]) "localhost")]
     (str scheme "://" host "/fhir")))
 
-(defn- metadata-enter [context]
-  (let [request (:request context)
-        svc     (::svc request)
-        mode    (first (get (parse-query (:query-string request)) "mode"))
-        body    (if (= "terminology" mode)
-                  (metadata/terminology-capabilities svc)
-                  (metadata/capability-statement {:url (server-url-for request)}))]
-    (assoc context :response {:status 200 :body body})))
-
-(def metadata-handler {:name ::metadata-handler :enter metadata-enter})
+(defn- metadata
+  [{::keys [svc] :as request}]
+  (let [mode (first (get (parse-query (:query-string request)) "mode"))
+        body (if (= "terminology" mode)
+               (metadata/terminology-capabilities svc)
+               (metadata/capability-statement {:url (server-url-for request)}))]
+    {:status 200 :body body}))
 
 ;; ---------------------------------------------------------------------------
 ;; Routes
@@ -775,7 +638,7 @@
   [max-size]
   {:name ::with-max-expansion
    :enter (fn [context]
-            (assoc-in context [:request max-expansion-size-key] max-size))})
+            (assoc-in context [:request ::max-expansion-size] max-size))})
 
 (defn- with-max-body
   [max-bytes]
@@ -785,25 +648,25 @@
 
 (defn routes [{:keys [max-expansion-size]}]
   (let [max-inj (with-max-expansion max-expansion-size)]
-    #{["/fhir/metadata"                   :get  [metadata-handler]                                         :route-name ::metadata]
+    #{["/fhir/metadata"                   :get  metadata                                                   :route-name ::metadata]
 
-      ["/fhir/CodeSystem/$lookup"         :get  [cs-lookup-response cs-lookup-handler]                     :route-name ::cs-lookup-get]
-      ["/fhir/CodeSystem/$lookup"         :post [cs-lookup-response cs-lookup-handler]                     :route-name ::cs-lookup-post]
+      ["/fhir/CodeSystem/$lookup"         :get  cs-lookup                                                  :route-name ::cs-lookup-get]
+      ["/fhir/CodeSystem/$lookup"         :post cs-lookup                                                  :route-name ::cs-lookup-post]
 
-      ["/fhir/CodeSystem/$validate-code"  :get  [cs-validate-response cs-validate-handler]                 :route-name ::cs-validate-get]
-      ["/fhir/CodeSystem/$validate-code"  :post [cs-validate-response cs-validate-handler]                 :route-name ::cs-validate-post]
+      ["/fhir/CodeSystem/$validate-code"  :get  cs-validate-code                                             :route-name ::cs-validate-get]
+      ["/fhir/CodeSystem/$validate-code"  :post cs-validate-code                                             :route-name ::cs-validate-post]
 
-      ["/fhir/CodeSystem/$subsumes"       :get  [cs-subsumes-response cs-subsumes-handler]                 :route-name ::cs-subsumes-get]
-      ["/fhir/CodeSystem/$subsumes"       :post [cs-subsumes-response cs-subsumes-handler]                 :route-name ::cs-subsumes-post]
+      ["/fhir/CodeSystem/$subsumes"       :get  cs-subsumes                                                 :route-name ::cs-subsumes-get]
+      ["/fhir/CodeSystem/$subsumes"       :post cs-subsumes                                                 :route-name ::cs-subsumes-post]
 
-      ["/fhir/ValueSet/$validate-code"    :get  [vs-validate-response vs-validate-handler]                 :route-name ::vs-validate-get]
-      ["/fhir/ValueSet/$validate-code"    :post [vs-validate-response vs-validate-handler]                 :route-name ::vs-validate-post]
+      ["/fhir/ValueSet/$validate-code"    :get  vs-validate-code                                            :route-name ::vs-validate-get]
+      ["/fhir/ValueSet/$validate-code"    :post vs-validate-code                                            :route-name ::vs-validate-post]
 
-      ["/fhir/ValueSet/$expand"           :get  [max-inj vs-expand-response vs-expand-handler]             :route-name ::vs-expand-get]
-      ["/fhir/ValueSet/$expand"           :post [max-inj vs-expand-response vs-expand-handler]             :route-name ::vs-expand-post]
+      ["/fhir/ValueSet/$expand"           :get  [max-inj vs-expand]                                         :route-name ::vs-expand-get]
+      ["/fhir/ValueSet/$expand"           :post [max-inj vs-expand]                                         :route-name ::vs-expand-post]
 
-      ["/fhir/ConceptMap/$translate"      :get  [cm-translate-response cm-translate-handler]               :route-name ::cm-translate-get]
-      ["/fhir/ConceptMap/$translate"      :post [cm-translate-response cm-translate-handler]               :route-name ::cm-translate-post]}))
+      ["/fhir/ConceptMap/$translate"      :get  cm-translate                                                :route-name ::cm-translate-get]
+      ["/fhir/ConceptMap/$translate"      :post cm-translate                                                :route-name ::cm-translate-post]}))
 
 (def fhir-not-found
   {:name  ::fhir-not-found
@@ -811,8 +674,8 @@
             (if (nil? (get-in context [:response :body]))
               (let [path (get-in context [:request :uri])
                     body (wire/operation-outcome
-                           [{:severity "error" :type "not-found"
-                             :text (str "No endpoint matches path '" path "'")}])]
+                          [{:severity "error" :type "not-found"
+                            :text (str "No endpoint matches path '" path "'")}])]
                 (assoc context :response
                        {:status  404
                         :headers {"Content-Type" "application/fhir+json; charset=utf-8"}
@@ -836,7 +699,7 @@
     (-> (conn/default-connector-map (:host opts) (:port opts))
         (conn/with-interceptors [content-negotiation catch-all-error
                                  (with-max-body (:max-body-bytes opts))
-                                 (with-svc svc) derive-svc fhir-not-found])
+                                 (with-svc svc) tx-overlay fhir-not-found])
         (conn/with-routes (routes opts))
         (jetty/create-connector {:join? false}))))
 

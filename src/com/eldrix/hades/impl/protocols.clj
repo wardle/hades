@@ -21,6 +21,8 @@
   and Coding shapes themselves rather than each impl handling both."
   (:require [clojure.spec.alpha :as s]))
 
+(set! *warn-on-reflection* true)
+
 ;; ---------------------------------------------------------------------------
 ;; Loader-to-indexer interchange (fhir-data)
 ;;
@@ -82,6 +84,14 @@
           :opt-un [::version ::display ::definition
                    ::parent-code ::source-path]))
 
+(s/def ::concept-designation-data
+  (s/keys :req-un [::system ::code]
+          :opt-un [::version ::language ::use ::value ::source-path]))
+
+(s/def ::ex any?)
+(s/def ::stream-error-data
+  (s/keys :req-un [::ex]))
+
 (s/def ::compose map?)
 (s/def ::expansion map?)
 
@@ -103,10 +113,13 @@
 (defmulti fhir-data-type :type)
 (defmethod fhir-data-type :codesystem-meta [_] ::codesystem-meta-data)
 (defmethod fhir-data-type :concept        [_] ::concept-data)
+(defmethod fhir-data-type :concept-designation [_] ::concept-designation-data)
 (defmethod fhir-data-type :valueset       [_] ::valueset-data)
 (defmethod fhir-data-type :conceptmap     [_] ::conceptmap-data)
+(defmethod fhir-data-type :stream-error   [_] ::stream-error-data)
 
 (s/def ::fhir-data (s/multi-spec fhir-data-type :type))
+(s/def ::fhir-data-batch (s/coll-of ::fhir-data :kind sequential?))
 
 ;; Canonical concept payload used by non-FHIR loaders and persistent
 ;; indexed providers. Currently identical to `::concept-data`; kept

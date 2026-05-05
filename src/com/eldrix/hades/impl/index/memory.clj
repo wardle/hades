@@ -31,6 +31,8 @@
             [com.eldrix.hades.impl.fhir-extract :as fhir-extract]
             [com.eldrix.hades.impl.in-memory :as in-memory]))
 
+(set! *warn-on-reflection* true)
+
 ;; ---------------------------------------------------------------------------
 ;; Store accumulator
 ;; ---------------------------------------------------------------------------
@@ -161,7 +163,19 @@
   lookup separately so the consumer can wrap matching bases."
   [fhir-data]
   (let [metas    (filterv #(= :codesystem-meta (:type %)) fhir-data)
-        concepts (filterv #(= :concept (:type %)) fhir-data)
+        designations-by-concept
+        (reduce (fn [m d]
+                  (update m [(:system d) (:version d) (:code d)]
+                          (fnil conj [])
+                          (select-keys d [:language :use :value :extension])))
+                {}
+                (filter #(= :concept-designation (:type %)) fhir-data))
+        concepts (mapv (fn [c]
+                         (if-let [ds (seq (get designations-by-concept
+                                                [(:system c) (:version c) (:code c)]))]
+                           (update c :designations into ds)
+                           c))
+                       (filter #(= :concept (:type %)) fhir-data))
         by-parent (group-by (fn [c] [(:system c) (:version c)]) concepts)
         cs-overlay (reduce
                      (fn [acc meta]

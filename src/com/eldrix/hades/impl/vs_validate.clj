@@ -19,6 +19,8 @@
             [com.eldrix.hades.impl.issues :as issues]
             [com.eldrix.hades.impl.protocols :as protos]))
 
+(set! *warn-on-reflection* true)
+
 (defn- compose-version-for-system
   ([compose-def system] (compose-version-for-system compose-def system nil))
   ([compose-def system preferred]
@@ -185,9 +187,10 @@
                                        caller-version
                                        (canonical/version-matches? include-ver caller-version))]
       (if (and caller-matches-include? (not= caller-version (:version match)))
-        (if-let [cs-lookup (protos/cs-lookup svc {:system system :code code :version caller-version})]
-          (assoc match :version caller-version :display (:display cs-lookup))
-          match)
+        (let [r (protos/cs-lookup svc {:system system :code code :version caller-version})]
+          (if (and r (not (:not-found r)))
+            (assoc match :version caller-version :display (:display r))
+            match))
         match))))
 
 (defn- apply-cross-cutting

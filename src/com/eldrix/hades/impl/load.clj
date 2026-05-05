@@ -12,6 +12,7 @@
                                     them up for callers."
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
+            [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.impl.index.memory :as index]
             [com.eldrix.hades.impl.loaders.fhir :as loaders]))
 
@@ -98,6 +99,12 @@
         skipped    (filterv #(= :skipped (:type %)) data)
         duplicates (detect-duplicates data)]
     (when (seq duplicates)
+      (doseq [{:keys [resource-type url version source-paths]} duplicates]
+        (log/error "duplicate FHIR resource"
+                   {:resource-type resource-type
+                    :url           url
+                    :version       version
+                    :source-paths  source-paths}))
       (throw (ex-info (str "Duplicate FHIR resources: " (count duplicates))
                       {:reason :duplicate-resource :duplicates duplicates})))
     (let [{:keys [providers supplements]} (index/index {:fhir-data data} nil)

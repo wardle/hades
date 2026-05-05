@@ -23,6 +23,8 @@
             [com.eldrix.hades.impl.fhir-extract :as fhir-extract])
   (:import (java.io File)))
 
+(set! *warn-on-reflection* true)
+
 (def default-max-bytes
   "Default per-file size cap. Override per call via `:max-bytes`."
   (* 64 1024 1024))

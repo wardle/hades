@@ -7,15 +7,9 @@
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [com.eldrix.hades.core :as hades]
-            [com.eldrix.hades.http :as http]
-            [com.eldrix.hades.impl.load :as load-fhir]
-            [com.eldrix.hades.impl.loaders.fhir :as fhir-loaders]
-            [com.eldrix.hades.impl.snomed :as snomed]
-            [com.eldrix.hades.impl.sqlite.provider :as sqlite-provider]
-            [com.eldrix.hades.snomed-db :as snomed-db]
-            [com.eldrix.hermes.core :as hermes])
-  (:import (java.net ServerSocket)
-           (java.time Instant LocalDateTime ZoneId)
+            [com.eldrix.hades.fixtures :as fixtures]
+            [com.eldrix.hades.impl.load :as load-fhir])
+  (:import (java.time Instant LocalDateTime ZoneId)
            (java.time.format DateTimeFormatter)
            (org.hl7.fhir.r5.model TestReport TestReport$TestReportTestComponent
                                    TestReport$TestActionComponent)
@@ -26,7 +20,7 @@
 ;; Configuration
 ;; ---------------------------------------------------------------------------
 
-(def ^:private test-data-dir ".hades/tx-ecosystem")
+(def ^:private test-data-dir fixtures/tx-ecosystem-dir)
 (def ^:private test-data-repo "https://github.com/HL7/fhir-tx-ecosystem-ig.git")
 (def ^:private baseline-path "test/resources/conformance-baseline.json")
 (def ^:private results-dir "test/resources/conformance")
@@ -40,17 +34,10 @@
 (def ^:private tx-ecosystem-pinned-rev
   "fb9078f6102088e3307e5b77c255bd41453fdcec")
 
-;; Pinned LOINC release. tx-ecosystem fixtures expect 2.81; running
-;; against any other release introduces display-string drift exactly
-;; like the SNOMED 20250201 pin guards against. Provisioning the .db
-;; from a release directory is a separate explicit step:
-;;
-;;   clj -M:run import --db .hades/loinc-2.81.db /path/to/Loinc_2.81
-;;
-;; If the .db is absent, `start!` registers SNOMED only and logs a
-;; warning — local dev without LOINC still runs SNOMED conformance.
-(def ^:private loinc-pinned-version "2.81")
-(def ^:private loinc-db-path ".hades/loinc-2.81.db")
+;; tx-ecosystem fixtures expect LOINC 2.81 alongside the pinned SNOMED
+;; release; running against any other LOINC release would introduce
+;; display-string drift, just like the SNOMED 20250201 pin guards
+;; against. The pinned LOINC version + path live in `fixtures`.
 
 ;; ---------------------------------------------------------------------------
 ;; Server state
@@ -105,89 +92,45 @@
         first)
     (catch Exception _ nil)))
 
-(defn- canonical-snomed-db!
-  "Return the path to the canonical pinned SNOMED CT DB. Throws fast if
-  the DB is missing — provisioning is a separate explicit step
-  (`clj -X:build-db`)."
-  []
-  (ensure-test-data!)
-  (snomed-db/assert-pinned-db!))
-
 ;; ---------------------------------------------------------------------------
-;; Server lifecycle
+;; Server lifecycle (REPL-friendly: start! / stop! / restart!)
 ;; ---------------------------------------------------------------------------
-
-(defn- free-port []
-  (with-open [sock (ServerSocket. 0)]
-    (.getLocalPort sock)))
-
-(defn- loinc-providers!
-  "Open the pinned LOINC SQLite catalogue providers if the .db is
-  present. Returns `{:providers [..] :datasource ds}` or nil."
-  []
-  (if-not (.exists (io/file loinc-db-path))
-    (do (log/warn "LOINC db not found; LOINC conformance tests will fail."
-                  {:expected-path loinc-db-path
-                   :provision (str "clj -M:run import --db " loinc-db-path
-                                   " /path/to/Loinc_" loinc-pinned-version)})
-        nil)
-    (let [{:keys [datasource codesystem valueset conceptmap]}
-          (sqlite-provider/open-providers loinc-db-path)]
-      (log/info "Registered LOINC for conformance"
-                {:codesystem-impl? (some? codesystem)
-                 :valueset-impl?   (some? valueset)
-                 :conceptmap-impl? (some? conceptmap)})
-      {:providers  (filterv some? [codesystem valueset conceptmap])
-       :datasource datasource})))
 
 (defn start!
-  "Start a Hades server with Hermes. Stores state for subsequent calls.
-  With no arguments, opens the canonical pinned SNOMED DB — provision it
-  first with `clj -X:build-db`. Pass `:snomed PATH` to open a different
-  Hermes DB instead (e.g. for ad-hoc probing).
+  "Start a Hades server with the pinned SNOMED + LOINC fixtures. Stores
+  state for subsequent calls. Returns the server URL.
 
-  If `.hades/loinc-<pinned-version>.db` is present, the LOINC SQLite
-  providers are also opened so the IG's LOINC conformance suites can run.
-  Returns the server URL."
-  [& {:keys [snomed port] :or {port 0}}]
+  Options:
+    :snomed — Hermes DB path override (default: pinned DB)
+    :port   — explicit port (default ephemeral)"
+  [& {:keys [snomed port]}]
   (when @state
     (throw (ex-info "Server already running. Call (stop!) first." {})))
-  (let [snomed-db-path (or snomed (canonical-snomed-db!))
-        port (if (zero? port) (free-port) port)
-        hermes-svc (hermes/open snomed-db-path)
-        snomed-svc (snomed/->HermesService hermes-svc)
-        loinc-bundle (loinc-providers!)
-        all-providers (into [snomed-svc] (:providers loinc-bundle))
-        svc (hades/open all-providers)
-        srv (http/make-server svc {:port port :max-expansion-size 1000})]
-    (http/start! srv)
-    (let [url (str "http://localhost:" port "/fhir")]
-      (reset! state {:server srv :port port
-                     :hermes hermes-svc
-                     :svc svc
-                     :loinc-ds (:datasource loinc-bundle)
-                     :snomed-db-path snomed-db-path :url url})
-      (println (format "Server started: %s" url))
-      url)))
+  (ensure-test-data!)
+  (let [snomed-path (or snomed (fixtures/assert-snomed-db!))
+        _ (fixtures/assert-loinc-db!)
+        svc (hades/open [snomed-path fixtures/loinc-db-path])
+        {:keys [server url] :as srv}
+        (fixtures/start-server svc (cond-> {:max-expansion-size 1000}
+                                     port (assoc :port port)))]
+    (reset! state {:srv srv :svc svc :url url :server server})
+    (println (format "Server started: %s" url))
+    url))
 
 (defn stop!
-  "Stop the running test server and close Hermes + the LOINC SQLite
-  datasource (if any)."
+  "Stop the running test server and release every closeable provider."
   []
-  (when-let [{:keys [server hermes svc loinc-ds]} @state]
-    (when server (http/stop! server))
-    (when svc (hades/close svc))
-    (when hermes (.close hermes))
-    (when (and loinc-ds (instance? java.io.Closeable loinc-ds))
-      (.close ^java.io.Closeable loinc-ds))
+  (when-let [{:keys [srv svc]} @state]
+    (fixtures/stop-server srv)
+    (hades/close svc)
     (reset! state nil)
     (println "Server stopped.")))
 
 (defn restart!
   "Stop, reload Hades namespaces, and restart the server."
   []
-  (let [{:keys [snomed-db-path port]} @state]
-    (when-not snomed-db-path
+  (let [port (some-> @state :srv :port)]
+    (when-not port
       (throw (ex-info "No server to restart. Call (start!) first." {})))
     (stop!)
     (doseq [ns-sym '[com.eldrix.hades.impl.protocols
@@ -205,9 +148,9 @@
                      com.eldrix.hades.impl.composite
                      com.eldrix.hades.impl.http
                      com.eldrix.hades.core
-                     com.eldrix.hades.http]]
+                     com.eldrix.hades.fixtures]]
       (require ns-sym :reload))
-    (start! :snomed snomed-db-path :port port)))
+    (start! :port port)))
 
 (defn server-url
   "Return the URL of the running server, or nil."
@@ -752,7 +695,8 @@
                         (e.g. \"http://localhost:8080/fhir\"). When set, no local
                         server is started and :snomed is ignored.
     :snomed           — path to a pre-existing Hermes DB (default: the canonical
-                        pinned DB; provision with `clj -X:build-db` first).
+                        pinned DB; provision via the install CLI first —
+                        see `com.eldrix.hades.fixtures`).
     :update-baseline  — when true, updates the baseline file (default false)
 
   Examples:

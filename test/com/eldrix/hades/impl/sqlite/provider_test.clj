@@ -19,9 +19,10 @@
     (when (.exists f) (.delete f))))
 
 (defn- build-fixture-db [path]
-  (sqlite-index/build! path
-    (loinc/load-paths fixture-root {:version "2.82"})
-    {:loader-type "loinc-csv"}))
+  (sqlite-index/import-fhir-data path
+    (loinc/stream-release fixture-root {:version "2.82"})
+    {:loader-type "loinc-csv"})
+  (sqlite-index/index! path))
 
 (deftest providers-enumerate-from-fixture
   (let [path (new-temp-path)]
@@ -59,9 +60,11 @@
                              (filter #(= :STATUS (:code %)))
                              first)]
               (is (= :ACTIVE (:value props))))))
-        (testing "cs-lookup returns nil for an unknown code"
-          (is (nil? (protos/cs-lookup codesystem
-                      {:system "http://loinc.org" :code "doesnt-exist"}))))
+        (testing "cs-lookup returns a not-found map for an unknown code"
+          (let [r (protos/cs-lookup codesystem
+                    {:system "http://loinc.org" :code "doesnt-exist"})]
+            (is (true? (:not-found r)))
+            (is (= :unknown-code (:not-found-reason r)))))
         (testing "cs-validate-code green"
           (let [r (protos/cs-validate-code codesystem
                     {:system "http://loinc.org" :code "2160-0"})]
@@ -173,7 +176,8 @@
       :system "http://example.org/cs/colours" :version "1.0"
       :code "blue" :display "Blue"
       :designations [{:value "Blue" :language :en}]}]
-    {:loader-type "synthetic-multilang"}))
+    {:loader-type "synthetic-multilang"})
+  (sqlite-index/index! path))
 
 (deftest cs-lookup-respects-displayLanguage
   (let [path (new-temp-path)]
@@ -212,7 +216,8 @@
      {:type :concept
       :system "http://example.org/cs/ci" :version "1.0"
       :code "FOO" :display "Foo"}]
-    {:loader-type "synthetic-ci"}))
+    {:loader-type "synthetic-ci"})
+  (sqlite-index/index! path))
 
 (defn- build-case-sensitive-db [path]
   (sqlite-index/build! path
@@ -225,7 +230,8 @@
      {:type :concept
       :system "http://example.org/cs/cs" :version "1.0"
       :code "FOO" :display "Foo"}]
-    {:loader-type "synthetic-cs"}))
+    {:loader-type "synthetic-cs"})
+  (sqlite-index/index! path))
 
 (deftest cs-lookup-respects-case-sensitivity
   (let [path (new-temp-path)]
@@ -247,8 +253,10 @@
       (build-case-sensitive-db path)
       (let [{:keys [codesystem]} (sqlite-provider/open-providers path)]
         (testing "case-sensitive CS rejects different-case code"
-          (is (nil? (protos/cs-lookup codesystem
-                      {:system "http://example.org/cs/cs" :code "foo"}))))
+          (is (= :unknown-code
+                 (:not-found-reason
+                   (protos/cs-lookup codesystem
+                     {:system "http://example.org/cs/cs" :code "foo"})))))
         (testing "exact case works"
           (is (some? (protos/cs-lookup codesystem
                        {:system "http://example.org/cs/cs" :code "FOO"})))))
@@ -315,3 +323,55 @@
           (is (= "1007-4" (:code first-match)))
           (is (= "equivalent" (:equivalence first-match)))))
       (finally (delete-quietly path)))))
+
+;; ---------------------------------------------------------------------------
+;; Multi-version bare-URL selection — healthcare safety contract.
+;;
+;; A SQLite container can hold multiple `(url, version)` rows for the same
+;; CodeSystem. When a bare-URL request arrives (no version specified), the
+;; provider must deterministically return data from the latest version per
+;; SemVer. The current implementation falls through to a `some` over a
+;; PersistentHashMap (provider.clj:245-247) — iteration order is undefined,
+;; so the version returned is non-deterministic. In a clinical context this
+;; can silently expose retired displays / hierarchy edges.
+;; ---------------------------------------------------------------------------
+
+(defn- multi-version-fhir-data
+  "Synthesise N versions of a CodeSystem at the same URL. Each version's
+  concept C1 carries the version string in its display so we can detect
+  which version was returned."
+  [url versions]
+  (mapcat (fn [v]
+            [{:type :codesystem-meta :url url :version v
+              :status "active" :content "complete"
+              :name "Multi" :title "Multi-version CS"}
+             {:type :concept :system url :version v
+              :code "C1" :display (str "v=" v)}])
+          versions))
+
+(defn- build-versions-db [path url versions]
+  (sqlite-index/build! path
+    (multi-version-fhir-data url versions)
+    {:loader-type "synthetic-multi-version"})
+  (sqlite-index/index! path))
+
+(deftest cs-lookup-bare-url-picks-latest-semver
+  (testing "Healthcare safety: with multiple versions in one container, a bare-URL $lookup MUST return the latest SemVer version. Currently fails — provider's lookup-entry falls through to (some …) over a hash-map, yielding whichever entry the iterator hits first regardless of version. Tested with several version sets so the bug is exposed regardless of incidental hash order."
+    (doseq [[url versions expected]
+            [["http://example.org/cs/a" ["1.0.0" "2.0.0"] "2.0.0"]
+             ["http://example.org/cs/b" ["1.2.0" "1.10.0"] "1.10.0"]
+             ["http://example.org/cs/c" ["1.0.0" "1.0.1" "1.0.2" "2.0.0"] "2.0.0"]
+             ["http://example.org/cs/d" ["3.0.0" "1.0.0" "2.0.0"] "3.0.0"]
+             ["http://example.org/cs/e" ["1.0.0" "10.0.0" "2.0.0"] "10.0.0"]]]
+      (let [path (new-temp-path)]
+        (try
+          (build-versions-db path url versions)
+          (let [{:keys [codesystem]} (sqlite-provider/open-providers path)
+                r (protos/cs-lookup codesystem {:system url :code "C1"})]
+            (is (= expected (:version r))
+                (str "for " url " with versions " (vec versions)
+                     " the bare-URL lookup must return " expected
+                     " (the SemVer-latest)"))
+            (is (= (str "v=" expected) (:display r))
+                "the returned version's content must match"))
+          (finally (delete-quietly path)))))))

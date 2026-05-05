@@ -1,32 +1,25 @@
 (ns com.eldrix.hades.impl.operations-bench
   "Criterium micro-benchmarks for Hades' FHIR terminology operations.
 
-  Measurements are at the *registry* layer — HTTP parsing and wire
-  serialisation are bypassed so changes in domain logic register
-  cleanly.
+  Measurements bypass HTTP parsing and wire serialisation so changes in
+  domain logic register cleanly. Each entry in `operations` is a
+  `{:id :fn}` map; `:fn` is a one-arg function taking the single Hades
+  service opened at the top of the deftest. The service is built from
+  the pinned SNOMED + LOINC fixtures, so thunks just choose the system
+  URL they hit (composite dispatches to the right provider).
 
-  Two entry points:
-
-  1. `clj -M:bench` — runs the whole catalogue. A single deftest
-     iterates `operations` and calls `criterium.core/quick-bench` on
-     each entry. The fixture opens the canonical pinned Hermes DB (see
-     `com.eldrix.hades.snomed-db`; provision with `clj -X:build-db`),
-     registers it as the SNOMED provider, runs the benches, then
-     restores registry state.
-
-  2. The REPL — `open-snomed!` once per session, then
-     `(crit/quick-bench ((benchmarks :subsumes/unrelated)))`
-     to run one by id. `close-snomed!` when done."
-  (:require [clojure.java.io :as io]
-            [clojure.test :refer [deftest use-fixtures]]
+  Run via `clj -M:bench`. Provision the pinned fixtures per CLAUDE.md;
+  `hades/open` raises file-not-found if absent."
+  (:require [clojure.test :refer [deftest]]
             [com.eldrix.hades.core :as hades]
+            [com.eldrix.hades.fixtures :as fixtures]
             [com.eldrix.hades.impl.compose :as compose]
-            [com.eldrix.hades.impl.snomed :as snomed]
-            [com.eldrix.hades.impl.snomed.expansion :as expansion]
-            [com.eldrix.hades.snomed-db :as snomed-db]
-            [com.eldrix.hermes.core :as hermes]
             [criterium.core :as crit]))
+
+(set! *warn-on-reflection* true)
+
 (def ^:private snomed-uri "http://snomed.info/sct")
+(def ^:private loinc-uri  "http://loinc.org")
 
 ;; ─── Well-known SNOMED anchors ─────────────────────────────────────────────
 
@@ -41,58 +34,51 @@
 
 (defn- expand-url [suffix] (str snomed-uri "?fhir_vs=" suffix))
 
-(declare ^:private state)
-
-(defn- expand-direct
-  "Call `expansion/expand` directly with the live Hermes svc and given
-  ECL / active-only? flag. Bypasses the FHIR-shaping wrapper so the
-  bench measures just the expansion engine. Requires `open-snomed!`
-  to have run — `state` is defined further down."
-  [ecl active-only?]
-  (expansion/expand {:svc          (:svc @state)
-                     :ecl          ecl
-                     :active-only? active-only?}))
-
 ;; ─── Benchmark catalogue ───────────────────────────────────────────────────
-;;
-;; Each entry is `{:id namespaced-kw :fn zero-arg-fn}`. The id is the
-;; human-readable label, the map key, and what the REPL filters by.
-;; Group comments mark sections; order within a group is free.
 
 (def operations
-  [ ;; --- $lookup -----------------------------------------------------------
+  [;; --- $lookup -----------------------------------------------------------
    {:id :lookup/minimal
-    :fn #(hades/lookup (:svc @state) {:system snomed-uri :code (str multiple-sclerosis)})}
+    :fn (fn [svc]
+          (hades/lookup svc {:system snomed-uri :code (str multiple-sclerosis)}))}
    {:id :lookup/full
-    :fn #(hades/lookup (:svc @state) {:system snomed-uri :code (str multiple-sclerosis)
-                                      :property ["designation" "parent" "child" "definition"]})}
+    :fn (fn [svc]
+          (hades/lookup svc {:system snomed-uri :code (str multiple-sclerosis)
+                             :property ["designation" "parent" "child" "definition"]}))}
 
    ;; --- $validate-code ----------------------------------------------------
    {:id :validate-code/plain
-    :fn #(hades/validate-code (:svc @state) {:system snomed-uri :code (str diabetes-mellitus)})}
+    :fn (fn [svc]
+          (hades/validate-code svc {:system snomed-uri :code (str diabetes-mellitus)}))}
    {:id :validate-code/display
-    :fn #(hades/validate-code (:svc @state) {:system snomed-uri :code (str diabetes-mellitus)
-                                             :display "Diabetes mellitus"})}
+    :fn (fn [svc]
+          (hades/validate-code svc {:system snomed-uri :code (str diabetes-mellitus)
+                                    :display "Diabetes mellitus"}))}
    {:id :validate-code/against-valueset
-    :fn #(hades/validate-code (:svc @state)
-           {:url (expand-url (str "ecl/<<" disease))
-            :system snomed-uri :code (str diabetes-mellitus)})}
+    :fn (fn [svc]
+          (hades/validate-code svc
+            {:url    (expand-url (str "ecl/<<" disease))
+             :system snomed-uri :code (str diabetes-mellitus)}))}
 
    ;; --- $subsumes — all four branches -------------------------------------
    {:id :subsumes/equivalent
-    :fn #(hades/subsumes (:svc @state) {:systemA snomed-uri :codeA (str diabetes-mellitus)
-                                        :systemB snomed-uri :codeB (str diabetes-mellitus)})}
+    :fn (fn [svc]
+          (hades/subsumes svc {:systemA snomed-uri :codeA (str diabetes-mellitus)
+                               :systemB snomed-uri :codeB (str diabetes-mellitus)}))}
    {:id :subsumes/subsumes
-    :fn #(hades/subsumes (:svc @state) {:systemA snomed-uri :codeA (str disease)
-                                        :systemB snomed-uri :codeB (str influenza)})}
+    :fn (fn [svc]
+          (hades/subsumes svc {:systemA snomed-uri :codeA (str disease)
+                               :systemB snomed-uri :codeB (str influenza)}))}
    {:id :subsumes/subsumed-by
-    :fn #(hades/subsumes (:svc @state) {:systemA snomed-uri :codeA (str type-2-dm)
-                                        :systemB snomed-uri :codeB (str diabetes-mellitus)})}
-   ;; Historical-equivalence fallback — exercises the unrelated-pair
-   ;; branch that has to walk the historical-association refsets.
+    :fn (fn [svc]
+          (hades/subsumes svc {:systemA snomed-uri :codeA (str type-2-dm)
+                               :systemB snomed-uri :codeB (str diabetes-mellitus)}))}
+   ;; Historical-equivalence fallback — exercises the unrelated-pair branch
+   ;; that walks the historical-association refsets.
    {:id :subsumes/unrelated
-    :fn #(hades/subsumes (:svc @state) {:systemA snomed-uri :codeA (str asthma)
-                                        :systemB snomed-uri :codeB (str influenza)})}
+    :fn (fn [svc]
+          (hades/subsumes svc {:systemA snomed-uri :codeA (str asthma)
+                               :systemB snomed-uri :codeB (str influenza)}))}
 
    ;; --- $translate --------------------------------------------------------
    ;; 56485000 is a retired concept with a SAME-AS pointing to 398390002 —
@@ -101,140 +87,150 @@
    ;; (900000000000526001) to match the implicit ConceptMap shape that
    ;; tx-benchmark's CM01 sends.
    {:id :translate/historical
-    :fn #(hades/translate (:svc @state)
-           {:url    (str snomed-uri "?fhir_cm=900000000000526001")
-            :system snomed-uri :code "56485000"
-            :target snomed-uri})}
+    :fn (fn [svc]
+          (hades/translate svc
+            {:url    (str snomed-uri "?fhir_cm=900000000000526001")
+             :system snomed-uri :code "56485000"
+             :target snomed-uri}))}
 
    ;; --- $expand via implicit-VS URLs --------------------------------------
    {:id :expand/ecl-small
-    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" diabetes-mellitus)) :count 50})}
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url (str "ecl/<<" diabetes-mellitus)) :count 50}))}
    {:id :expand/ecl-medium
-    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" asthma)) :count 100})}
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url (str "ecl/<<" asthma)) :count 100}))}
    {:id :expand/ecl-large
-    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" clinical-finding)) :count 100})}
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url (str "ecl/<<" clinical-finding)) :count 100}))}
    {:id :expand/isa
-    :fn #(hades/expand (:svc @state) {:url (expand-url (str "isa/" clinical-finding)) :count 100})}
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url (str "isa/" clinical-finding)) :count 100}))}
    {:id :expand/text-filter-rare
-    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" clinical-finding))
-                                    :filter "asthma" :count 20})}
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url (str "ecl/<<" clinical-finding))
+                             :filter "asthma" :count 20}))}
    {:id :expand/text-filter-common
-    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" clinical-finding))
-                                    :filter "pain" :count 20})}
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url (str "ecl/<<" clinical-finding))
+                             :filter "pain" :count 20}))}
    {:id :expand/paged
-    :fn #(hades/expand (:svc @state) {:url (expand-url (str "ecl/<<" clinical-finding))
-                                    :offset 1000 :count 20})}
-   ;; Mirrors tx-benchmark's EX03 shape: implicit "all of SNOMED" VS +
-   ;; text filter. This is the shape that regressed from p95 128 ms to
-   ;; 11 s at 50 VUs in the preflight comparison.
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url (str "ecl/<<" clinical-finding))
+                             :offset 1000 :count 20}))}
+   ;; Mirrors tx-benchmark's EX03 — implicit "all of SNOMED" VS + text filter.
+   ;; The shape that regressed from p95 128 ms to 11 s at 50 VUs in the
+   ;; preflight comparison.
    {:id :expand/all-snomed-text-filter
-    :fn #(hades/expand (:svc @state) {:url (str snomed-uri "?fhir_vs")
-                                    :filter "diabetes" :count 100})}
-
-   ;; --- Non-paginated direct calls to expansion/expand --------------------
-   ;; Three ECL sizes × two active-only modes. Naming: :np/<size>-<active>
-   {:id :np/asthma-active-only          :fn #(expand-direct (str "<<" asthma) true)}
-   {:id :np/asthma-incl-inactive        :fn #(expand-direct (str "<<" asthma) false)}
-   {:id :np/diabetes-active-only        :fn #(expand-direct (str "<<" diabetes-mellitus) true)}
-   {:id :np/diabetes-incl-inactive      :fn #(expand-direct (str "<<" diabetes-mellitus) false)}
-   {:id :np/disease-active-only         :fn #(expand-direct (str "<<" disease) true)}
-   {:id :np/disease-incl-inactive       :fn #(expand-direct (str "<<" disease) false)}
+    :fn (fn [svc]
+          (hades/expand svc {:url (str snomed-uri "?fhir_vs")
+                             :filter "diabetes" :count 100}))}
 
    ;; --- $expand via hand-built compose (bypasses URL parsing) -------------
    {:id :compose/is-a
-    :fn #(compose/expand-compose
-           (:svc @state)
-           {"include" [{"system" snomed-uri
-                        "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}]}]}
-           {:count 100})}
-   ;; Mirrors tx-benchmark's EX05 shape: focus concept + attribute refinement.
+    :fn (fn [svc]
+          (compose/expand-compose svc
+            {"include" [{"system" snomed-uri
+                         "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}]}]}
+            {:count 100}))}
+   ;; Mirrors tx-benchmark's EX05 — focus concept + attribute refinement.
    {:id :compose/refinement
-    :fn #(compose/expand-compose
-           (:svc @state)
-           {"include" [{"system" snomed-uri
-                        "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}
-                                  {"property" "363698007" "op" "=" "value" "89187006"}]}]}
-           {:count 50})}
+    :fn (fn [svc]
+          (compose/expand-compose svc
+            {"include" [{"system" snomed-uri
+                         "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}
+                                   {"property" "363698007" "op" "=" "value" "89187006"}]}]}
+            {:count 50}))}
    {:id :compose/multi-include
-    :fn #(compose/expand-compose
-           (:svc @state)
-           {"include" [{"system" snomed-uri
-                        "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}]}
-                       {"system" snomed-uri
-                        "filter" [{"property" "concept" "op" "is-a" "value" (str procedure)}]}]}
-           {:count 100})}
+    :fn (fn [svc]
+          (compose/expand-compose svc
+            {"include" [{"system" snomed-uri
+                         "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}]}
+                        {"system" snomed-uri
+                         "filter" [{"property" "concept" "op" "is-a" "value" (str procedure)}]}]}
+            {:count 100}))}
    {:id :compose/include-exclude
-    :fn #(compose/expand-compose
-           (:svc @state)
-           {"include" [{"system" snomed-uri
-                        "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}]}]
-            "exclude" [{"system" snomed-uri
-                        "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}]}]}
-           {:count 100})}
-
-   ;; Mirrors tx-benchmark EX07's shape — system-only include + text filter,
-   ;; no ECL bound. Exercises "all of SNOMED" text search.
+    :fn (fn [svc]
+          (compose/expand-compose svc
+            {"include" [{"system" snomed-uri
+                         "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}]}]
+             "exclude" [{"system" snomed-uri
+                         "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}]}]}
+            {:count 100}))}
+   ;; Mirrors tx-benchmark EX07 — system-only include + text filter, no ECL.
    {:id :compose/all-snomed-text-filter
-    :fn #(compose/expand-compose
-           (:svc @state)
-           {"include" [{"system" snomed-uri}]}
-           {:filter "pain" :count 200})}
-
+    :fn (fn [svc]
+          (compose/expand-compose svc
+            {"include" [{"system" snomed-uri}]}
+            {:filter "pain" :count 200}))}
    ;; Mirrors tx-benchmark EX08 — is-a + attribute refinement + text filter.
    {:id :compose/refinement-text-filter
-    :fn #(compose/expand-compose
-           (:svc @state)
-           {"include" [{"system" snomed-uri
-                        "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}
-                                  {"property" "116676008" "op" "=" "value" "72704001"}]}]}
-           {:filter "fracture" :count 50})}])
+    :fn (fn [svc]
+          (compose/expand-compose svc
+            {"include" [{"system" snomed-uri
+                         "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}
+                                   {"property" "116676008" "op" "=" "value" "72704001"}]}]}
+            {:filter "fracture" :count 50}))}
 
-(def benchmarks
-  "Map of id → zero-arg fn. Usage:
-    (crit/quick-bench ((benchmarks :subsumes/unrelated)))"
-  (reduce (fn [m {:keys [id fn]}] (assoc m id fn)) {} operations))
+   ;; --- $find-matches via SQLite LOINC ------------------------------------
+   ;;
+   ;; `cs-find-matches` for SQLite catalogues fans out per surviving row to
+   ;; fetch designations (when `displayLanguage` is set) and properties
+   ;; (when a regex post-filter targets a property). LOINC 2.81 carries
+   ;; ~66 multi-language designation rows per code, so `displayLanguage`
+   ;; makes per-row designation reads dominate the cost profile (the 52%
+   ;; slice flagged in todo.txt). These benches isolate that hot path.
+   {:id :find-matches/loinc-text-no-lang
+    :fn (fn [svc]
+          (hades/find-matches svc
+            {:system loinc-uri :text "glucose" :max-hits 50}))}
+   {:id :find-matches/loinc-text-with-lang
+    :fn (fn [svc]
+          (hades/find-matches svc
+            {:system loinc-uri :text "glucose" :max-hits 50 :displayLanguage "en"}))}
+   {:id :find-matches/loinc-text-large-with-lang
+    :fn (fn [svc]
+          (hades/find-matches svc
+            {:system loinc-uri :text "glucose" :max-hits 200 :displayLanguage "en"}))}
+   {:id :find-matches/loinc-text-small-no-lang
+    :fn (fn [svc]
+          (hades/find-matches svc
+            {:system loinc-uri :text "glucose" :max-hits 10}))}])
 
-;; ─── Runner + service management ───────────────────────────────────────────
+;; ─── Test entry point (clj -M:bench) ──────────────────────────────────────
+;;
+;; Two modes, picked via JVM system property `hades.bench.mode`:
+;;
+;;   :quick (default)  full criterium quick-bench — ~5s per entry.
+;;   :smoke            criterium quick-bench with `:samples 1`,
+;;                     `:warmup-jit-period 0` and a 100ms target
+;;                     execution window — fast sanity check (~hundreds
+;;                     of ms per entry).
+;;
+;;   clj -M:bench -J-Dhades.bench.mode=smoke
 
-(defn run-benchmarks
-  "Run every operation in catalogue order through criterium/quick-bench."
-  []
-  (doseq [{:keys [id fn]} operations]
-    (println "\n***" id)
-    (crit/quick-bench (fn))))
+(def ^:private smoke-opts
+  ;; Criterium needs ≥3 samples to compute quartiles/outliers; trim
+  ;; warmup and per-sample window to the floor instead.
+  [:samples 3
+   :warmup-jit-period (* 50 1000000)
+   :target-execution-time (* 50 1000000)
+   :max-gc-attempts 0])
 
-(defonce ^:private state (atom nil))
+(defn- bench-mode []
+  (keyword (System/getProperty "hades.bench.mode" "quick")))
 
-(defn open-snomed!
-  "Open Hermes, build a Hades service wrapping it, and stash both in
-  `state`. Idempotent. The bench fns read `(:svc @state)` directly."
-  ([] (open-snomed! (snomed-db/assert-pinned-db!)))
-  ([db-path]
-   (or @state
-       (let [hermes-svc (hermes/open db-path)
-             snomed-svc (snomed/->HermesService hermes-svc)
-             svc        (hades/open [snomed-svc])]
-         (reset! state {:hermes hermes-svc :svc svc})
-         svc))))
+(defn- run-one [mode f svc]
+  (case mode
+    :quick (crit/quick-benchmark* (fn [] (f svc)) {})
+    :smoke (crit/quick-benchmark* (fn [] (f svc)) (apply hash-map smoke-opts))))
 
-(defn close-snomed!
-  "Close the Hades service and the underlying Hermes connection."
-  []
-  (when-let [{:keys [hermes svc]} @state]
-    (hades/close svc)
-    (hermes/close hermes)
-    (reset! state nil)))
-
-;; ─── Test-runner entry point (clj -M:bench) ───────────────────────────────
-
-(defn- live-fixture [f]
-  (if-not (.exists (io/file snomed-db/pinned-db-path))
-    (println (str "\n*** Skipping benchmarks: no SNOMED DB at "
-                  snomed-db/pinned-db-path
-                  ". Run `clj -X:build-db` first.\n"))
-    (try (open-snomed!) (f) (finally (close-snomed!)))))
-
-(use-fixtures :once live-fixture)
-
-(deftest ^:benchmark operations-bench
-  (run-benchmarks))
+(deftest operations-bench
+  (let [svc  (hades/open [fixtures/snomed-db-path fixtures/loinc-db-path])
+        mode (bench-mode)]
+    (try
+      (doseq [{:keys [id fn]} operations]
+        (println "\n***" id)
+        (crit/report-result (run-one mode fn svc)))
+      (finally
+        (hades/close svc)))))

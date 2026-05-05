@@ -9,6 +9,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
+            [com.eldrix.hades.impl.composite :as composite]
             [com.eldrix.hades.impl.compose :as compose]
             [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.impl.protocols.result :as result]
@@ -112,7 +113,7 @@
 
 (defn svc-fixture [f]
   (let [{:keys [cs vs vcs1 vcs2 vvs-nopin vvs-pin1 dcs dvs]} (make-impls)]
-    (binding [*svc* (hades/open [cs vs vcs1 vcs2 vvs-nopin vvs-pin1 dcs dvs])]
+    (binding [*svc* (composite/from-providers [cs vs vcs1 vcs2 vvs-nopin vvs-pin1 dcs dvs])]
       (f))))
 
 (use-fixtures :each svc-fixture)

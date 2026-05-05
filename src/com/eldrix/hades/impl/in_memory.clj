@@ -32,6 +32,8 @@
             [com.eldrix.hades.impl.vs-validate :as vs-validate])
   (:import (com.google.re2j Pattern)))
 
+(set! *warn-on-reflection* true)
+
 ;; ---------------------------------------------------------------------------
 ;; Concept-property accessors (operate on raw FHIR property maps)
 ;; ---------------------------------------------------------------------------
@@ -198,10 +200,10 @@
   (cs-resource [_ _params]
     (cs-resource-from-meta meta))
 
-  (cs-lookup [_ {:keys [code displayLanguage]}]
-    (when-let [[concept _] (if case-sensitive?
-                              (when-let [c (get code-index code)] [c false])
-                              (ci-lookup code-index ci-index code))]
+  (cs-lookup [_ {:keys [system code displayLanguage]}]
+    (if-let [[concept _] (if case-sensitive?
+                            (when-let [c (get code-index code)] [c false])
+                            (ci-lookup code-index ci-index code))]
       (let [cs-name (:name meta)
             url     (:url meta)
             version (:version meta)
@@ -241,7 +243,8 @@
                                   (when (and pc (some? v) (not (#{"parent" "child"} pc)))
                                     {:code (keyword pc) :value v})))
                               props))
-         :designations (:designations concept)})))
+         :designations (:designations concept)})
+      (issues/unknown-code-lookup (or system (:url meta)) code)))
 
   (cs-validate-code [_ {:keys [code display displayLanguage]}]
     (let [url     (:url meta)
@@ -368,9 +371,11 @@
         total-known (assoc :total total-known))))
 
   protos/ValueSet
-  (vs-metadata [_]
-    [(cond-> {:url (:url meta)}
-       (:version meta) (assoc :version (:version meta)))])
+  ;; The implicit VS of a CodeSystem is not a discrete published resource —
+  ;; it's a virtual reference target keyed off the CS URL. The composite
+  ;; routes `?url=<cs>` to this provider via the URL-keyed valuesets map,
+  ;; so resolution still works without advertising in the VS catalogue.
+  (vs-metadata [_] [])
 
   (vs-resource [_ _params]
     {:url              (:url meta)

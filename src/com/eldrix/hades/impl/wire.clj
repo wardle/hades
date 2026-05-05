@@ -6,6 +6,8 @@
   translates those shapes into FHIR-shaped wire output."
   (:require [clojure.string :as str]))
 
+(set! *warn-on-reflection* true)
+
 ;; ---------------------------------------------------------------------------
 ;; Parameter value helpers
 ;; ---------------------------------------------------------------------------

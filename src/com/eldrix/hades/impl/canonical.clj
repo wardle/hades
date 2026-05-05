@@ -6,7 +6,10 @@
   - numeric version compare
   - query-string stripping"
   (:require [clojure.string :as str]
-            [lambdaisland.uri :as uri]))
+            [lambdaisland.uri :as uri]
+            [version-clj.core :as ver]))
+
+(set! *warn-on-reflection* true)
 
 (def ^:const wildcard-version
   "Sentinel `version` value declaring that a provider serves *every*
@@ -57,32 +60,35 @@
              (every? true? (map (fn [p c] (or (= "x" p) (= p c)))
                                 p-padded c-parts)))))))
 
-(defn parse-numeric-segments
-  "Split a dot-delimited version string into a vector of integers.
-  Non-numeric segments compare as 0."
-  [s]
-  (mapv #(or (parse-long %) 0) (str/split s #"\.")))
-
-(defn pad-to [v n]
-  (into v (repeat (- n (count v)) 0)))
+(defn- recognisable-version?
+  "True when `s` looks like a version we can meaningfully order: SemVer
+  (`1.2.3`), pre-release (`1.2.3-rc1`) and date stamps (`2025-02-01`)
+  all qualify. Opaque labels (`draft`, `released`, `*`) and URIs do
+  not — they have no inherent ordering and must tie under
+  `semver-compare` so that callers using tie-detection for ambiguity
+  (e.g. composite `pick-latest-semver`) refuse to pick a winner."
+  [^String s]
+  (boolean (re-find #"^\d" s)))
 
 (defn semver-compare
-  "Compare two version strings numerically by segment.
-  '1.10.0' > '1.9.0' (unlike lexicographic compare).
+  "Compare two version strings, delegating to `version-clj` so SemVer
+  2.0.0 §11 is honoured (`4.0.0-rc1` < `4.0.0`, `4.0.0-alpha` <
+  `4.0.0-beta`) alongside ordinary numeric ordering (`1.10.0` >
+  `1.9.0`).
 
   Nil is treated as 'no declared version' and orders below any concrete
   version, so a concrete version always wins 'latest semver' against
-  a versionless entry. Two nils are equal."
+  a versionless entry. Two nils are equal.
+
+  Strings that don't start with a digit (URIs, opaque labels like
+  'draft' or '*') are treated as unorderable and tie at 0."
   [a b]
   (cond
     (and (nil? a) (nil? b)) 0
     (nil? a) -1
     (nil? b) 1
-    :else
-    (let [pa (parse-numeric-segments a)
-          pb (parse-numeric-segments b)
-          n  (max (count pa) (count pb))]
-      (compare (pad-to pa n) (pad-to pb n)))))
+    (not (and (recognisable-version? a) (recognisable-version? b))) 0
+    :else (ver/version-compare a b)))
 
 (defn uri-without-query
   "Return the URI with the query component stripped."

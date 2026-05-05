@@ -1,238 +1,263 @@
 (ns com.eldrix.hades.impl.server-test
-  "Integration tests for the Hades FHIR server endpoints.
-  Starts a real HTTP server with Hermes and makes actual HTTP requests.
-  All tests here are tagged `^:live` — they require the canonical pinned
-  SNOMED CT International release; see com.eldrix.hades.snomed-db. Exclude
-  with `clj -M:test -e :live` when running on a machine without it."
-  (:require [clojure.data.json :as json]
+  "Integration tests for the Hades FHIR server endpoints. Boots a real
+  HTTP server via `fixtures/start-server` against the pinned SNOMED CT
+  DB and asserts response shapes from a data-driven case table.
+
+  Tagged `^:live` — requires the pinned SNOMED CT International release;
+  exclude with `clj -M:test -e :live`."
+  (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
-            [com.eldrix.hades.http :as http]
-            [com.eldrix.hades.impl.protocols :as protos]
-            [com.eldrix.hades.impl.snomed :as snomed]
-            [com.eldrix.hades.snomed-db :as snomed-db]
-            [com.eldrix.hermes.core :as hermes])
-  (:import (java.net ServerSocket URI)
-           (java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers)))
+            [com.eldrix.hades.fixtures :as fixtures]
+            [com.eldrix.hades.impl.protocols :as protos]))
 
-(def ^:private test-state (atom nil))
-
-(defn- free-port []
-  (with-open [sock (ServerSocket. 0)]
-    (.getLocalPort sock)))
+(def ^:dynamic *svc* nil)
+(def ^:dynamic *server* nil)
 
 (defn server-fixture [f]
-  (let [port (free-port)
-        hermes-svc (hermes/open (snomed-db/assert-pinned-db!))
-        snomed-svc (snomed/->HermesService hermes-svc)
-        svc (hades/open [snomed-svc])
-        srv (http/make-server svc {:port port})]
-    (http/start! srv)
-    (reset! test-state {:port port :hermes hermes-svc :svc svc :server srv})
-    (try (f)
-         (finally
-           (http/stop! srv)
-           (hades/close svc)
-           (.close hermes-svc)
-           (reset! test-state nil)))))
+  (let [svc (hades/open [(fixtures/assert-snomed-db!)])
+        srv (fixtures/start-server svc)]
+    (binding [*svc* svc *server* srv]
+      (try (f)
+           (finally
+             (fixtures/stop-server srv)
+             (hades/close svc))))))
 
 (use-fixtures :once server-fixture)
 
-(defn- base-url []
-  (str "http://localhost:" (:port @test-state) "/fhir"))
-
-(defn- http-get [path]
-  (let [client (HttpClient/newHttpClient)
-        request (-> (HttpRequest/newBuilder (URI. (str (base-url) path)))
-                    (.header "Accept" "application/fhir+json")
-                    (.GET)
-                    (.build))
-        response (.send client request (HttpResponse$BodyHandlers/ofString))]
-    {:status (.statusCode response)
-     :body (json/read-str (.body response))}))
-
-(defn- http-get-raw [path]
-  (let [client (HttpClient/newHttpClient)
-        request (-> (HttpRequest/newBuilder (URI. (str (base-url) path)))
-                    (.GET)
-                    (.build))
-        response (.send client request (HttpResponse$BodyHandlers/ofString))]
-    {:status       (.statusCode response)
-     :content-type (.orElse (.firstValue (.headers response) "content-type") "")
-     :raw          (.body response)}))
-
-(defn- http-post-json [path body-map]
-  (let [client (HttpClient/newHttpClient)
-        payload (json/write-str body-map)
-        request (-> (HttpRequest/newBuilder (URI. (str (base-url) path)))
-                    (.header "Accept" "application/fhir+json")
-                    (.header "Content-Type" "application/fhir+json")
-                    (.POST (java.net.http.HttpRequest$BodyPublishers/ofString payload))
-                    (.build))
-        response (.send client request (HttpResponse$BodyHandlers/ofString))]
-    {:status (.statusCode response)
-     :body (json/read-str (.body response))}))
+(defn- request! [req]
+  (fixtures/request! (:url *server*) req))
 
 (defn- get-param [body name]
   (some (fn [p] (when (= name (get p "name")) p))
         (get body "parameter")))
 
-(deftest ^:live lookup-valid-code
-  (testing "lookup returns display and system|version-uri name for valid SNOMED code"
-    (let [{:keys [status body]} (http-get "/CodeSystem/$lookup?system=http://snomed.info/sct&code=73211009")]
-      (is (= 200 status))
-      (is (clojure.string/starts-with?
-            (get (get-param body "name") "valueString")
-            "http://snomed.info/sct|http://snomed.info/sct/")
-          "name parameter is system|version-uri form, per tx.fhir.org convention")
-      (is (some? (get (get-param body "display") "valueString"))))))
-
-(deftest ^:live lookup-unknown-code
-  (testing "lookup returns 404 for unknown code in known system"
-    (let [{:keys [status body]} (http-get "/CodeSystem/$lookup?system=http://snomed.info/sct&code=999999999")]
-      (is (= 404 status))
-      (is (= "OperationOutcome" (get body "resourceType")))
-      (let [text (get-in body ["issue" 0 "details" "text"])]
-        (is (re-find #"(?i)unknown code" text))
-        (is (not (re-find #"(?i)unknown code system" text)))))))
-
-(deftest ^:live lookup-unknown-system
-  (testing "lookup returns 404 for unknown code system"
-    (let [{:keys [status body]} (http-get "/CodeSystem/$lookup?system=http://example.com/fake&code=123")]
-      (is (= 404 status))
-      (is (= "OperationOutcome" (get body "resourceType"))))))
-
-(deftest ^:live validate-code-with-system-param
-  (testing "CS $validate-code works with system= query param"
-    (let [{:keys [status body]} (http-get "/CodeSystem/$validate-code?system=http://snomed.info/sct&code=73211009")]
-      (is (= 200 status))
-      (is (true? (get (get-param body "result") "valueBoolean")))
-      (is (= "http://snomed.info/sct" (get (get-param body "system") "valueUri"))))))
-
-(deftest ^:live validate-code-unknown-code
-  (testing "CS $validate-code returns result=false for unknown code"
-    (let [{:keys [status body]} (http-get "/CodeSystem/$validate-code?system=http://snomed.info/sct&code=999999999")]
-      (is (= 200 status))
-      (is (false? (get (get-param body "result") "valueBoolean")))
-      (is (some? (get (get-param body "issues") "resource"))))))
-
-(deftest ^:live validate-code-unknown-system
-  (testing "CS $validate-code returns result=false for unknown system"
-    (let [{:keys [status body]} (http-get "/CodeSystem/$validate-code?system=http://example.com/fake&code=123")]
-      (is (= 200 status))
-      (is (false? (get (get-param body "result") "valueBoolean"))))))
-
 ;; ---------------------------------------------------------------------------
-;; Post-coordinated SNOMED CT expression dispatch.
-;;
-;; Anything that isn't a bare numeric concept id — term-annotated,
-;; compound, definition-status SCG shapes — is handed to the SCG parser
-;; rather than the simple-code path.
+;; Helpers used by the case table to assert response shapes.
+;; Each predicate takes the parsed JSON body and returns truthy on match.
 ;; ---------------------------------------------------------------------------
 
-(deftest ^:live lookup-expression-term-annotated
-  (testing "$lookup of a term-annotated SCG expression routes through the expression parser"
-    (let [{:keys [status body]} (http-get (str "/CodeSystem/$lookup?system=http://snomed.info/sct"
-                                               "&code=73211009%20%7CDiabetes%7C"))]
-      (is (= 200 status))
-      (is (re-find #"(?i)diabetes" (get (get-param body "display") "valueString"))))))
+(defn- name-starts-with-version-uri? [body]
+  (str/starts-with? (get (get-param body "name") "valueString")
+                    "http://snomed.info/sct|http://snomed.info/sct/"))
 
-(deftest ^:live lookup-expression-compound
-  (testing "$lookup of a `+` compound SCG expression routes through the expression parser"
-    (let [{:keys [status body]} (http-get (str "/CodeSystem/$lookup?system=http://snomed.info/sct"
-                                               "&code=73211009%20%2B%2024700007"))]
-      (is (= 200 status))
-      (is (some? (get (get-param body "display") "valueString"))))))
+(defn- has-display? [body]
+  (some? (get (get-param body "display") "valueString")))
 
-(deftest ^:live lookup-expression-refinement
-  (testing "$lookup of a `:` refinement SCG expression routes through the expression parser"
-    (let [{:keys [status body]} (http-get (str "/CodeSystem/$lookup?system=http://snomed.info/sct"
-                                               "&code=24700007%3A363698007%3D56459004"))]
-      (is (= 200 status))
-      (let [display (get (get-param body "display") "valueString")]
-        (is (some? display))
-        (is (re-find #"363698007" display))))))
+(defn- result-true? [body]
+  (true? (get (get-param body "result") "valueBoolean")))
 
-(deftest ^:live validate-code-expression-valid
-  (testing "CS $validate-code returns result=true for a well-formed SCG expression"
-    (let [{:keys [status body]} (http-get (str "/CodeSystem/$validate-code?system=http://snomed.info/sct"
-                                               "&code=24700007%3A363698007%3D56459004"))]
-      (is (= 200 status))
-      (is (true? (get (get-param body "result") "valueBoolean"))))))
+(defn- result-false? [body]
+  (false? (get (get-param body "result") "valueBoolean")))
 
-(deftest ^:live validate-code-expression-unknown-focus
-  (testing "CS $validate-code returns result=false for an SCG referencing an unknown focus concept"
-    (let [{:keys [status body]} (http-get (str "/CodeSystem/$validate-code?system=http://snomed.info/sct"
-                                               "&code=999999999999%3A363698007%3D56459004"))]
-      (is (= 200 status))
-      (is (false? (get (get-param body "result") "valueBoolean"))))))
+(defn- has-issues? [body]
+  (some? (get (get-param body "issues") "resource")))
 
-(deftest ^:live expand-inline-valueset-descendent-of
-  (testing "POST $expand with inline valueSet (descendent-of filter) expands without a url"
-    (let [payload {:resourceType "Parameters"
-                   :parameter    [{:name "valueSet"
-                                   :resource
-                                   {:resourceType "ValueSet"
-                                    :compose
-                                    {:include
-                                     [{:system "http://snomed.info/sct"
-                                       :filter [{:property "concept"
-                                                 :op       "descendent-of"
-                                                 :value    "64572001"}]}]}}}
-                                  {:name "count" :valueInteger 10}]}
-          {:keys [status body]} (http-post-json "/ValueSet/$expand" payload)]
-      (is (= 200 status))
-      (is (= "ValueSet" (get body "resourceType")))
-      (let [expansion (get body "expansion")]
-        (is (<= (count (get expansion "contains" [])) 10))))))
+(defn- system-uri-equals? [expected]
+  (fn [body] (= expected (get (get-param body "system") "valueUri"))))
 
-(deftest ^:live expand-inline-valueset-multifilter
-  (testing "POST $expand with inline valueSet and multiple filters"
-    (let [payload {:resourceType "Parameters"
-                   :parameter    [{:name "valueSet"
-                                   :resource
-                                   {:resourceType "ValueSet"
-                                    :compose
-                                    {:include
-                                     [{:system "http://snomed.info/sct"
-                                       :filter [{:property "concept"
-                                                 :op       "is-a"
-                                                 :value    "195967001"}
-                                                {:property "363698007"
-                                                 :op       "="
-                                                 :value    "89187006"}]}]}}}
-                                  {:name "count" :valueInteger 10}]}
-          {:keys [status body]} (http-post-json "/ValueSet/$expand" payload)]
-      (is (= 200 status))
-      (is (= "ValueSet" (get body "resourceType"))))))
+(defn- operation-outcome? [body]
+  (= "OperationOutcome" (get body "resourceType")))
 
-(deftest ^:live translate-snomed-replaced-by
-  (testing "$translate resolves SNOMED REPLACED BY for a retired code"
-    (let [{:keys [status body]} (http-get (str "/ConceptMap/$translate"
-                                               "?url=http%3A%2F%2Fsnomed.info%2Fsct%3Ffhir_cm%3D900000000000526001"
-                                               "&system=http%3A%2F%2Fsnomed.info%2Fsct&code=225983005"
-                                               "&target=http%3A%2F%2Fsnomed.info%2Fsct"))]
-      (is (= 200 status))
-      (is (= "Parameters" (get body "resourceType")))
-      (is (true? (get (get-param body "result") "valueBoolean")))
-      (let [match (get-param body "match")
-            parts (->> (get match "part") (map (juxt #(get % "name") identity)) (into {}))]
-        (is (= "equivalent" (get-in parts ["equivalence" "valueCode"])))
-        (is (= "441207001" (get-in parts ["concept" "valueCoding" "code"])))
-        (is (= "http://snomed.info/sct" (get-in parts ["concept" "valueCoding" "system"])))))))
+(defn- issue-text-matches? [pattern]
+  (fn [body] (re-find pattern (get-in body ["issue" 0 "details" "text"] ""))))
 
-(deftest ^:live translate-snomed-active-code-unmapped
-  (testing "$translate returns result=false for a code with no historical association"
-    (let [{:keys [status body]} (http-get (str "/ConceptMap/$translate"
-                                               "?url=http%3A%2F%2Fsnomed.info%2Fsct%3Ffhir_cm%3D900000000000526001"
-                                               "&system=http%3A%2F%2Fsnomed.info%2Fsct&code=73211009"
-                                               "&target=http%3A%2F%2Fsnomed.info%2Fsct"))]
-      (is (= 200 status))
-      (is (false? (get (get-param body "result") "valueBoolean")))
-      (is (nil? (get-param body "match"))))))
+(defn- issue-text-not-matches? [pattern]
+  (fn [body] (not (re-find pattern (get-in body ["issue" 0 "details" "text"] "")))))
+
+(defn- issue-code-equals? [expected]
+  (fn [body] (= expected (get-in body ["issue" 0 "code"]))))
+
+(defn- display-matches? [pattern]
+  (fn [body] (re-find pattern (get (get-param body "display") "valueString"))))
+
+(defn- display-includes? [substring]
+  (fn [body] (str/includes? (get (get-param body "display") "valueString") substring)))
+
+(defn- valueset-resource? [body]
+  (= "ValueSet" (get body "resourceType")))
+
+(defn- expansion-bounded-by? [n]
+  (fn [body] (<= (count (get-in body ["expansion" "contains"] [])) n)))
+
+(defn- match-equivalence-equivalent? [body]
+  (let [match (get-param body "match")
+        parts (->> (get match "part") (map (juxt #(get % "name") identity)) (into {}))]
+    (= "equivalent" (get-in parts ["equivalence" "valueCode"]))))
+
+(defn- match-target-code-equals? [code]
+  (fn [body]
+    (let [match (get-param body "match")
+          parts (->> (get match "part") (map (juxt #(get % "name") identity)) (into {}))]
+      (= code (get-in parts ["concept" "valueCoding" "code"])))))
+
+(defn- no-match? [body]
+  (nil? (get-param body "match")))
+
+(defn- check
+  "Run one case from the table. Asserts status, optional content-type
+  regex, and every body predicate (each `assertions` entry is
+  `[label pred]`)."
+  [{:keys [name request expect]}]
+  (testing name
+    (let [{:keys [status content-type body]} (request! request)]
+      (is (= (:status expect) status)
+          (str name " — expected status " (:status expect) ", got " status))
+      (when-let [ct (:content-type expect)]
+        (is (re-find ct content-type)
+            (str name " — content-type " content-type)))
+      (doseq [[label pred] (:assertions expect)]
+        (is (pred body) (str name " — " label))))))
+
+;; ---------------------------------------------------------------------------
+;; Case table
+;; ---------------------------------------------------------------------------
+
+(def ^:private cases
+  [{:name "lookup valid SNOMED code returns 200 + display"
+    :request {:path "/CodeSystem/$lookup?system=http://snomed.info/sct&code=73211009"}
+    :expect {:status 200
+             :assertions [["name in system|version-uri form" name-starts-with-version-uri?]
+                          ["display present" has-display?]]}}
+
+   {:name "lookup unknown code returns 404 OperationOutcome"
+    :request {:path "/CodeSystem/$lookup?system=http://snomed.info/sct&code=999999999"}
+    :expect {:status 404
+             :assertions [["body is OperationOutcome" operation-outcome?]
+                          ["text mentions unknown code" (issue-text-matches? #"(?i)unknown code")]
+                          ["text does not say unknown code system" (issue-text-not-matches? #"(?i)unknown code system")]]}}
+
+   {:name "lookup unknown code system returns 404 OperationOutcome"
+    :request {:path "/CodeSystem/$lookup?system=http://example.com/fake&code=123"}
+    :expect {:status 404
+             :assertions [["body is OperationOutcome" operation-outcome?]]}}
+
+   {:name "$validate-code with system query param succeeds"
+    :request {:path "/CodeSystem/$validate-code?system=http://snomed.info/sct&code=73211009"}
+    :expect {:status 200
+             :assertions [["result=true" result-true?]
+                          ["echoes system" (system-uri-equals? "http://snomed.info/sct")]]}}
+
+   {:name "$validate-code unknown code returns result=false + issues"
+    :request {:path "/CodeSystem/$validate-code?system=http://snomed.info/sct&code=999999999"}
+    :expect {:status 200
+             :assertions [["result=false" result-false?]
+                          ["issues populated" has-issues?]]}}
+
+   {:name "$validate-code unknown system returns result=false"
+    :request {:path "/CodeSystem/$validate-code?system=http://example.com/fake&code=123"}
+    :expect {:status 200
+             :assertions [["result=false" result-false?]]}}
+
+   ;; SCG expressions (post-coordinated SNOMED) — anything non-numeric routes
+   ;; through the SCG parser rather than the simple-code path.
+   {:name "$lookup of a term-annotated SCG expression"
+    :request {:path (str "/CodeSystem/$lookup?system=http://snomed.info/sct"
+                         "&code=73211009%20%7CDiabetes%7C")}
+    :expect {:status 200
+             :assertions [["display contains 'diabetes'" (display-matches? #"(?i)diabetes")]]}}
+
+   {:name "$lookup of a `+` compound SCG expression"
+    :request {:path (str "/CodeSystem/$lookup?system=http://snomed.info/sct"
+                         "&code=73211009%20%2B%2024700007")}
+    :expect {:status 200
+             :assertions [["display present" has-display?]]}}
+
+   {:name "$lookup of a `:` refinement SCG expression"
+    :request {:path (str "/CodeSystem/$lookup?system=http://snomed.info/sct"
+                         "&code=24700007%3A363698007%3D56459004")}
+    :expect {:status 200
+             :assertions [["display present" has-display?]
+                          ["display includes refinement attribute" (display-includes? "363698007")]]}}
+
+   {:name "$validate-code on a well-formed SCG expression returns true"
+    :request {:path (str "/CodeSystem/$validate-code?system=http://snomed.info/sct"
+                         "&code=24700007%3A363698007%3D56459004")}
+    :expect {:status 200
+             :assertions [["result=true" result-true?]]}}
+
+   {:name "$validate-code on SCG with unknown focus returns false"
+    :request {:path (str "/CodeSystem/$validate-code?system=http://snomed.info/sct"
+                         "&code=999999999999%3A363698007%3D56459004")}
+    :expect {:status 200
+             :assertions [["result=false" result-false?]]}}
+
+   {:name "POST $expand with inline valueSet (descendent-of)"
+    :request {:method :post
+              :path "/ValueSet/$expand"
+              :body {:resourceType "Parameters"
+                     :parameter [{:name "valueSet"
+                                  :resource {:resourceType "ValueSet"
+                                             :compose {:include [{:system "http://snomed.info/sct"
+                                                                  :filter [{:property "concept"
+                                                                            :op "descendent-of"
+                                                                            :value "64572001"}]}]}}}
+                                 {:name "count" :valueInteger 10}]}}
+    :expect {:status 200
+             :assertions [["body is ValueSet" valueset-resource?]
+                          ["expansion ≤ 10" (expansion-bounded-by? 10)]]}}
+
+   {:name "POST $expand with inline valueSet and multiple filters"
+    :request {:method :post
+              :path "/ValueSet/$expand"
+              :body {:resourceType "Parameters"
+                     :parameter [{:name "valueSet"
+                                  :resource {:resourceType "ValueSet"
+                                             :compose {:include [{:system "http://snomed.info/sct"
+                                                                  :filter [{:property "concept"
+                                                                            :op "is-a"
+                                                                            :value "195967001"}
+                                                                           {:property "363698007"
+                                                                            :op "="
+                                                                            :value "89187006"}]}]}}}
+                                 {:name "count" :valueInteger 10}]}}
+    :expect {:status 200
+             :assertions [["body is ValueSet" valueset-resource?]]}}
+
+   {:name "$translate resolves SNOMED REPLACED BY for a retired code"
+    :request {:path (str "/ConceptMap/$translate"
+                         "?url=http%3A%2F%2Fsnomed.info%2Fsct%3Ffhir_cm%3D900000000000526001"
+                         "&system=http%3A%2F%2Fsnomed.info%2Fsct&code=225983005"
+                         "&target=http%3A%2F%2Fsnomed.info%2Fsct")}
+    :expect {:status 200
+             :assertions [["result=true" result-true?]
+                          ["match is equivalent" match-equivalence-equivalent?]
+                          ["target code 441207001" (match-target-code-equals? "441207001")]]}}
+
+   {:name "$translate active code with no historical association"
+    :request {:path (str "/ConceptMap/$translate"
+                         "?url=http%3A%2F%2Fsnomed.info%2Fsct%3Ffhir_cm%3D900000000000526001"
+                         "&system=http%3A%2F%2Fsnomed.info%2Fsct&code=73211009"
+                         "&target=http%3A%2F%2Fsnomed.info%2Fsct")}
+    :expect {:status 200
+             :assertions [["result=false" result-false?]
+                          ["no match part" no-match?]]}}
+
+   {:name "$translate with unknown ConceptMap url returns 404 OperationOutcome"
+    :request {:path "/ConceptMap/$translate?url=http://example.com/fake&system=http://snomed.info/sct&code=225983005"}
+    :expect {:status 404
+             :assertions [["body is OperationOutcome" operation-outcome?]
+                          ["issue.code = not-found" (issue-code-equals? "not-found")]]}}
+
+   {:name "unrouted path returns FHIR-shaped 404"
+    :request {:path "/ValueSet?url=http://example.com"
+              :headers {}}
+    :expect {:status 404
+             :content-type #"application/fhir\+json"
+             :assertions [["body is OperationOutcome" operation-outcome?]
+                          ["issue.code = not-found" (issue-code-equals? "not-found")]]}}])
+
+(deftest ^:live operation-cases
+  (doseq [c cases] (check c)))
+
+;; ---------------------------------------------------------------------------
+;; ConceptMap dispatch tests — these branch on whether external concept-map
+;; refsets happen to be installed in the pinned SNOMED DB, so they live
+;; outside the table.
+;; ---------------------------------------------------------------------------
 
 (defn- conceptmap-descriptions []
-  (protos/cm-metadata (:svc @test-state)))
+  (protos/cm-metadata *svc*))
 
 (defn- conceptmap-registered-for? [source target]
   (some (fn [d] (and (= source (:system d)) (= target (:target d))))
@@ -243,37 +268,18 @@
         icd-o "http://hl7.org/fhir/sid/icd-o"]
     (when (conceptmap-registered-for? sct icd-o)
       (testing "(system,target) pair resolves to the right provider without a url"
-        (let [{:keys [status]} (http-get (str "/ConceptMap/$translate"
-                                              "?system=" sct "&code=000&target=" icd-o))]
-          (is (= 200 status)
-              "Registry should route pair requests to the SNOMED provider"))))
+        (is (= 200 (:status (request! {:path (str "/ConceptMap/$translate?system=" sct
+                                                  "&code=000&target=" icd-o)}))))))
     (when (conceptmap-registered-for? icd-o sct)
       (testing "Reverse pair (external → SCT) resolves to the same provider"
-        (let [{:keys [status]} (http-get (str "/ConceptMap/$translate"
-                                              "?system=" icd-o "&code=FAKE&target=" sct))]
-          (is (= 200 status)))))))
+        (is (= 200 (:status (request! {:path (str "/ConceptMap/$translate?system=" icd-o
+                                                  "&code=FAKE&target=" sct)}))))))))
 
 (deftest ^:live cm-metadata-lists-installed-refsets
   (testing "cm-metadata emits SCT→SCT historical maps + pairs for any installed external maps"
-    (let [descs (conceptmap-descriptions)
+    (let [descs  (conceptmap-descriptions)
           snomed "http://snomed.info/sct"]
       (is (seq (filter #(= [snomed snomed] [(:system %) (:target %)]) descs))
           "at least one SCT→SCT historical association should be registered")
       (is (every? :url descs)
           "every description carries a canonical url for direct $translate dispatch"))))
-
-(deftest ^:live translate-unknown-conceptmap-url
-  (testing "$translate with unknown url returns 404 OperationOutcome"
-    (let [{:keys [status body]} (http-get "/ConceptMap/$translate?url=http://example.com/fake&system=http://snomed.info/sct&code=225983005")]
-      (is (= 404 status))
-      (is (= "OperationOutcome" (get body "resourceType")))
-      (is (= "not-found" (get-in body ["issue" 0 "code"]))))))
-
-(deftest ^:live unrouted-path-returns-fhir-404
-  (testing "GET on an unrouted path returns a FHIR OperationOutcome 404"
-    (let [{:keys [status content-type raw]} (http-get-raw "/ValueSet?url=http://example.com")]
-      (is (= 404 status))
-      (is (re-find #"application/fhir\+json" content-type))
-      (let [body (json/read-str raw)]
-        (is (= "OperationOutcome" (get body "resourceType")))
-        (is (= "not-found" (get-in body ["issue" 0 "code"])))))))

@@ -5,12 +5,23 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
+            [com.eldrix.hades.impl.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.supplement :as supplement]))
 
-(stest/instrument (filter #(clojure.string/starts-with? (namespace %) "com.eldrix.hades")
-                          (stest/instrumentable-syms)))
+(stest/instrument)
+;; Hermes' specs reject malformed SCT ids (zero, negative, Verhoeff
+;; failure) at the function boundary. In production those calls just
+;; return nil/empty — the instrumented assertion is a dev-only concern
+;; that turns "unknown code" handling into a 500. We unstrument the
+;; specific fns that callers feed user-supplied ids into.
+(stest/unstrument
+  '[com.eldrix.hermes.core/concept
+    com.eldrix.hermes.core/component-refset-items
+    com.eldrix.hermes.core/historical-associations
+    com.eldrix.hermes.core/subsumed-by?
+    com.eldrix.hermes.core/with-historical])
 
 ;; ---------------------------------------------------------------------------
 ;; CodeSystem fixtures
@@ -69,7 +80,8 @@
     (is (some? (protos/cs-lookup hier-cs {:code "A2"})))
     (is (some? (protos/cs-lookup hier-cs {:code "A2a"})))
     (is (some? (protos/cs-lookup hier-cs {:code "B"})))
-    (is (nil? (protos/cs-lookup hier-cs {:code "NOPE"})))))
+    (is (= :unknown-code
+           (:not-found-reason (protos/cs-lookup hier-cs {:code "NOPE"}))))))
 
 ;; --- cs-lookup ---
 
@@ -128,8 +140,10 @@
       (is (= 1 (count inactive-props)))
       (is (false? (:value (first inactive-props))))))
 
-  (testing "nil for unknown code"
-    (is (nil? (protos/cs-lookup hier-cs {:code "MISSING"})))))
+  (testing "not-found map for unknown code"
+    (let [r (protos/cs-lookup hier-cs {:code "MISSING"})]
+      (is (true? (:not-found r)))
+      (is (= :unknown-code (:not-found-reason r))))))
 
 ;; --- cs-validate-code ---
 
@@ -355,7 +369,7 @@
 (def ^:dynamic *svc* nil)
 
 (defn vs-svc-fixture [f]
-  (binding [*svc* (hades/open [vs-test-cs])]
+  (binding [*svc* (composite/from-providers [vs-test-cs])]
     (f)))
 
 (use-fixtures :each vs-svc-fixture)

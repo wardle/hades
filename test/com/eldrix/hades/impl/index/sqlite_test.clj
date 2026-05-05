@@ -23,12 +23,18 @@
 (defn- count-rows [ds sql]
   (-> (jdbc/execute-one! ds [sql]) vals first))
 
+(defn- import-loinc-fixture! [path version]
+  (sqlite-index/import-fhir-data
+    path
+    (loinc/stream-release fixture-root {:version version})
+    {:loader-type "loinc-csv"}))
+
 (deftest build-loinc-fixture-into-sqlite
   (let [path (temp-db-path)]
     (try
-      (let [data (loinc/load-paths fixture-root {:version "2.82"})
-            result (sqlite-index/build! path data {:loader-type "loinc-csv"})
-            ds (db/open path)]
+      (let [result (import-loinc-fixture! path "2.82")]
+        (sqlite-index/index! path)
+        (let [ds (db/open path)]
         (testing "result reports targets and resources"
           (is (= path (:db-path result)))
           (is (>= (count (:resources result)) 4))
@@ -37,8 +43,8 @@
                           (= "2.82" (:version %)))
                     (:resources result))))
         (testing "concept rows landed"
-          ;; 9 LOINC concepts + 6 LA-concepts + 5 LP-parts = 20
-          (is (= 20 (count-rows ds "SELECT COUNT(*) FROM concept")))
+          ;; 9 LOINC concepts + 6 LA-concepts + 6 LP-parts = 21
+          (is (= 21 (count-rows ds "SELECT COUNT(*) FROM concept")))
           (is (= "Hemoglobin [Mass/volume] in Blood"
                  (-> (jdbc/execute-one! ds
                        ["SELECT display FROM concept
@@ -101,63 +107,60 @@
           (let [rows (db/list-resources ds)
                 cs   (filter #(= "CodeSystem" (:resource-type %)) rows)]
             (is (= 1 (count cs)))
-            ;; 9 LOINC-table rows + 6 unique LA-codes + 5 LP-parts = 20
-            (is (= 20 (:concept-count (first cs)))))))
+            ;; 9 LOINC-table rows + 6 unique LA-codes + 6 LP-parts = 21
+            (is (= 21 (:concept-count (first cs))))))))
       (finally (delete-quietly path)))))
 
 (deftest subsumes-uses-closure-table
   (let [path (temp-db-path)]
     (try
-      (let [data (loinc/load-paths fixture-root {:version "2.82"})]
-        (sqlite-index/build! path data {:loader-type "loinc-csv"})
-        (let [{:keys [datasource codesystem]} (sqlite-provider/open-providers path)
-              call (fn [params] (protos/cs-subsumes codesystem params))]
-          (try
-            (testing "ancestor → descendant returns 'subsumes'"
-              (is (= "subsumes" (:outcome (call {:systemA "http://loinc.org"
-                                                 :codeA "LP386648-2"
+      (import-loinc-fixture! path "2.82")
+      (sqlite-index/index! path)
+      (let [{:keys [datasource codesystem]} (sqlite-provider/open-providers path)
+            call (fn [params] (protos/cs-subsumes codesystem params))]
+        (try
+          (testing "ancestor → descendant returns 'subsumes'"
+            (is (= "subsumes" (:outcome (call {:systemA "http://loinc.org"
+                                               :codeA "LP386648-2"
+                                               :codeB "2951-2"})))))
+          (testing "descendant → ancestor returns 'subsumed-by'"
+            (is (= "subsumed-by" (:outcome (call {:systemA "http://loinc.org"
+                                                  :codeA "2951-2"
+                                                  :codeB "LP386648-2"})))))
+          (testing "same code returns 'equivalent'"
+            (is (= "equivalent" (:outcome (call {:systemA "http://loinc.org"
+                                                 :codeA "2951-2"
                                                  :codeB "2951-2"})))))
-            (testing "descendant → ancestor returns 'subsumed-by'"
-              (is (= "subsumed-by" (:outcome (call {:systemA "http://loinc.org"
-                                                    :codeA "2951-2"
-                                                    :codeB "LP386648-2"})))))
-            (testing "same code returns 'equivalent'"
-              (is (= "equivalent" (:outcome (call {:systemA "http://loinc.org"
+          (testing "unrelated codes return 'not-subsumed'"
+            (is (= "not-subsumed" (:outcome (call {:systemA "http://loinc.org"
                                                    :codeA "2951-2"
-                                                   :codeB "2951-2"})))))
-            (testing "unrelated codes return 'not-subsumed'"
-              (is (= "not-subsumed" (:outcome (call {:systemA "http://loinc.org"
-                                                     :codeA "2951-2"
-                                                     :codeB "718-7"})))))
-            (finally
-              (when (instance? java.io.Closeable datasource)
-                (.close ^java.io.Closeable datasource))))))
+                                                   :codeB "718-7"})))))
+          (finally
+            (when (instance? java.io.Closeable datasource)
+              (.close ^java.io.Closeable datasource)))))
       (finally (delete-quietly path)))))
 
 (deftest update-in-place-replaces-same-version
   (let [path (temp-db-path)]
     (try
-      (let [data (loinc/load-paths fixture-root {:version "2.82"})]
-        (sqlite-index/build! path data {:loader-type "loinc-csv"})
-        (let [ds (db/open path)
-              cnt-before (count-rows ds "SELECT COUNT(*) FROM concept")]
-          (testing "second build with same version is idempotent in row count"
-            (sqlite-index/build! path data {:loader-type "loinc-csv"})
-            (let [ds (db/open path)]
-              (is (= cnt-before (count-rows ds "SELECT COUNT(*) FROM concept")))))))
+      (import-loinc-fixture! path "2.82")
+      (let [ds (db/open path)
+            cnt-before (count-rows ds "SELECT COUNT(*) FROM concept")]
+        (testing "second build with same version is idempotent in row count"
+          (import-loinc-fixture! path "2.82")
+          (let [ds (db/open path)]
+            (is (= cnt-before (count-rows ds "SELECT COUNT(*) FROM concept"))))))
       (finally (delete-quietly path)))))
 
 (deftest multi-version-coexist
   (let [path (temp-db-path)]
     (try
-      (let [d1 (loinc/load-paths fixture-root {:version "2.82"})
-            d2 (loinc/load-paths fixture-root {:version "2.83"})]
-        (sqlite-index/build! path d1 {:loader-type "loinc-csv"})
-        (sqlite-index/build! path d2 {:loader-type "loinc-csv"})
-        (let [ds (db/open path)
-              versions (->> (jdbc/execute! ds
-                              ["SELECT DISTINCT cs_version FROM concept WHERE cs_url='http://loinc.org'"])
-                            (map :concept/cs_version)
-                            set)]
-          (is (= #{"2.82" "2.83"} versions))))
+      (import-loinc-fixture! path "2.82")
+      (import-loinc-fixture! path "2.83")
+      (let [ds (db/open path)
+            versions (->> (jdbc/execute! ds
+                            ["SELECT DISTINCT cs_version FROM concept WHERE cs_url='http://loinc.org'"])
+                          (map :concept/cs_version)
+                          set)]
+        (is (= #{"2.82" "2.83"} versions)))
       (finally (delete-quietly path)))))

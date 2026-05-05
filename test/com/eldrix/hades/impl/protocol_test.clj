@@ -9,18 +9,23 @@
   tests exercise specific edge cases found via the conformance suite."
   (:require [clojure.spec.alpha :as s]
             [clojure.spec.test.alpha :as stest]
-            [clojure.string]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
+            [com.eldrix.hades.impl.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.impl.protocols :as protos]))
 
-;; ---------------------------------------------------------------------------
-;; Spec instrumentation — validate inputs at boundaries during test runs
-;; ---------------------------------------------------------------------------
-
-(stest/instrument (filter #(clojure.string/starts-with? (namespace %) "com.eldrix.hades")
-                          (stest/instrumentable-syms)))
+(stest/instrument)
+;; See in_memory_test for rationale: these Hermes fns spec-reject
+;; malformed SCT ids at the boundary, but in production they just
+;; return nil/empty. Leaving them instrumented turns "unknown code"
+;; handling into a 500 in the test suite.
+(stest/unstrument
+  '[com.eldrix.hermes.core/concept
+    com.eldrix.hermes.core/component-refset-items
+    com.eldrix.hermes.core/historical-associations
+    com.eldrix.hermes.core/subsumed-by?
+    com.eldrix.hermes.core/with-historical])
 
 ;; ---------------------------------------------------------------------------
 ;; Generic return-shape conformance — fetches each `core` operation's
@@ -72,7 +77,7 @@
 (def ^:dynamic *svc* nil)
 
 (defn svc-fixture [f]
-  (binding [*svc* (hades/open [cs vs])]
+  (binding [*svc* (composite/from-providers [cs vs])]
     (f)))
 
 (use-fixtures :each svc-fixture)
@@ -89,9 +94,17 @@
       (is (some? result))
       (is (= "Alpha" (:display result)))))
 
-  (testing "unknown code returns nil"
-    (is (nil? (check-ret `hades/lookup hades/lookup *svc*
-                         {:code "MISSING" :system "http://example.com/contract-cs"})))))
+  (testing "unknown code returns a spec-conforming not-found result"
+    (let [result (check-ret `hades/lookup hades/lookup *svc*
+                            {:code "MISSING" :system "http://example.com/contract-cs"})]
+      (is (true? (:not-found result)))
+      (is (= :unknown-code (:not-found-reason result)))))
+
+  (testing "unknown system returns a spec-conforming not-found result"
+    (let [result (check-ret `hades/lookup hades/lookup *svc*
+                            {:code "X" :system "http://example.com/no-such"})]
+      (is (true? (:not-found result)))
+      (is (= :unknown-system (:not-found-reason result))))))
 
 ;; ---------------------------------------------------------------------------
 ;; cs-validate-code scenario tests

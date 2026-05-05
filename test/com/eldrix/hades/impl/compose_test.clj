@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.impl.compose :as compose]
+            [com.eldrix.hades.impl.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]))
 
 (def test-cs-map
@@ -38,11 +39,11 @@
   ;; Default fixture: only v1. Tests that need v1+v2 build their own
   ;; service inline (multi-version bare URLs are intentionally unbound,
   ;; which would break the simple include cases).
-  (binding [*svc* (hades/open [test-cs])]
+  (binding [*svc* (composite/from-providers [test-cs])]
     (f)))
 
 (defn- multi-version-svc []
-  (hades/open [test-cs test-cs-v2]))
+  (composite/from-providers [test-cs test-cs-v2]))
 
 (use-fixtures :each svc-fixture)
 

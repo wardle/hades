@@ -123,7 +123,7 @@
   by their canonical URLs. Self-contained — no global state touched."
   [data]
   (let [{:keys [providers supplements]} (load-fhir/build-from-fhir-data data)
-        svc (hades/open providers {:supplements supplements})]
+        svc (composite/from-providers providers {:supplements supplements})]
     {:svc svc
      :cs (composite/find-codesystem svc cs-url)
      :vs (composite/find-valueset   svc vs-url)
@@ -132,6 +132,7 @@
 (defn- build-sqlite-providers [data]
   (let [path (temp-db-path)]
     (sqlite-index/build! path data {:loader-type "parity-test"})
+    (sqlite-index/index! path)
     (let [{:keys [codesystem valueset conceptmap datasource]}
           (sqlite-provider/open-providers path)]
       {:cs codesystem :vs valueset :cm conceptmap
@@ -260,7 +261,7 @@
   (let [{{im :vs im-svc :svc} :in-mem {sq :vs} :sqlite} @state
         ;; SQLite provider also needs a service for compose callbacks;
         ;; build a parallel one wrapping its impls.
-        sq-svc (hades/open [(get-in @state [:sqlite :cs])
+        sq-svc (composite/from-providers [(get-in @state [:sqlite :cs])
                             (get-in @state [:sqlite :vs])
                             (get-in @state [:sqlite :cm])])]
     (testing "expand the primary-colours ValueSet"
@@ -279,7 +280,7 @@
 
 (deftest parity-vs-validate-code
   (let [{{im :vs im-svc :svc} :in-mem {sq :vs} :sqlite} @state
-        sq-svc (hades/open [(get-in @state [:sqlite :cs])
+        sq-svc (composite/from-providers [(get-in @state [:sqlite :cs])
                             (get-in @state [:sqlite :vs])
                             (get-in @state [:sqlite :cm])])
         check (fn [params]

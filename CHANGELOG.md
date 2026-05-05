@@ -2,39 +2,99 @@
 
 This log documents significant changes for each release.
 
-## [v2.0.140] - 2026-05-02
+## Not yet released - v2.0
 
-Headline: Hades passes 490 / 600 (81.7%) of the HL7 FHIR Terminology
-Ecosystem IG conformance tests against the pinned tx-ecosystem rev
-(`fb9078f6`). Same passes as the prior 490 / 603 figure — the upstream
-fixture set shrank by three deleted tests.
+Headline: Hades is now a **multi-terminology** FHIR server. SNOMED CT,
+LOINC, and arbitrary FHIR NPM packages run side-by-side in one process,
+dispatched by canonical URL. v1.x served SNOMED only.
 
-* **Multi-terminology architecture.** SNOMED CT, LOINC, and FHIR NPM
-  packages are served from one process via a composite that dispatches
-  by canonical URL. Providers may be Hermes-backed (SNOMED), SQLite
-  containers (LOINC, optional for FHIR packages), or in-memory
-  (`--resources <dir>`).
-* **LOINC ingestion at parity with the schema.** The release loader now
-  reads `Part.csv`, `LoincPartLink_Primary.csv`,
-  `ComponentHierarchyBySystem.csv` and the per-language
-  `LinguisticVariants/*.csv` files in addition to the Core table. A real
-  Loinc 2.81 import yields 202k concepts, 7M designations across 21
-  languages, 661k typed Coding axis links, and a 252k-row ancestor
-  closure powering `$subsumes` over LOINC's DAG.
-* **FHIR NPM package ingestion.** `import` auto-detects extracted FHIR
-  package directories (`hl7.fhir.r4.core`, `hl7.terminology`,
-  `hl7.fhir.us.core`, `hl7.fhir.uv.ips`, `us.cdc.phinvads`); the JSON
-  reader strips a leading UTF-8 BOM and treats malformed sidecar JSON
-  (e.g. openapi specs) as soft skips so a single broken file no longer
-  aborts a directory walk.
-* **`:concept` shape supports multi-parent hierarchies.** Optional
-  `:parents` vector alongside the existing single-`:parent-code`. Both
-  the SQLite indexer and the in-memory builder consume either form.
-* **Bug fix: SQLite `cs-subsumes`** was destructuring `:system` instead
-  of `:systemA`, so it always returned `not-subsumed` on disjoint codes.
-  Fixed and regression-tested against a real LOINC closure.
-* **Dep bumps.** `sqlite-jdbc 3.50.3.0 → 3.53.0.0`,
-  `next.jdbc 1.3.1048 → 1.3.1093`, `HikariCP 6.2.1 → 7.0.2`.
+Hades passes **490 / 603 (81.3%)** of the HL7 FHIR Terminology Ecosystem
+IG conformance tests against the pinned tx-ecosystem rev (`fb9078f6`) —
+13 more passes than v1.4.138 (477 / 603) against the same upstream
+fixture set.
+
+The major version bump signals two things: the surface is broader (LOINC,
+FHIR packages, mixed sources on a single `serve`), and the CLI now takes
+**positional paths** for terminology sources rather than `--db` flags.
+v1.x command lines need to be reworked.
+
+### New: LOINC support
+
+* **LOINC release ingestion** from a Loinc release directory into a
+  Hades SQLite container. The loader reads `LoincTableCore`, `Part.csv`,
+  `LoincPartLink_Primary.csv`, `ComponentHierarchyBySystem.csv`, `MapTo`,
+  `AnswerLists`, and the per-language `LinguisticVariants/*.csv`.
+* A real Loinc 2.81 import yields 202k concepts (incl. 73k LP-parts),
+  7M designations across 21 languages, 661k typed Coding axis links,
+  and a 252k-row ancestor closure powering `$subsumes` over LOINC's DAG.
+* Operations supported: `$lookup`, `$validate-code`, `$expand` (with
+  `displayLanguage`, regex / equals / in property filters), `$subsumes`,
+  `$translate` against LOINC's MapTo refset.
+* `import loinc.db /path/to/Loinc_2.81` — single command from release
+  archive to served database.
+
+### New: FHIR NPM package support
+
+* **`install` from `packages.fhir.org`.** `hades install fhir.db
+  --dist hl7.fhir.r4.core@4.0.1 --dist hl7.terminology.r4@7.0.1`
+  resolves versions against the registry, downloads the tgz, extracts,
+  and ingests CodeSystem / ValueSet / ConceptMap / NamingSystem /
+  CodeSystem-supplement resources into a SQLite container.
+* **In-memory serving as an alternative.** Pass an extracted package
+  directory directly to `serve` — Hades parses it on boot and serves
+  from heap for sub-microsecond hashmap lookups. `--cache-dir` on
+  `install` keeps the extracted JSON for this purpose.
+* **Choose per package.** `serve` accepts each positional path
+  independently as Hermes (SNOMED), Hades SQLite container, or FHIR
+  resource directory — auto-detected. Pick in-memory for latency-
+  sensitive small corpora, SQLite for memory-constrained or very
+  large corpora; the same binary serves both.
+* JSON reader strips a leading UTF-8 BOM and treats malformed sidecar
+  JSON (openapi specs etc.) as a soft skip so a single broken file
+  doesn't abort a directory walk.
+
+### New: composite TerminologyService
+
+* `core/open` takes a vector of providers (each implementing the
+  `CodeSystem` / `ValueSet` / `ConceptMap` protocols in
+  `impl/protocols.clj`) and assembles a single composite service.
+* Dispatch is by canonical URL with version resolution
+  (`force-system-version` / `system-version` / `check-system-version`),
+  semver-latest selection across multi-version registrations, and
+  bare-URL aliasing via `NamingSystem` resources.
+* Cross-provider concerns — status warnings, supplement application,
+  `CodeableConcept` aggregation across mixed-system codings — live in
+  the composite.
+* **Request-scoped overlays.** FHIR `tx-resource` parameters are
+  parsed per request, indexed in-memory, and folded onto the base
+  service for the lifetime of the call. The base service is unchanged.
+
+### CLI
+
+* **Positional paths only for sources.** `serve snomed.db loinc.db
+  packages/hl7.fhir.r4.core/package` — paths are not flagged. Bare
+  arguments are always filesystem paths; distribution ids carry on
+  `--dist` flags only.
+* `install`, `import`, `index`, `compact`, `status`, `available`,
+  `list` work uniformly across SNOMED, LOINC, and FHIR-package paths.
+* Subcommands chain: `install index compact snomed.db --dist
+  uk.nhs/sct-clinical --api-key trud.txt`.
+* `available` lists releases for SNOMED distributions (TRUD, MLDS) and
+  versions for FHIR packages from `packages.fhir.org`.
+* `--cache-dir` on `install` retains the extracted FHIR-package
+  directory for in-memory serving alongside the SQLite container.
+
+### Concept-shape extension
+
+* `:concept` now carries an optional `:parents` vector alongside the
+  existing single `:parent-code`, supporting LOINC's multi-parent DAG.
+  The SQLite indexer and the in-memory builder consume either form.
+
+### Dependencies
+
+* `sqlite-jdbc 3.50.3.0 → 3.53.0.0`
+* `next.jdbc 1.3.1048 → 1.3.1093`
+* `HikariCP 6.2.1 → 7.0.2`
 
 ## [v1.4.138] - 2026-04-24
 
@@ -51,9 +111,9 @@ Ecosystem IG conformance tests, up from 473 / 603.
 * **Reproducible conformance suite.** Conformance, `^:live` integration
   tests and benchmarks run against one pinned SNOMED CT International
   release (20250201) and a pinned tx-ecosystem fixture commit,
-  provisioned explicitly via `clj -X:build-db`. Every run reports if
-  upstream has moved ahead. Removes hard-coded personal paths and the
-  `$SNOMED_DB` env var.
+  provisioned explicitly via `clj -M:run install ihtsdo.mlds/167@2025-02-01`.
+  Every run reports if upstream has moved ahead. Removes hard-coded
+  personal paths and the `$SNOMED_DB` env var.
 * **`$lookup` ~2× faster.** Post-coordinated expressions parsed and
   enriched per refinement; dropped unused `extended-concept` work and
   short-circuited the unknown-code path.
@@ -62,7 +122,7 @@ Ecosystem IG conformance tests, up from 473 / 603.
   4xx instead of 5xx; SNOMED implicit-VS errors emit the IG's
   `operationoutcome-message-id` extension; expected `ex-info` throws
   log as terse INFO so real surprises stand out in the stack traces.
-* **CI.** Single workflow with a shared `build-db` job feeding parallel
+* **CI.** Single workflow with a shared `build-data` job feeding parallel
   `test` and `conformance`. Actions bumped to Node-24-capable releases.
 * **Layout.** Internals moved to `impl/`, CLI to `cmd/`; test
   namespaces mirror the new structure.

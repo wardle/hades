@@ -5,6 +5,30 @@
   protocol calls, no service lookups."
   (:require [clojure.string :as str]))
 
+(defn unknown-code-lookup
+  "Build a `::result/lookup` not-found map for `:unknown-code` — the
+  CodeSystem is registered but the requested code isn't in it."
+  [system code]
+  (let [msg (str "Unknown code '" code "' in code system '" system "'")]
+    {:not-found        true
+     :not-found-reason :unknown-code
+     :system           system
+     :code             (when code (keyword code))
+     :message          msg
+     :issues           [{:severity "error" :type "not-found" :text msg}]}))
+
+(defn unknown-system-lookup
+  "Build a `::result/lookup` not-found map for `:unknown-system` — no
+  registered CodeSystem serves the requested URL/version."
+  [system code]
+  (let [msg (str "Unknown code system: " system)]
+    {:not-found        true
+     :not-found-reason :unknown-system
+     :system           system
+     :code             (when code (keyword code))
+     :message          msg
+     :issues           [{:severity "error" :type "not-found" :text msg}]}))
+
 (defn inactive-warning-issue
   "Build an OperationOutcome issue for an inactive concept."
   [code status]

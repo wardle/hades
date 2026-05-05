@@ -1,5 +1,5 @@
 (ns com.eldrix.hades.impl.loaders.loinc
-  "LOINC release directory → seq of fhir-data.
+  "LOINC release directory → fhir-data.
 
   Inputs (Core CSV release + AccessoryFiles):
     - LoincTableCore/LoincTableCore.csv → :codesystem-meta + one :concept
@@ -13,12 +13,14 @@
       published FHIR LOINC convention).
     - AccessoryFiles/PartFile/Part.csv → one :concept per LP-* part
       (PartName as display, STATUS + PartTypeName as properties).
-    - AccessoryFiles/PartFile/LoincPartLink_Primary.csv → one Coding
-      property per (LOINC-num, axis), pointing at the LP-part. Surfaces
-      e.g. `property=COMPONENT` to recover the canonical analyte concept.
+    - AccessoryFiles/PartFile/LoincPartLink_Primary.csv → one
+      `:concept-property` fhir-data entry per (LOINC-num, axis), each
+      carrying a Coding property pointing at the LP-part. Surfaces e.g.
+      `property=COMPONENT` to recover the canonical analyte concept.
     - AccessoryFiles/ComponentHierarchyBySystem/ComponentHierarchyBySystem.csv
-      → :parents on each LP/LOINC-num concept, so $subsumes and
-      `descendant-of` $expand work over LOINC's hierarchy.
+      → one `:concept-parent` fhir-data entry per row (for both LP- and
+      LOINC-num children), so $subsumes and `descendant-of` $expand
+      work over LOINC's hierarchy.
     - AccessoryFiles/LinguisticVariants/LinguisticVariants.csv +
       <lang>LinguisticVariant.csv → multi-lingual `:designations`
       (display + COMPONENT/PROPERTY/SYSTEM…) on each LOINC-num concept.
@@ -28,11 +30,15 @@
   (`LoincPartLink_Supplementary.csv`), Group/PanelsAndForms,
   ImagingDocuments, Updates, ChangeSnapshot, ConsumerName.
 
-  Output flows through `index/memory` and `in-memory` unchanged."
+  Large imports should use `stream-release`, which emits rows through a
+  bounded channel."
   (:require [charred.api :as charred]
+            [clojure.core.async :as async]
             [clojure.java.io :as io]
             [clojure.string :as str])
-  (:import (java.io File)))
+  (:import (java.io Closeable File)))
+
+(set! *warn-on-reflection* true)
 
 (def system-uri "http://loinc.org")
 
@@ -50,23 +56,38 @@
       v)))
 
 ;; ---------------------------------------------------------------------------
-;; CSV → row maps
+;; CSV row maps
 ;; ---------------------------------------------------------------------------
 
-(defn- read-csv-rows
-  "Read a CSV file as a seq of `{header-string → cell-string}` maps. The
-  caller owns the reader lifetime — pass a `Reader` and consume eagerly
-  inside `with-open`."
-  [^java.io.Reader r]
-  (let [rows (charred/read-csv r)
-        [header & body] rows
-        hv (vec header)]
-    (map (fn [row] (zipmap hv row)) body)))
+(defn- reduce-csv-rows
+  "Open `f` and reduce over `{header -> cell}` row maps.
+  Returns `init` when absent. Row maps are short-lived and the channel
+  carries bounded fhir-data batches, matching the Hermes importer shape."
+  [rf init ^File f]
+  (if-not (.exists f)
+    init
+    (let [^java.util.function.Supplier supplier
+          (charred/read-csv-supplier f {:async? false})
+          header (vec (.get supplier))]
+      (try
+        (loop [acc init]
+          (if-let [row (.get supplier)]
+            (recur (rf acc (zipmap header row)))
+            acc))
+        (finally
+          (when (instance? Closeable supplier)
+            (.close ^Closeable supplier)))))))
 
-(defn- with-csv [^File f f-rows]
-  (when (.exists f)
-    (with-open [r (io/reader f)]
-      (doall (f-rows (read-csv-rows r))))))
+(defn- read-csv!
+  "Open `f` and call `row-fn` with each row map.
+  Returns nil when the file is absent."
+  [^File f row-fn]
+  (reduce-csv-rows (fn [_ row] (row-fn row) nil) nil f))
+
+(defn- put-fhir-data! [ch fd]
+  (when-not (async/>!! ch fd)
+    (throw (ex-info "LOINC stream closed by consumer"
+                    {:reason :stream-closed}))))
 
 ;; ---------------------------------------------------------------------------
 ;; CodeSystem meta
@@ -161,108 +182,76 @@
                       (not= col "STATUS") (assoc "valueString" v))))))
         core-property-cols))
 
-(defn- core-row->concept [version source-path row]
-  (let [code (get row "LOINC_NUM")
-        long-name (get row "LONG_COMMON_NAME")
-        short-name (get row "SHORTNAME")
-        designations (cond-> []
-                       (and short-name (not (str/blank? short-name)))
-                       (conj {:value short-name
+(defn- core-row->concept
+  [version source-path {:strs [LOINC_NUM LONG_COMMON_NAME SHORTNAME] :as row}]
+  (let [designations (cond-> []
+                       (and SHORTNAME (not (str/blank? SHORTNAME)))
+                       (conj {:value SHORTNAME
                               :use {:system "http://loinc.org"
                                     :code "SHORTNAME"
                                     :display "SHORTNAME"}}))]
     {:type :concept
      :system system-uri
      :version version
-     :code code
-     :display long-name
+     :code LOINC_NUM
+     :display LONG_COMMON_NAME
      :definition nil
      :designations designations
      :properties (core-row->properties row)
-     :parent-code nil
      :source-path source-path}))
-
-(defn- load-core-table [^File root version]
-  (let [^File f (io/file root "LoincTableCore" "LoincTableCore.csv")
-        path (.getPath f)]
-    (when-not (.exists f)
-      (throw (ex-info (str "LoincTableCore.csv not found: " path)
-                      {:reason :missing-core-table :source-path path})))
-    (with-csv f
-      (fn [rows]
-        (cons (codesystem-meta version path)
-              (mapv #(core-row->concept version path %) rows))))))
 
 ;; ---------------------------------------------------------------------------
 ;; MapTo → ConceptMap
 ;; ---------------------------------------------------------------------------
 
-(defn- map-to-row->element [row]
-  (let [from (get row "LOINC")
-        to (get row "MAP_TO")
-        comment (get row "COMMENT")]
-    (when (and from to (not (str/blank? from)) (not (str/blank? to)))
-      {:code from
-       :display nil
-       :target [(cond-> {:code to
-                         :display nil
-                         :equivalence "equivalent"}
-                  (and comment (not (str/blank? comment)))
-                  (assoc :comment comment))]})))
+(defn- map-to-row->element
+  [{:strs [LOINC MAP_TO COMMENT]}]
+  (when (and LOINC MAP_TO (not (str/blank? LOINC)) (not (str/blank? MAP_TO)))
+    {:code LOINC
+     :display nil
+     :target [(cond-> {:code MAP_TO
+                       :display nil
+                       :equivalence "equivalent"}
+                (and COMMENT (not (str/blank? COMMENT)))
+                (assoc :comment COMMENT))]}))
 
-(defn- load-map-to [^File root version]
+(defn- stream-map-to!
+  [ch ^File root version]
   (let [^File f (io/file root "LoincTable" "MapTo.csv")
         path (.getPath f)]
     (when (.exists f)
-      (with-csv f
-        (fn [rows]
-          (let [elements (vec (keep map-to-row->element rows))]
-            (when (seq elements)
-              [{:type :conceptmap
-                :url (str system-uri "/maps/MapTo")
-                :version version
-                :source-uri system-uri
-                :source-version version
-                :target-uri system-uri
-                :target-version version
-                :metadata nil
-                :groups [{:source system-uri
-                          :source-version version
-                          :target system-uri
-                          :target-version version
-                          :elements elements}]
-                :source-path path}])))))))
+      (let [elements (reduce-csv-rows
+                       (fn [elements row]
+                         (if-let [el (map-to-row->element row)]
+                           (conj elements el)
+                           elements))
+                       []
+                       f)]
+        (when (seq elements)
+          (put-fhir-data! ch {:type :conceptmap
+                              :url (str system-uri "/maps/MapTo")
+                              :version version
+                              :source-uri system-uri
+                              :source-version version
+                              :target-uri system-uri
+                              :target-version version
+                              :metadata nil
+                              :groups [{:source system-uri
+                                        :source-version version
+                                        :target system-uri
+                                        :target-version version
+                                        :elements elements}]
+                              :source-path path}))))))
 
 ;; ---------------------------------------------------------------------------
 ;; AnswerList → ValueSets + LA-concepts
 ;; ---------------------------------------------------------------------------
 
-(defn- answer-row->contains [row]
-  (let [code (get row "AnswerStringId")
-        display (get row "DisplayText")]
-    (when (and code (not (str/blank? code)))
-      (cond-> {:code code :system system-uri}
-        (and display (not (str/blank? display))) (assoc :display display)))))
-
-(defn- answer-list->valueset [version source-path [list-id rows]]
-  (let [name-col (some #(get % "AnswerListName") rows)
-        contains (vec (keep answer-row->contains rows))
-        include-concepts (mapv (fn [c]
-                                 (cond-> {"code" (:code c)}
-                                   (:display c) (assoc "display" (:display c))))
-                               contains)
-        compose {"include" [{"system" system-uri
-                             "concept" include-concepts}]}]
-    {:type :valueset
-     :url (str system-uri "/vs/" list-id)
-     :version version
-     :metadata {"resourceType" "ValueSet"
-                "url" (str system-uri "/vs/" list-id)
-                "name" (or name-col list-id)
-                "status" "active"
-                "compose" compose}
-     :compose compose
-     :source-path source-path}))
+(defn- answer-row->contains
+  [{:strs [AnswerStringId DisplayText]}]
+  (when (and AnswerStringId (not (str/blank? AnswerStringId)))
+    (cond-> {:code AnswerStringId :system system-uri}
+      (and DisplayText (not (str/blank? DisplayText))) (assoc :display DisplayText))))
 
 (defn- la-concept [version source-path code display]
   {:type :concept
@@ -276,125 +265,138 @@
    :parent-code nil
    :source-path source-path})
 
-(defn- load-answer-lists [^File root version]
+(defn- stream-answer-lists!
+  [ch ^File root version]
   (let [^File f (io/file root "AccessoryFiles" "AnswerFile" "AnswerList.csv")
         path (.getPath f)]
     (when (.exists f)
-      (with-csv f
-        (fn [rows]
-          (let [grouped (group-by #(get % "AnswerListId") rows)
-                value-sets (mapv #(answer-list->valueset version path %) grouped)
-                ;; LA-codes appear in possibly multiple lists; one
-                ;; concept per unique (code, first-seen display).
-                la-concepts (->> rows
-                                 (keep (fn [row]
-                                         (let [code (get row "AnswerStringId")
-                                               display (get row "DisplayText")]
-                                           (when (and code (not (str/blank? code)))
-                                             [code display]))))
-                                 (reduce (fn [m [code display]]
-                                           (if (contains? m code) m (assoc m code display)))
-                                         {})
-                                 (mapv (fn [[code display]]
-                                         (la-concept version path code display))))]
-            (concat la-concepts value-sets)))))))
+      (let [{:keys [lists la]}
+            (reduce-csv-rows
+              (fn [{:keys [la] :as acc}
+                   {:strs [AnswerListId AnswerListName AnswerStringId DisplayText] :as row}]
+                (let [acc (cond-> acc
+                            (and AnswerStringId
+                                 (not (str/blank? AnswerStringId))
+                                 (not (contains? la AnswerStringId)))
+                            (assoc-in [:la AnswerStringId] DisplayText))]
+                  (if-let [contains (answer-row->contains row)]
+                    (update-in acc [:lists AnswerListId]
+                               (fn [{:keys [name rows]}]
+                                 {:name (or name AnswerListName AnswerListId)
+                                  :rows (conj (or rows []) contains)}))
+                    acc)))
+              {:lists {} :la {}}
+              f)]
+        (doseq [[code display] la]
+          (put-fhir-data! ch (la-concept version path code display)))
+        (doseq [[list-id {:keys [name rows]}] lists]
+          (let [include-concepts (mapv (fn [c]
+                                         (cond-> {"code" (:code c)}
+                                           (:display c) (assoc "display" (:display c))))
+                                       rows)
+                compose {"include" [{"system" system-uri
+                                     "concept" include-concepts}]}]
+            (put-fhir-data! ch {:type :valueset
+                                :url (str system-uri "/vs/" list-id)
+                                :version version
+                                :metadata {"resourceType" "ValueSet"
+                                           "url" (str system-uri "/vs/" list-id)
+                                           "name" (or name list-id)
+                                           "status" "active"
+                                           "compose" compose}
+                                :compose compose
+                                :source-path path})))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Part.csv → LP-* concepts
 ;; ---------------------------------------------------------------------------
 
-(defn- part-row->concept [version source-path row]
-  (let [code (get row "PartNumber")
-        display (or (some-> (get row "PartDisplayName") str/trim not-empty)
-                    (get row "PartName"))
-        type-name (get row "PartTypeName")
-        status (get row "Status")]
-    (when (and code (not (str/blank? code)))
+(defn- part-row->concept
+  [version source-path {:strs [PartNumber PartDisplayName PartName PartTypeName Status]}]
+  (let [display (or (some-> PartDisplayName str/trim not-empty) PartName)]
+    (when (and PartNumber (not (str/blank? PartNumber)))
       {:type :concept
        :system system-uri
        :version version
-       :code code
+       :code PartNumber
        :display display
        :definition nil
        :designations []
        :properties (cond-> []
-                     (and status (not (str/blank? status)))
-                     (conj {"code" "STATUS" "valueCode" status})
-                     (and type-name (not (str/blank? type-name)))
-                     (conj {"code" "PartTypeName" "valueString" type-name}))
-       :parents []
+                     (and Status (not (str/blank? Status)))
+                     (conj {"code" "STATUS" "valueCode" Status})
+                     (and PartTypeName (not (str/blank? PartTypeName)))
+                     (conj {"code" "PartTypeName" "valueString" PartTypeName}))
        :source-path source-path})))
 
-(defn- load-parts [^File root version]
-  (let [^File f (io/file root "AccessoryFiles" "PartFile" "Part.csv")
+;; ---------------------------------------------------------------------------
+;; LoincPartLink_Primary.csv → standalone :concept-property entries
+;;
+;; Each row carries (LOINC-num, axis, LP-part). The SQLite indexer routes
+;; standalone `:concept-property` entries straight into `concept_property`
+;; so we emit one per row instead of building a `{code → [link…]}` map up
+;; front (~100–200 MB on modern releases).
+;; ---------------------------------------------------------------------------
+
+(defn- part-link-row->property
+  [version source-path {:strs [LoincNumber PartNumber PartTypeName PartName]}]
+  (when (and LoincNumber PartNumber PartTypeName
+             (not (str/blank? LoincNumber))
+             (not (str/blank? PartNumber))
+             (not (str/blank? PartTypeName)))
+      {:type :concept-property
+       :system system-uri
+       :version version
+       :code LoincNumber
+       :property {"code" PartTypeName
+                  "valueCoding"
+                  (cond-> {"system" system-uri
+                           "code"   PartNumber}
+                    (and PartName (not (str/blank? PartName)))
+                    (assoc "display" PartName))}
+       :source-path source-path}))
+
+(defn- stream-part-links!
+  [ch ^File root version]
+  (let [^File f (io/file root "AccessoryFiles" "PartFile" "LoincPartLink_Primary.csv")
         path (.getPath f)]
     (when (.exists f)
-      (with-csv f
-        (fn [rows]
-          (vec (keep #(part-row->concept version path %) rows)))))))
+      (read-csv! f
+        (fn [row]
+          (when-let [fd (part-link-row->property version path row)]
+            (put-fhir-data! ch fd)))))))
 
 ;; ---------------------------------------------------------------------------
-;; LoincPartLink_Primary.csv → property links (LOINC-num → LP-part by axis)
+;; ComponentHierarchyBySystem.csv → standalone :concept-parent entries
+;;
+;; Same pattern as part-links: one fhir-data entry per row. Both LOINC-num
+;; and LP-* parents flow through the same emission path; the SQLite
+;; indexer doesn't care which is which.
 ;; ---------------------------------------------------------------------------
 
-(defn- part-link-row->property [row]
-  (let [loinc-num (get row "LoincNumber")
-        part-num  (get row "PartNumber")
-        type-name (get row "PartTypeName")
-        part-name (get row "PartName")]
-    (when (and loinc-num part-num type-name
-               (not (str/blank? loinc-num))
-               (not (str/blank? part-num))
-               (not (str/blank? type-name)))
-      {:loinc loinc-num
-       :prop  (cond-> {"code" type-name
-                       "valueCoding" (cond-> {"system" system-uri
-                                              "code"   part-num}
-                                       (and part-name (not (str/blank? part-name)))
-                                       (assoc "display" part-name))})})))
+(defn- hierarchy-row->parent
+  [version source-path {:strs [CODE IMMEDIATE_PARENT]}]
+  (when (and CODE IMMEDIATE_PARENT
+             (not (str/blank? CODE))
+             (not (str/blank? IMMEDIATE_PARENT))
+             (not= CODE IMMEDIATE_PARENT))
+      {:type :concept-parent
+       :system system-uri
+       :version version
+       :code CODE
+       :parent IMMEDIATE_PARENT
+       :source-path source-path}))
 
-(defn- load-part-links
-  "Read the primary part-link table and return a `{loinc-num → [props]}`
-  map, ready to be merged onto the per-concept entries built from
-  LoincTableCore."
-  [^File root]
-  (let [^File f (io/file root "AccessoryFiles" "PartFile" "LoincPartLink_Primary.csv")]
-    (if-not (.exists f)
-      {}
-      (with-csv f
-        (fn [rows]
-          (reduce (fn [m {:keys [loinc prop]}]
-                    (if loinc (update m loinc (fnil conj []) prop) m))
-                  {}
-                  (keep part-link-row->property rows)))))))
-
-;; ---------------------------------------------------------------------------
-;; ComponentHierarchyBySystem.csv → parent edges
-;; ---------------------------------------------------------------------------
-
-(defn- load-component-hierarchy
-  "Read `ComponentHierarchyBySystem.csv` and return a `{code → #{parent-code}}`
-  map. A code can have multiple parents (LOINC's hierarchy is a DAG). The
-  root rows have an empty `IMMEDIATE_PARENT`; we drop those — the indexer
-  treats absence of a parent as 'top-level'."
-  [^File root]
+(defn- stream-hierarchy!
+  [ch ^File root version]
   (let [^File f (io/file root "AccessoryFiles" "ComponentHierarchyBySystem"
-                         "ComponentHierarchyBySystem.csv")]
-    (if-not (.exists f)
-      {}
-      (with-csv f
-        (fn [rows]
-          (reduce (fn [m row]
-                    (let [code   (get row "CODE")
-                          parent (get row "IMMEDIATE_PARENT")]
-                      (if (and code parent
-                               (not (str/blank? code))
-                               (not (str/blank? parent))
-                               (not= code parent))
-                        (update m code (fnil conj #{}) parent)
-                        m)))
-                  {}
-                  rows))))))
+                         "ComponentHierarchyBySystem.csv")
+        path (.getPath f)]
+    (when (.exists f)
+      (read-csv! f
+        (fn [row]
+          (when-let [fd (hierarchy-row->parent version path row)]
+            (put-fhir-data! ch fd)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; LinguisticVariants/<lang>LinguisticVariant.csv → multi-lingual designations
@@ -408,19 +410,28 @@
    "SCALE_TYP" "METHOD_TYP" "CLASS" "SHORTNAME"
    "RELATEDNAMES2" "LinguisticVariantDisplayName"])
 
-(defn- ling-row->designations [language row]
-  (let [code (get row "LOINC_NUM")]
-    (when (and code (not (str/blank? code)))
-      (let [ds (keep (fn [col]
-                       (let [v (get row col)]
-                         (when (and v (not (str/blank? v)))
-                           {:value v
-                            :language language
-                            :use {:system "http://loinc.org"
-                                  :code col
-                                  :display col}})))
-                     linguistic-cols)]
-        (when (seq ds) [code (vec ds)])))))
+(defn- ling-row->designation-entries
+  "Yield zero or more `:concept-designation` fhir-data entries for one
+  per-language row. Each entry stands alone — the SQLite indexer routes
+  them straight into `concept_designation` without per-code joining,
+  so the lingual stream never materialises into a giant
+  `{code → [designations]}` map."
+  [version source-path language {:strs [LOINC_NUM] :as row}]
+  (when (and LOINC_NUM (not (str/blank? LOINC_NUM)))
+    (keep (fn [col]
+            (let [v (get row col)]
+              (when (and v (not (str/blank? v)))
+                {:type :concept-designation
+                 :system system-uri
+                 :version version
+                 :code LOINC_NUM
+                 :value v
+                 :language language
+                 :use {:system "http://loinc.org"
+                       :code col
+                       :display col}
+                 :source-path source-path})))
+          linguistic-cols)))
 
 (defn- bcp47-tag
   "Map an ISO 639 + ISO 3166 pair to a BCP 47 tag, e.g. (\"de\" \"DE\") → \"de-DE\"."
@@ -432,105 +443,95 @@
     (str/lower-case lang)
     :else nil))
 
-(defn- load-language-variant
-  [^File f language]
-  (with-csv f
-    (fn [rows]
-      (->> rows
-           (keep #(ling-row->designations language %))
-           (reduce (fn [m [code ds]]
-                     (update m code (fnil into []) ds))
-                   {})))))
-
-(defn- load-linguistic-variants
-  "Return a `{loinc-num → [designation ...]}` map collected across every
-  per-language file referenced by `LinguisticVariants.csv`. Returns `{}`
-  when the catalog is missing."
+(defn- linguistic-variant-files
+  "Eager seq of `[language file]` tuples for every per-language file
+  referenced by `LinguisticVariants.csv`. The catalog itself is small
+  (~22 rows). Returns nil when the catalog is missing."
   [^File root]
   (let [^File catalog (io/file root "AccessoryFiles" "LinguisticVariants"
                                "LinguisticVariants.csv")]
-    (if-not (.exists catalog)
-      {}
-      (with-csv catalog
-        (fn [rows]
-          (reduce
-            (fn [acc row]
-              (let [id (get row "ID")
-                    lang (get row "ISO_LANGUAGE")
-                    country (get row "ISO_COUNTRY")
-                    tag (bcp47-tag lang country)
-                    fname (when (and id lang country)
-                            (str lang country id "LinguisticVariant.csv"))
-                    ^File f (when fname
-                              (io/file root "AccessoryFiles" "LinguisticVariants" fname))]
-                (if (and tag f (.exists f))
-                  (merge-with into acc (load-language-variant f tag))
-                  acc)))
-            {}
-            rows))))))
+    (when (.exists catalog)
+      (reduce-csv-rows
+        (fn [files {:strs [ID ISO_LANGUAGE ISO_COUNTRY]}]
+          (let [tag     (bcp47-tag ISO_LANGUAGE ISO_COUNTRY)
+                fname   (when (and ID ISO_LANGUAGE ISO_COUNTRY)
+                          (str ISO_LANGUAGE ISO_COUNTRY ID "LinguisticVariant.csv"))
+                ^File f (when fname
+                          (io/file root "AccessoryFiles" "LinguisticVariants" fname))]
+            (if (and tag f (.exists f))
+              (conj files [tag f])
+              files)))
+        []
+        catalog))))
+
+(defn- stream-linguistic-designations!
+  [ch ^File root version]
+  (doseq [[language ^File f] (linguistic-variant-files root)]
+    (let [path (.getPath f)]
+      (read-csv! f
+        (fn [row]
+          (doseq [entry (ling-row->designation-entries version path language row)]
+            (put-fhir-data! ch entry)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API
 ;; ---------------------------------------------------------------------------
 
-(defn- enrich-loinc-concept
-  "Layer part-link Coding properties, hierarchy parents, and linguistic
-  designations onto a base concept built from LoincTableCore."
-  [c part-links hierarchy lingual]
-  (let [code (:code c)
-        extra-props (get part-links code)
-        parents     (some-> (get hierarchy code) seq vec)
-        ling-ds     (get lingual code)]
-    (cond-> c
-      (seq extra-props) (update :properties into extra-props)
-      (seq parents)     (assoc :parents parents)
-      (seq ling-ds)     (update :designations into ling-ds))))
+(defn- stream-core-table!
+  [ch ^File root version]
+  (let [^File f (io/file root "LoincTableCore" "LoincTableCore.csv")
+        path (.getPath f)]
+    (when-not (.exists f)
+      (throw (ex-info (str "LoincTableCore.csv not found: " path)
+                      {:reason :missing-core-table :source-path path})))
+    (put-fhir-data! ch (codesystem-meta version path))
+    (read-csv! f
+      (fn [row]
+        (put-fhir-data! ch (core-row->concept version path row))))))
 
-(defn- enrich-part-concept
-  "Layer hierarchy parents onto a Part-derived concept (LP-* code).
-  Linguistic-variant files don't carry rows for LP- codes in the
-  released LOINC datasets, so we only consult the hierarchy."
-  [c hierarchy]
-  (if-let [parents (some-> (get hierarchy (:code c)) seq vec)]
-    (assoc c :parents parents)
-    c))
+(defn- stream-parts!
+  [ch ^File root version]
+  (let [^File f (io/file root "AccessoryFiles" "PartFile" "Part.csv")
+        path (.getPath f)]
+    (when (.exists f)
+      (read-csv! f
+        (fn [row]
+          (when-let [concept (part-row->concept version path row)]
+            (put-fhir-data! ch concept)))))))
 
-(defn load-paths
-  "Walk a LOINC release directory and return a flat seq of `fhir-data`.
+(defn- release-version [^File canonical-root version]
+  (let [v (or version (infer-version canonical-root))]
+    (when (str/blank? v)
+      (throw (ex-info (str "LOINC version not provided and could not "
+                           "be inferred from directory name: "
+                           (.getName canonical-root))
+                      {:reason :missing-version
+                       :source-path (.getPath canonical-root)})))
+    v))
 
-  Options:
-    :version   release version string. Falls back to inferring from the
-               directory name (e.g. `Loinc_2.82` → `\"2.82\"`); throws
-               `ex-info` if neither is available."
-  ([root] (load-paths root nil))
-  ([root {:keys [version]}]
-   (let [^File canonical-root (.getCanonicalFile (io/file root))
-         v (or version (infer-version canonical-root))]
-     (when (str/blank? v)
-       (throw (ex-info (str "LOINC version not provided and could not "
-                            "be inferred from directory name: "
-                            (.getName canonical-root))
-                       {:reason :missing-version
-                        :source-path (.getPath canonical-root)})))
-     (let [;; Side tables — read once, kept as in-memory maps so we can
-           ;; layer them onto the per-concept stream without re-scanning.
-           part-links (load-part-links            canonical-root)
-           hierarchy  (load-component-hierarchy   canonical-root)
-           lingual    (load-linguistic-variants   canonical-root)
-           core       (load-core-table            canonical-root v)
-           parts      (or (load-parts             canonical-root v) [])
-           ;; Enrich core LOINC concepts with part-links, hierarchy, ling.
-           enriched-core (map (fn [e]
-                                (if (= :concept (:type e))
-                                  (enrich-loinc-concept e part-links hierarchy lingual)
-                                  e))
-                              core)
-           ;; LP-* part concepts only need hierarchy; their displays come
-           ;; from PartName / PartDisplayName already.
-           enriched-parts (map #(enrich-part-concept % hierarchy) parts)
-           answer-lists (load-answer-lists canonical-root v)
-           map-to       (load-map-to       canonical-root v)]
-       (concat enriched-core
-               enriched-parts
-               answer-lists
-               map-to)))))
+(defn- stream-release* [root {:keys [version]} ch]
+  (let [^File canonical-root (.getCanonicalFile (io/file root))
+        v (release-version canonical-root version)]
+    (stream-core-table! ch canonical-root v)
+    (stream-parts! ch canonical-root v)
+    (stream-part-links! ch canonical-root v)
+    (stream-hierarchy! ch canonical-root v)
+    (stream-answer-lists! ch canonical-root v)
+    (stream-map-to! ch canonical-root v)
+    (stream-linguistic-designations! ch canonical-root v)))
+
+(defn stream-release
+  "Return a channel that streams bounded batches of fhir-data maps for one LOINC release.
+  The channel is closed when the release is fully streamed. On failure
+  the final item is `{:type :stream-error :ex e}`."
+  ([root] (stream-release root nil))
+  ([root {:keys [buffer-size batch-size] :as opts}]
+   (let [ch (async/chan (or buffer-size 8) (partition-all (or batch-size 1000)))]
+     (async/thread
+       (try
+         (stream-release* root opts ch)
+         (catch Throwable t
+           (async/>!! ch {:type :stream-error :ex t}))
+         (finally
+           (async/close! ch))))
+     ch)))

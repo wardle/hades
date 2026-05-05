@@ -313,10 +313,10 @@
 
   #_{:clj-kondo/ignore [:duplicate-require]}
   (require '[com.eldrix.hermes.core :as hermes]
-           '[com.eldrix.hades.snomed-db :as snomed-db]
+           '[com.eldrix.hades.fixtures :as fixtures]
            '[criterium.core :as crit])
 
-  (def svc (hermes/open (snomed-db/assert-pinned-db!)))
+  (def svc (hermes/open (fixtures/assert-snomed-db!)))
 
   (def asthma            195967001)
   (def clinical-finding  404684003)

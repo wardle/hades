@@ -2,6 +2,7 @@
   "Implementation of Hades protocols for SNOMED CT.
   A thin wrapper around the Hermes SNOMED terminology service"
   (:require [clojure.string :as str]
+            [com.eldrix.hades.impl.issues :as issues]
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.snomed.batch :as batch]
             [com.eldrix.hades.impl.snomed.expansion :as expansion]
@@ -11,6 +12,8 @@
             [lambdaisland.uri :as uri])
   (:import (com.eldrix.hermes.snomed Description)
            (java.time.format DateTimeFormatter)))
+
+(set! *warn-on-reflection* true)
 
 (def snomed-system-uri "http://snomed.info/sct")
 
@@ -495,16 +498,11 @@
          [svc]
   protos/CodeSystem
   (cs-metadata [_]
-    ;; Each installed SNOMED module is its own (url|version) registry
-    ;; key. The bare URL `http://snomed.info/sct` is bound by the
-    ;; composite via semver-latest pick over modules. The wildcard
-    ;; `url|*` entry ensures that requests pinning to any other
-    ;; SNOMED Edition URI (e.g. `xsct/.../version/...`) still resolve
-    ;; here — the SCT engine handles arbitrary editions natively.
-    (into [{:url snomed-system-uri :version "*"}]
-          (map (fn [ri] {:url snomed-system-uri
-                         :version (module-version-uri ri)}))
-          (hermes/release-information svc)))
+    ;; Hermes serves the composite of every installed SNOMED module
+    ;; under one URL. The wildcard catches lookups pinning to any
+    ;; module-version URI.
+    [{:url snomed-system-uri :version "*"}
+     {:url snomed-system-uri :version (version-uri svc)}])
 
   (cs-resource [_ _params]
     {:url     snomed-system-uri
@@ -513,11 +511,12 @@
      :title   "SNOMED CT"
      :status  "active"})
   (cs-lookup
-    [_ {:keys [code] :as params}]
-    (when-not (str/blank? code)
-      (if-let [code' (parse-long code)]
-        (lookup-concept-code svc code code' params)
-        (lookup-expression-code svc code params))))
+    [_ {:keys [system code] :as params}]
+    (or (when-not (str/blank? code)
+          (if-let [code' (parse-long code)]
+            (lookup-concept-code svc code code' params)
+            (lookup-expression-code svc code params)))
+        (issues/unknown-code-lookup (or system snomed-system-uri) code)))
 
   (cs-validate-code [_ {:keys [code display version displayLanguage]}]
     (let [ver (or version (version-uri svc))]

@@ -96,13 +96,21 @@
                    ::x-unknown-system ::x-caused-by-unknown-system]))
 
 ;; ---------------------------------------------------------------------------
-;; Lookup result — returned by cs-lookup
+;; Lookup result — returned by core/lookup (composite cs-lookup).
+;;
+;; Provider-level `protos/cs-lookup` still returns nil on miss; the
+;; composite synthesises a self-describing not-found map so the HTTP
+;; handler can render a 404 without re-probing the registry.
 ;; ---------------------------------------------------------------------------
 
+(s/def ::not-found-reason #{:unknown-system :unknown-code})
+
 (s/def ::lookup
-  (s/keys :req-un [::code ::display ::system]
-          :opt-un [::name ::version ::definition ::abstract
-                   ::properties ::designations]))
+  (s/or :found     (s/keys :req-un [::code ::display ::system]
+                           :opt-un [::name ::version ::definition ::abstract
+                                    ::properties ::designations])
+        :not-found (s/keys :req-un [::not-found ::not-found-reason]
+                           :opt-un [::system ::code ::message ::issues])))
 
 ;; ---------------------------------------------------------------------------
 ;; Expansion result — returned by vs-expand

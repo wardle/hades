@@ -26,6 +26,8 @@
   (:import (com.zaxxer.hikari HikariConfig HikariDataSource)
            (java.io Closeable)))
 
+(set! *warn-on-reflection* true)
+
 (def application-id
   "Magic number stamped in the SQLite header; ASCII 'FTRM' = 0x4654524D
   ('FHIR TeRMinology container'). Distinct from any specific server's
@@ -42,9 +44,12 @@
 
 (def ^:private default-pool-size
   "Default Hikari pool size. SQLite WAL serialises writers but allows
-  concurrent readers, so a small pool is the right shape — 4 covers
-  parallel query workloads without thrashing the OS file handles."
-  4)
+  concurrent readers; each `$lookup` issues a small handful of queries
+  serially on one connection, so a few connections cover dozens of
+  concurrent VUs. Empirically (50-VU LK02 fixed-code) raising the pool
+  past ~8 buys nothing — the binding constraint is per-request work,
+  not connection acquisition."
+  8)
 
 (def ^:private init-sql
   "Per-connection pragmas applied at handout. Equivalent to the
@@ -266,3 +271,32 @@
           ON CONFLICT(ns_url, identifier_type, value) DO UPDATE SET
             preferred=excluded.preferred"
          url id-type value (cond (true? preferred) 1 (false? preferred) 0 :else nil)]))))
+
+(defn vacuum!
+  "Run `VACUUM` on the container, reclaiming free pages and reducing
+  the on-disk size. Opens its own short-lived datasource."
+  [^String path]
+  (let [ds (open path)]
+    (try
+      (with-open [conn (jdbc/get-connection ds)]
+        (jdbc/execute! conn ["VACUUM"]))
+      (finally
+        (close! ds)))))
+
+(defn container-status
+  "Return a status map summarising container contents: file size,
+  schema version, resource counts by type, total concept rows."
+  [^String path]
+  (let [ds (open path)]
+    (try
+      (let [resources (list-resources ds)
+            by-type (group-by :resource-type resources)]
+        {:path           path
+         :file-size      (.length (io/file path))
+         :schema-version (read-meta ds)
+         :resources      {:CodeSystem (count (get by-type "CodeSystem" []))
+                          :ValueSet   (count (get by-type "ValueSet"   []))
+                          :ConceptMap (count (get by-type "ConceptMap" []))}
+         :concept-count  (reduce + 0 (keep :concept-count resources))})
+      (finally
+        (close! ds)))))

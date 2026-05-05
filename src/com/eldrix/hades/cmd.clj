@@ -2,19 +2,20 @@
   "Command-line entry point for the Hades FHIR terminology server."
   (:gen-class)
   (:require [clojure.data.json :as json]
+            [clojure.core.async :as async]
             [clojure.pprint :as pp]
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.impl.cli :as cli]
             [com.eldrix.hades.core :as hades]
-            [com.eldrix.hades.http :as http]
+            [com.eldrix.hades.impl.http :as http]
+            [com.eldrix.hades.impl.fhir-package :as fhir-package]
             [com.eldrix.hades.impl.index.sqlite :as sqlite-index]
-            [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.impl.loaders.fhir :as fhir-loader]
             [com.eldrix.hades.impl.loaders.loinc :as loinc-loader]
-            [com.eldrix.hades.impl.snomed :as snomed]
+            [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.sources :as sources]
-            [com.eldrix.hades.impl.sqlite.provider :as sqlite-provider]
+            [com.eldrix.hades.impl.sqlite.db :as sqlite-db]
             [com.eldrix.hermes.core :as hermes]
             [com.eldrix.hermes.download :as download]
             [com.eldrix.hermes.importer :as importer])
@@ -22,6 +23,8 @@
            (java.net ConnectException)
            (java.time LocalDate)
            (java.time.format DateTimeFormatter)))
+
+(set! *warn-on-reflection* true)
 
 (defn- write-local-date [^LocalDate o ^Appendable out _options]
   (.append out \")
@@ -40,189 +43,426 @@
   (doseq [dep (hermes/module-dependency-problems svc)]
     (log/warn "module dependency mismatch" dep)))
 
+;;; CLI errors
+
+(defn- cli-error
+  "Throw a user-facing CLI error with a short message and a `:reason`
+  recognised by `-main`. The message is what the user sees; the reason
+  is for programmatic dispatch."
+  ([reason msg] (cli-error reason msg {}))
+  ([reason msg data]
+   (throw (ex-info msg (assoc data :reason reason)))))
+
+(defn- require-positional!
+  "Ensure the command got at least `n` positional arguments."
+  [cmd n args]
+  (when (< (count args) n)
+    (cli-error ::missing-args
+               (str "'" cmd "' requires "
+                    (if (= 1 n) "at least one path"
+                        (str "at least " n " arguments"))))))
+
 ;;; Subcommand implementations
 
-(defn- single-db!
-  "Extract the single `--db` value from `db-vec`. Single-source
-  commands (import, index, status, compact, install) require exactly
-  one. Exits with a friendly message on 0 or >1."
-  [cmd db-vec]
-  (cond
-    (zero? (count db-vec))
-    (do (println (str "ERROR: '" cmd "' requires exactly one --db PATH"))
-        (System/exit 1))
-    (> (count db-vec) 1)
-    (do (println (str "ERROR: '" cmd "' takes exactly one --db, got "
-                      (count db-vec) ": " (vec db-vec)))
-        (System/exit 1))
-    :else
-    (first db-vec)))
+(defn- summarise-resources
+  "Group imported resources by type for a startup log."
+  [resources]
+  (let [by-type (group-by :resource-type resources)]
+    {:codesystems (count (get by-type "CodeSystem" []))
+     :valuesets   (count (get by-type "ValueSet" []))
+     :conceptmaps (count (get by-type "ConceptMap" []))}))
 
-(defn- import-rf2! [db dirs]
-  (hermes/import-snomed db dirs :exclude importer/default-exclude))
+(defn- import-rf2! [file dirs]
+  (log/info "rf2 import" {:file file :sources (count dirs) :paths (vec dirs)})
+  (hermes/import-snomed file dirs :exclude importer/default-exclude))
 
-(defn- import-loinc! [db src]
-  (let [data (loinc-loader/load-paths src)
-        result (sqlite-index/build! db data {:loader-type "loinc-csv"})]
-    (log/info "loinc import complete" {:db db :resources (:resources result)})
+(defn- pipe-loinc-sources!
+  "Stream LOINC sources into `out-ch`. Forwards every fhir-data item from
+  each source channel onto `out-ch`. Stops at the first sign of trouble:
+  consumer-closed `out-ch`, or a `:stream-error` from the producer (the
+  error is forwarded so the consumer raises). Returns true on clean
+  completion, false if any source aborted early.
+
+  On abort paths we close the source channel so the LOINC producer
+  thread (parked on `>!!` to its bounded buffer) unblocks and exits;
+  otherwise it would grind through the whole release filling buffer
+  space no consumer is reading."
+  [srcs out-ch]
+  (let [error? (fn [fd]
+                 (cond
+                   (and (map? fd) (= :stream-error (:type fd))) true
+                   (sequential? fd) (some #(= :stream-error (:type %)) fd)
+                   :else false))]
+    (loop [[src & more] (seq srcs)]
+      (if-not src
+        true
+        (let [src-ch (loinc-loader/stream-release src)
+              outcome
+              (loop []
+                (if-let [fd (async/<!! src-ch)]
+                  (cond
+                    (error? fd)               (do (async/>!! out-ch fd) :error)
+                    (async/>!! out-ch fd)     (recur)
+                    :else                     :closed)
+                  :done))]
+          (case outcome
+            :done   (recur more)
+            :closed (do (async/close! src-ch) false)
+            :error  (do (async/close! src-ch) false)))))))
+
+(defn- import-loinc! [file srcs]
+  (let [ch (async/chan 256)
+        _producer
+        (async/thread
+          (try
+            (pipe-loinc-sources! srcs ch)
+            (catch Throwable t
+              (async/>!! ch {:type :stream-error :ex t}))
+            (finally
+              (async/close! ch))))
+        result (sqlite-index/import-fhir-data file ch {:loader-type "loinc-csv"})]
+    (log/info "loinc import complete"
+              (merge {:file file :sources (count srcs)}
+                     (summarise-resources (:resources result))))
     result))
 
-(defn- import-fhir-json! [db srcs]
-  (let [data (mapcat fhir-loader/load-paths srcs)
-        result (sqlite-index/build! db data {:loader-type "fhir-json"})]
-    (log/info "fhir-json import complete" {:db db :resources (:resources result)})
+(defn- import-fhir-json! [file srcs]
+  (let [data-fn #(mapcat fhir-loader/load-paths srcs)
+        result (sqlite-index/build! file data-fn {:loader-type "fhir-json"})]
+    (log/info "fhir-json import complete"
+              (merge {:file file :files (count srcs)}
+                     (summarise-resources (:resources result))))
     result))
 
-(defn- import-from [{:keys [db]} args]
-  (set-default-uncaught-exception-handler)
-  (let [db (single-db! "import" db)
-        dirs (if (zero? (count args)) ["."] args)
-        ;; All sources must agree on kind — mixing RF2 and LOINC into
-        ;; one `import` call doesn't make sense; the destination DB is
-        ;; format-specific.
-        kinds (set (map sources/detect! dirs))]
-    (when (> (count kinds) 1)
-      (throw (ex-info (str "Mixed source kinds in one import: " (vec kinds))
-                      {:reason :mixed-sources :kinds kinds :paths (vec dirs)})))
-    (case (first kinds)
-      :rf2   (import-rf2! db dirs)
-      :loinc (do (when (> (count dirs) 1)
-                   (throw (ex-info "LOINC import takes a single source path"
-                                   {:reason :too-many-sources :paths (vec dirs)})))
-                 (import-loinc! db (first dirs)))
-      :fhir-json (import-fhir-json! db dirs))))
+(defn- import-into!
+  "Import release sources into the destination database `file`.
+
+  Each input path is walked for recognisable files: RF2 components,
+  LOINC table-core markers, FHIR JSON resources. A TRUD bundle with
+  several sibling RF2 trees yields RF2 findings across all of them
+  (Hermes recurses from each unique parent dir, so non-standard
+  layouts work). RF2 (Hermes LMDB+Lucene) and FHIR-data (FTRM SQLite)
+  are different storage formats and cannot share one `file`."
+  [file paths]
+  (let [findings (vec (mapcat sources/find-sources! paths))
+        by-kind  (group-by :kind findings)
+        unimport (concat (by-kind :hermes-db) (by-kind :fhir-tx-db))
+        rf2-dirs        (sources/rf2-roots   findings)
+        loinc-dirs      (sources/loinc-roots findings)
+        fhir-json-paths (mapv :path (by-kind :fhir-json))]
+    (when (seq unimport)
+      (cli-error ::unimportable-kind
+                 (str "Cannot import already-built artefacts: "
+                      (str/join ", " (map :path unimport))
+                      ". Use `serve` to open them directly.")
+                 {:paths (mapv :path unimport)}))
+    (when (and (seq rf2-dirs) (or (seq loinc-dirs) (seq fhir-json-paths)))
+      (cli-error ::mixed-sources
+                 (str "Cannot mix SNOMED RF2 with LOINC / FHIR JSON in one "
+                      "import — they target different database formats.")
+                 {:rf2 rf2-dirs :loinc loinc-dirs :fhir-json fhir-json-paths}))
+    (when (seq rf2-dirs)        (import-rf2!       file rf2-dirs))
+    (when (seq loinc-dirs)      (import-loinc!     file loinc-dirs))
+    (when (seq fhir-json-paths) (import-fhir-json! file fhir-json-paths))))
+
+(defn- import-from
+  "`import <dest-db> <sources...>` — first positional is destination."
+  [_opts args]
+  (when (< (count args) 2)
+    (cli-error ::missing-args
+               "'import' requires <dest-db> followed by one or more source paths"))
+  (let [[dest & srcs] args]
+    (import-into! dest srcs)))
+
+(defn- list-rf2 [dir]
+  (let [files (importer/importable-files dir)
+        heading (str "| RF2 files in " dir ": " (count files) " |")
+        banner (str/join (repeat (count heading) "="))]
+    (println "\n" banner "\n" heading "\n" banner)
+    (pp/print-table (map #(select-keys % [:filename :component :version-date
+                                          :format :content-subtype :content-type])
+                         files))))
+
+(defn- list-loinc [dir]
+  (let [ch (loinc-loader/stream-release dir)
+        counts (loop [counts {}]
+                 (if-let [batch (async/<!! ch)]
+                   (let [events (if (map? batch) [batch] batch)]
+                     (when-let [err (some #(when (= :stream-error (:type %)) %) events)]
+                       (throw (:ex err)))
+                     (recur (reduce (fn [counts fd]
+                                      (update counts (:type fd) (fnil inc 0)))
+                                    counts
+                                    events)))
+                   counts))
+        heading (str "| LOINC release at " dir " |")
+        banner (str/join (repeat (count heading) "="))]
+    (println "\n" banner "\n" heading "\n" banner)
+    (pp/print-table [{:resource "CodeSystem" :count (get counts :codesystem-meta 0)}
+                     {:resource "concepts"   :count (get counts :concept 0)}
+                     {:resource "ValueSets (AnswerLists)" :count (get counts :valueset 0)}
+                     {:resource "ConceptMaps (MapTo)"     :count (get counts :conceptmap 0)}])))
+
+(defn- list-fhir-json [paths]
+  (let [data (mapcat fhir-loader/load-paths paths)
+        cs (->> data (filter #(= :codesystem-meta (:type %)))
+                (map #(select-keys % [:url :version])))
+        vs (->> data (filter #(= :valueset (:type %)))
+                (map #(select-keys % [:url :version])))
+        cm (->> data (filter #(= :conceptmap (:type %)))
+                (map #(select-keys % [:url :version])))
+        skipped (filter #(= :skipped (:type %)) data)]
+    (println (str "\n=== FHIR JSON resources (" (count paths) " file"
+                  (when (not= 1 (count paths)) "s") ") ==="))
+    (println (str "  CodeSystems: " (count cs)
+                  "  ValueSets: "   (count vs)
+                  "  ConceptMaps: " (count cm)
+                  "  (skipped: "    (count skipped) ")"))
+    (when (seq cs) (println "\nCodeSystems:") (pp/print-table cs))
+    (when (seq vs) (println "\nValueSets:")   (pp/print-table vs))
+    (when (seq cm) (println "\nConceptMaps:") (pp/print-table cm))))
+
+(defn- list-fhir-tx-db [path]
+  (let [ds (sqlite-db/open path)]
+    (try
+      (let [resources (sqlite-db/list-resources ds)]
+        (println (str "\n=== FHIR terminology container " path " ==="))
+        (println (str "  Resources: " (count resources)))
+        (pp/print-table (map #(select-keys % [:resource-type :url :version :concept-count])
+                             resources)))
+      (finally (sqlite-db/close! ds)))))
+
+(defn- list-hermes-db [path]
+  (let [st (hermes/status path {:counts? true :log? false})]
+    (println (str "\n=== Hermes SNOMED database " path " ==="))
+    (pp/pprint st)))
+
+(defn- list-under [path]
+  (try
+    (let [findings (sources/find-sources path)
+          rf2-dirs   (sources/rf2-roots   findings)
+          loinc-dirs (sources/loinc-roots findings)
+          fhir-paths (mapv :path (filter #(= :fhir-json   (:kind %)) findings))
+          fhir-tx    (filter #(= :fhir-tx-db (:kind %)) findings)
+          hermes     (filter #(= :hermes-db  (:kind %)) findings)]
+      (println (str "\n# " path
+                    " — RF2: " (count rf2-dirs)
+                    "  LOINC: " (count loinc-dirs)
+                    "  FHIR JSON: " (count fhir-paths)
+                    "  FTRM: " (count fhir-tx)
+                    "  Hermes-DB: " (count hermes)))
+      (if (empty? findings)
+        (println "  ! no recognised terminology sources")
+        (do (run! list-rf2        rf2-dirs)
+            (run! list-loinc      loinc-dirs)
+            (when (seq fhir-paths)
+              (list-fhir-json fhir-paths))
+            (run! list-fhir-tx-db (map :path fhir-tx))
+            (run! list-hermes-db  (map :path hermes)))))
+    (catch ExceptionInfo e
+      (println (str "  ! " path ": " (ex-message e))))))
 
 (defn- list-from [_ args]
-  (let [dirs (if (zero? (count args)) ["."] args)
-        metadata (map #(select-keys % [:name :effectiveTime :deltaFromDate :deltaToDate])
-                      (mapcat importer/all-metadata dirs))]
-    (pp/print-table metadata)
-    (doseq [dir dirs]
-      (let [files (importer/importable-files dir)
-            heading (str "| Distribution files in " dir ":" (count files) " |")
-            banner (str/join (repeat (count heading) "="))]
-        (println "\n" banner "\n" heading "\n" banner)
-        (pp/print-table (map #(select-keys % [:filename :component :version-date :format :content-subtype :content-type]) files))))))
+  (require-positional! "list" 1 args)
+  (run! list-under args))
 
-(defn- install [{:keys [dist] :as opts} _]
-  (if-not (seq dist)
-    (do (println "No distribution specified. Specify with --dist.")
-        (download/print-providers))
+(defn- split-id-version [s]
+  (str/split s #"@" 2))
+
+(defn- fhir-cache-dir [opts]
+  (or (:cache-dir opts)
+      (str (System/getProperty "java.io.tmpdir") "/hades-fhir-packages")))
+
+(defn- fetch-source!
+  "Resolve `<id>[@<version>]` to a local directory of importable resources.
+  SNOMED → RF2 release dir via Hermes; FHIR package → unpacked tarball."
+  [opts spec]
+  (let [[id version] (split-id-version spec)]
+    (cond
+      (cli/snomed-distribution? id)
+      (try
+        (some-> (download/download id (cond-> (dissoc opts :dist)
+                                        version (assoc :release-date version)))
+                .toString)
+        (catch IllegalArgumentException _
+          (cli-error ::unknown-distribution
+                     (str "Unrecognised SNOMED distribution: " id ". "
+                          "Run `hades available` for a list."))))
+
+      (cli/fhir-package? id)
+      (let [v (or version
+                  (try (get-in (fhir-package/metadata id) [:dist-tags :latest])
+                       (catch ExceptionInfo _ nil))
+                  (cli-error ::unknown-distribution
+                             (str "Unrecognised FHIR package or no version found: " id)))]
+        (.getPath ^java.io.File (fhir-package/download! id v (fhir-cache-dir opts))))
+
+      :else
+      (cli-error ::unknown-distribution
+                 (str "Unrecognised distribution identifier: " id ". "
+                      "Expected `<region>.<provider>/<id>` (SNOMED) "
+                      "or reverse-DNS lowercase (FHIR package).")))))
+
+(defn- list-source!
+  "Print the available versions for one --dist spec. Returns true on
+  success, false if the registry/listing failed or the id was
+  unrecognised."
+  [opts spec]
+  (let [[id _] (split-id-version spec)
+        banner (str "\n=== " id " ===")]
+    (println banner)
     (try
-      (doseq [distribution dist]
-        (when-let [unzipped-path (download/download distribution (dissoc opts :dist))]
-          (import-from opts [(.toString unzipped-path)])))
+      (cond
+        (cli/snomed-distribution? id)
+        (do (download/download id (-> opts (dissoc :dist) (assoc :release-date "list")))
+            true)
+
+        (cli/fhir-package? id)
+        (do (fhir-package/print-versions id) true)
+
+        :else
+        (do (println (str "  ! unrecognised id: " id)) false))
+      (catch IllegalArgumentException _
+        (println (str "  ! unrecognised distribution: " id))
+        false)
       (catch ExceptionInfo e
-        (log/error (ex-message e) (or (ex-data e) {}))
-        (throw e))
+        (println (str "  ! " (ex-message e)))
+        false))))
+
+(defn- install
+  "`install <dest-db> --dist <id>...` — exactly one positional, one or
+  more `--dist` flags."
+  [{:keys [dist] :as opts} args]
+  (when (empty? dist)
+    (cli-error ::missing-args
+               (str "'install' requires at least one --dist <id>. "
+                    "Run `hades available` to see installable terminologies.")))
+  (when (not= 1 (count args))
+    (cli-error ::missing-args
+               "'install' takes exactly one positional argument: the destination database path"))
+  (let [dest (first args)]
+    (try
+      (doseq [spec dist]
+        (when-let [path (fetch-source! opts spec)]
+          (import-into! dest [path])))
       (catch ConnectException e
-        (log/error "could not connect to remote server" (or (ex-message e) {}))
-        (throw e))
-      (catch Exception e
-        (log/error (ex-message e))
-        (throw e)))))
+        (cli-error ::network-error
+                   (str "Could not connect to remote server: " (ex-message e)))))))
 
-(defn- available [{:keys [dist] :as opts} _]
-  (if-not (seq dist)
-    (download/print-providers)
-    (install (assoc opts :release-date "list") [])))
+(defn- available [{:keys [dist] :as opts} args]
+  (when (seq args)
+    (println (str "  ! ignoring positional argument(s) (use --dist for ids): "
+                  (str/join " " args))))
+  (if (seq dist)
+    ;; Run every listing so the user sees results for the good ids; return
+    ;; false if any failed so -main can exit non-zero (scripts can rely on it).
+    (let [results (mapv #(list-source! opts %) dist)]
+      (when (some false? results) false))
+    (do
+      (println "\n=== SNOMED CT distributions ===")
+      (download/print-providers)
+      (println "\n=== FHIR packages ===")
+      (fhir-package/print-known))))
 
-(defn- build-index [{:keys [db]} _]
-  (let [db (single-db! "index" db)]
-    (hermes/index db)
-    (with-open [svc (hermes/open db {:quiet true})]
-      (log-module-dependency-problems svc))))
-
-(defn- compact [{:keys [db]} _]
-  (hermes/compact (single-db! "compact" db)))
-
-(defn- status [{:keys [db verbose modules refsets] fmt :format} _]
-  (let [db (single-db! "status" db)
-        st (hermes/status db {:counts? true
-                              :modules? (or verbose modules)
-                              :installed-refsets? (or verbose refsets)
-                              :log? false})]
-    (case fmt
-      :json (json/pprint st)
-      (pp/pprint st))))
-
-(defn- providers-for-path
-  "Open a path as one or more provider impls, choosing a constructor
-  by detection. Returns a map `{:providers :closers :naming-systems}`
-  — `:naming-systems` is non-empty only when the source advertises one
-  (currently the SQLite catalogue's OID/URN resolver)."
-  [path]
-  (case (sources/detect! path)
+(defn- index-one [{:keys [kind path]}]
+  (case kind
     :hermes-db
-    (let [hermes-svc (hermes/open path)]
-      {:providers [(snomed/->HermesService hermes-svc)]
-       :closers   [#(.close hermes-svc)]})
-
+    (do (println (str "  → index: " path))
+        (hermes/index path)
+        (with-open [svc (hermes/open path {:quiet true})]
+          (log-module-dependency-problems svc)))
     :fhir-tx-db
-    (let [{:keys [datasource codesystem valueset conceptmap naming-system]}
-          (sqlite-provider/open-providers path)]
-      {:providers      (filterv some? [codesystem valueset conceptmap])
-       :naming-systems (when naming-system [naming-system])
-       :closers        (when (instance? java.io.Closeable datasource)
-                         [#(.close ^java.io.Closeable datasource)])})
+    (do (println (str "  → index: " path))
+        (sqlite-index/index! path))
+    ;; Release sources (rf2, loinc, fhir-json) — silently skipped so a
+    ;; chained pipeline that mixes release sources with built artefacts
+    ;; doesn't fail spuriously.
+    nil))
 
-    :fhir-json
-    {:providers (vec (keep load-fhir/from-fhir (fhir-loader/load-paths path)))}
+(defn- compact-one [{:keys [kind path]}]
+  (case kind
+    :hermes-db  (do (println (str "  → compact: " path)) (hermes/compact path))
+    :fhir-tx-db (do (println (str "  → vacuum: " path))  (sqlite-db/vacuum! path))
+    nil))
 
-    (throw (ex-info (str "Path is a release source — run `import` first: " path)
-                    {:path path}))))
+(defn- build-index [_opts paths]
+  (require-positional! "index" 1 paths)
+  (run! index-one (mapcat sources/find-sources! paths)))
 
-(defn- providers-for-resources
-  "Open a directory of FHIR JSON resources as in-memory providers.
-  Always treats `path` as a directory of FHIR JSON regardless of
-  detection — that's the explicit `--resources` semantics."
-  [path]
-  (let [data (fhir-loader/load-paths path)
-        {:keys [providers supplements]}
-        (load-fhir/build-from-fhir-data data)]
-    {:providers   providers
-     :supplements supplements}))
+(defn- compact [_opts paths]
+  (require-positional! "compact" 1 paths)
+  (run! compact-one (mapcat sources/find-sources! paths)))
 
-(defn- accumulate
-  [acc f path]
-  (merge-with into acc (f path)))
+(declare build-svc)
 
-(defn- path-providers [path]
-  (let [{:keys [providers closers naming-systems]} (providers-for-path path)]
-    {:providers      (or providers [])
-     :closers        (or closers [])
-     :naming-systems (or naming-systems [])}))
+(defn- print-status-table [{:keys [codesystems valuesets conceptmaps]}]
+  (let [more-line (fn [n shown]
+                    (when (> n shown)
+                      (println (str "  … and " (- n shown) " more"))))]
+    (println "\n=== Hades terminology service status ===")
+    (println (str "  CodeSystems: " (count codesystems)))
+    (println (str "  ValueSets:   " (count valuesets)))
+    (println (str "  ConceptMaps: " (count conceptmaps)))
+    (when (seq codesystems)
+      (println "\nCodeSystems:")
+      (pp/print-table (take 50 codesystems))
+      (more-line (count codesystems) 50))
+    (when (seq valuesets)
+      (println "\nValueSets (first 20):")
+      (pp/print-table (take 20 valuesets))
+      (more-line (count valuesets) 20))
+    (when (seq conceptmaps)
+      (println "\nConceptMaps:")
+      (pp/print-table (take 30 conceptmaps)))))
 
-(defn- resources-providers [path]
-  (select-keys (providers-for-resources path) [:providers :supplements]))
+(defn- status [{fmt :format :as opts} args]
+  (require-positional! "status" 1 args)
+  (let [svc (build-svc opts args)]
+    (try
+      (let [st {:codesystems (sort-by (juxt :url :version) (protos/cs-metadata svc))
+                :valuesets   (sort-by (juxt :url :version) (protos/vs-metadata svc))
+                :conceptmaps (protos/cm-metadata svc)}]
+        (case fmt
+          :json (println (json/write-str st :escape-slash false :indent true))
+          :edn  (pp/pprint st)
+          (print-status-table st)))
+      (finally
+        (hades/close svc)))))
+
+(defn- log-catalogue-summary [svc]
+  (log/info "service catalogue"
+            {:codesystem-count (count (protos/cs-metadata svc))
+             :valueset-count   (count (protos/vs-metadata svc))
+             :conceptmap-count (count (protos/cm-metadata svc))}))
+
+(defn- parse-default-bindings
+  "Parse repeatable CLI `--default URL=VERSION` values into {url version}."
+  [params]
+  (into {}
+        (keep (fn [^String s]
+                (let [idx (.lastIndexOf s "=")]
+                  (when (pos? idx)
+                    [(.substring s 0 idx) (.substring s (inc idx))]))))
+        params))
 
 (defn- build-svc
-  "Translate CLI options into provider impls, then `hades/open` them."
-  [{:keys [db resources]} positional-sources]
-  (when-not (or (seq db) (seq resources) (seq positional-sources))
-    (println "ERROR: 'serve' requires --db, --resources, or one or more positional source paths")
-    (System/exit 1))
-  (let [empty {:providers [] :closers [] :supplements [] :naming-systems []}
-        from-paths     (reduce #(accumulate %1 path-providers %2)
-                               empty (concat db positional-sources))
-        from-resources (reduce #(accumulate %1 resources-providers %2)
-                               empty resources)
-        merged         (merge-with into from-paths from-resources)]
-    (hades/open (:providers merged)
-                {:supplements    (:supplements merged)
-                 :closers        (:closers merged)
-                 :naming-systems (:naming-systems merged)})))
+  "Open CLI positional paths as a Hades service."
+  [{:keys [default]} paths]
+  (require-positional! "serve" 1 paths)
+  (let [svc (hades/open paths {:defaults (parse-default-bindings default)})]
+    (log-catalogue-summary svc)
+    svc))
 
 (defn- write-metadata [meta path]
   (spit path (with-out-str (json/pprint meta)))
   (log/info "wrote service metadata" {:path path}))
 
-(defn- serve [{:keys [metadata-out port bind-address] :as opts} positional-sources]
+(defn- serve [{:keys [metadata-out port bind-address] :as opts} args]
   (set-default-uncaught-exception-handler)
   (log/info "env" (-> (System/getProperties)
                       (select-keys ["os.name" "os.arch" "os.version" "java.vm.name" "java.vm.version"])
                       (update-keys keyword)))
-  (let [svc (build-svc opts positional-sources)
+  (let [svc (build-svc opts args)
         server-opts (cond-> {:port port}
                       bind-address (assoc :host bind-address))]
     (when metadata-out (write-metadata (hades/metadata svc) metadata-out))
@@ -232,13 +472,18 @@
 (def ^:private commands
   {"import"    {:fn import-from}
    "list"      {:fn list-from}
-   "download"  {:fn install}
    "install"   {:fn install}
    "available" {:fn available}
    "index"     {:fn build-index}
    "compact"   {:fn compact}
    "serve"     {:fn serve}
    "status"    {:fn status}})
+
+(def ^:private chain-incompatible
+  "Commands that cannot be mixed with others on a single command line
+  because their positional arguments mean something different from the
+  rest (e.g. `import dest src...`)."
+  #{"import"})
 
 (defn- usage
   ([options-summary]
@@ -255,43 +500,91 @@
   ([options-summary cmds]
    (let [n (count cmds)
          cmds' (map cli/commands cmds)
-         {cmd-usage :usage cmd :cmd desc :desc} (first cmds')]
+         {cmd-usage :usage cmd :cmd desc :desc long-desc :long} (first cmds')]
      (->> [(str "Usage: hades [options] " (if (= 1 n) (or cmd-usage cmd) (str/join " " cmds)))
            ""
-           (if (= 1 n) desc (str/join \newline (map cli/format-command cmds')))
+           (if (= 1 n)
+             (or long-desc desc)
+             (str/join \newline (map cli/format-command cmds')))
            ""
            "Options:"
            options-summary]
           (str/join \newline)))))
 
 (defn- exit [status-code msg]
-  (println msg)
+  (when msg (println msg))
   (System/exit status-code))
 
+(defn- print-error [msg]
+  (binding [*out* *err*]
+    (println (str "ERROR: " msg))))
+
+(defn- friendly-error?
+  "Return true if `e` carries a recognised `:reason` we should print as a
+  one-line error rather than a stack trace."
+  [e]
+  (and (instance? ExceptionInfo e)
+       (#{::missing-args
+          ::mixed-sources
+          ::unimportable-kind
+          ::unknown-distribution
+          ::network-error
+          :com.eldrix.hades.impl.paths/release-source-not-served
+          :unknown-source-kind}     ; raised from sources/find-sources!
+        (:reason (ex-data e)))))
+
 (defn- invoke-command [cmd opts args]
-  (if-let [f (:fn cmd)]
-    (f opts args)
-    (exit 1 "ERROR: not implemented")))
+  (try
+    ((:fn cmd) opts args)
+    (catch ExceptionInfo e
+      (if (friendly-error? e)
+        (do (print-error (ex-message e)) false)
+        (throw e)))))
+
+(defn- unknown-commands [args]
+  ;; Tokens that look like a bare command (no leading `-`, no `=`) but
+  ;; don't match any known command. With no commands at all the user
+  ;; gets the top-level usage instead of a per-token complaint.
+  (->> args
+       (remove #(or (str/starts-with? % "-")
+                    (str/includes? % "=")))
+       (remove cli/all-commands)))
 
 (defn -main [& args]
-  (let [{:keys [cmds options arguments summary errors warnings]}
+  (let [{:keys [cmds options arguments summary errors]}
         (cli/parse-cli args)]
-    (doseq [warning warnings] (log/warn warning))
     (cond
+      ;; --help wins over everything else, including missing :missing flags
       (and (seq cmds) (:help options))
-      (println (usage summary cmds))
+      (do (println (usage summary cmds)) (System/exit 0))
+
       (:help options)
-      (println (usage summary))
-      (empty? cmds)
-      (exit 1 (usage summary))
+      (do (println (usage summary)) (System/exit 0))
+
       errors
-      (exit 1 (str (str/join \newline (map #(str "ERROR: " %) errors)) "\n\n" (usage summary cmds)))
+      (exit 2 (str (str/join \newline (map #(str "ERROR: " %) errors))
+                   "\n\n" (usage summary cmds)))
+
+      (empty? cmds)
+      (let [unknown (unknown-commands args)]
+        (when (seq unknown)
+          (print-error (str "unknown command: " (str/join " " unknown))))
+        (exit 2 (usage summary)))
+
+      (and (some chain-incompatible cmds) (> (count cmds) 1))
+      (exit 2 (str "ERROR: '" (first (filter chain-incompatible cmds))
+                   "' cannot be combined with other commands"))
+
       :else
-      (doseq [cmd cmds]
-        (invoke-command (commands cmd) options arguments)))))
+      (loop [[cmd & more] cmds]
+        (when cmd
+          (let [ok (invoke-command (commands cmd) options arguments)]
+            (if (false? ok)
+              (System/exit 1)
+              (recur more))))))))
 
 (comment
-  (def svc (hades/open [(snomed/->HermesService (hermes/open "/path/to/snomed.db"))]))
+  (def svc (hades/open ["/path/to/snomed.db"]))
   (def srv (http/start! (http/make-server svc {:port 8080})))
   (http/stop! srv)
   (hades/close svc))

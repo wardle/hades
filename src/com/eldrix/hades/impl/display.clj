@@ -5,6 +5,8 @@
   (:require [clojure.string :as str])
   (:import (java.util Locale$LanguageRange)))
 
+(set! *warn-on-reflection* true)
+
 (defn parse-display-language
   "Parse a displayLanguage (RFC 4647 / Accept-Language) string into a seq of
   `{:lang :q}` maps sorted by quality descending. The wildcard `*` is dropped.

@@ -64,7 +64,7 @@
 (defn- svc-of [resource-maps]
   (let [{:keys [providers supplements]} (load-fhir/build-from-fhir-data
                                           (fhir-data resource-maps))]
-    (hades/open providers {:supplements supplements})))
+    (composite/from-providers providers {:supplements supplements})))
 
 ;; ---------------------------------------------------------------------------
 ;; Precomputed metadata cache
@@ -201,3 +201,70 @@
         (is (= "error" (:severity issue)))
         (is (= "version-error" (:details-code issue)))
         (is (re-find #"required to be '1.0'" (:text issue)))))))
+
+;; ---------------------------------------------------------------------------
+;; CodeableConcept aggregation across providers
+;;
+;; Mirrors `validation/complex-codeableconcept-full` from the tx-ecosystem
+;; conformance suite — a CC carries codings from two different code systems
+;; against a ValueSet that includes both. The composite must dispatch each
+;; coding to the right provider, then aggregate per the FHIR spec.
+;; ---------------------------------------------------------------------------
+
+(def ^:private cs-fruit
+  {"resourceType" "CodeSystem"
+   "url"          "http://example.com/r/fruit" "version" "1.0" "status" "active"
+   "content"      "complete" "caseSensitive" true
+   "concept"      [{"code" "apple"  "display" "Apple"}
+                   {"code" "banana" "display" "Banana"}]})
+
+(def ^:private cs-veg
+  {"resourceType" "CodeSystem"
+   "url"          "http://example.com/r/veg" "version" "1.0" "status" "active"
+   "content"      "complete" "caseSensitive" true
+   "concept"      [{"code" "carrot" "display" "Carrot"}]})
+
+(def ^:private vs-produce
+  {"resourceType" "ValueSet"
+   "url"          "http://example.com/r/produce" "version" "1.0" "status" "active"
+   "compose"      {"include" [{"system" "http://example.com/r/fruit"}
+                              {"system" "http://example.com/r/veg"}]}})
+
+(deftest validate-cc-cross-provider-mix-valid-and-invalid
+  (testing "FHIR semantics: any invalid coding makes overall result=false even if another coding is valid; the valid coding's metadata still surfaces"
+    (let [svc (svc-of [cs-fruit cs-veg vs-produce])
+          codings [{:system "http://example.com/r/fruit" :code "apple"}
+                   {:system "http://example.com/r/veg"   :code "potato"}]
+          r (composite/validate-codeable-concept svc codings
+              {:url "http://example.com/r/produce"})]
+      (is (false? (:result r))
+          "matches the conformance fixture validation/complex-codeableconcept-full-response: any invalid coding flips result to false")
+      (is (= :apple (:code r))
+          "valid coding's code surfaces (in-memory provider returns codes as keywords)")
+      (is (= "Apple" (:display r)))
+      (testing "the invalid coding's per-coding issue carries the demoted details-code"
+        (is (some #(and (= "this-code-not-in-vs" (:details-code %))
+                        (= 1 (:coding-index %))
+                        (= "information" (:severity %)))
+                  (:issues r)))))))
+
+(deftest validate-cc-cross-provider-all-valid
+  (testing "every coding valid → result=true"
+    (let [svc (svc-of [cs-fruit cs-veg vs-produce])
+          codings [{:system "http://example.com/r/fruit" :code "apple"}
+                   {:system "http://example.com/r/veg"   :code "carrot"}]
+          r (composite/validate-codeable-concept svc codings
+              {:url "http://example.com/r/produce"})]
+      (is (true? (:result r))))))
+
+(deftest validate-cc-cross-provider-all-invalid
+  (testing "a CC where every coding is rejected returns result=false with a combined message"
+    (let [svc (svc-of [cs-fruit cs-veg vs-produce])
+          codings [{:system "http://example.com/r/fruit" :code "kumquat"}
+                   {:system "http://example.com/r/veg"   :code "potato"}]
+          r (composite/validate-codeable-concept svc codings
+              {:url "http://example.com/r/produce"})]
+      (is (false? (:result r)))
+      (is (string? (:message r)))
+      (is (some #(= "not-in-vs" (:details-code %)) (:issues r))
+          "issues include the synthesised \"no valid coding\" not-in-vs"))))

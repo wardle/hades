@@ -21,13 +21,17 @@
   case-insensitive lookup, supplements, and fragment-CS warnings."
   (:require [charred.api :as charred]
             [clojure.string :as str]
+            [com.eldrix.hades.impl.canonical :as canonical]
             [com.eldrix.hades.impl.compose :as compose]
             [com.eldrix.hades.impl.display :as display]
+            [com.eldrix.hades.impl.issues :as issues]
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.sqlite.db :as db]
             [com.eldrix.hades.impl.vs-validate :as vs-validate]
             [next.jdbc :as jdbc])
   (:import (com.google.re2j Pattern PatternSyntaxException)))
+
+(set! *warn-on-reflection* true)
 
 (defn- v [s] (or s ""))
 
@@ -43,6 +47,12 @@
 
 (defn- parse-json [^String s] (when s (read-json s)))
 
+(defn- int->bool
+  "Decode a SQLite INTEGER 0/1 column to a Clojure boolean, preserving
+  NULL as nil."
+  [v]
+  (when (some? v) (= 1 v)))
+
 ;; ---------------------------------------------------------------------------
 ;; Bulk loaders — one SELECT per table; rows parsed into Clojure data
 ;; once and indexed by [url version].
@@ -51,11 +61,11 @@
 (defn- codesystem-row->entry [row]
   {:url               (:codesystem_meta/url row)
    :version           (system-version-or-nil (:codesystem_meta/version row))
-   :case-sensitive    (case (:codesystem_meta/case_sensitive row) 1 true 0 false nil)
+   :case-sensitive    (int->bool (:codesystem_meta/case_sensitive row))
    :hierarchy-meaning (:codesystem_meta/hierarchy_meaning row)
    :content           (:codesystem_meta/content row)
    :status            (:codesystem_meta/status row)
-   :experimental      (case (:codesystem_meta/experimental row) 1 true 0 false nil)
+   :experimental      (int->bool (:codesystem_meta/experimental row))
    :name              (:codesystem_meta/name row)
    :title             (:codesystem_meta/title row)
    :description       (:codesystem_meta/description row)
@@ -107,15 +117,18 @@
 (defn- fetch-concept-row
   "Fetch a single concept row. When `case-sensitive?` is false the
   match is case-insensitive via `LOWER(code)=LOWER(?)`. Returns the
-  row map (with the actual stored code) or nil."
-  [ds url version code case-sensitive?]
+  row map (with the actual stored code) or nil. `conn` may be a pooled
+  connection or the datasource — Hikari connections are cheap to grab,
+  but threading one through `cs-lookup` lets all five point queries
+  share a single check-out."
+  [conn url version code case-sensitive?]
   (if (false? case-sensitive?)
-    (jdbc/execute-one! ds
+    (jdbc/execute-one! conn
       ["SELECT code, display, definition, inactive, abstract, not_selectable, status
         FROM concept
         WHERE cs_url=? AND cs_version=? AND LOWER(code)=LOWER(?)"
        url (v version) code])
-    (jdbc/execute-one! ds
+    (jdbc/execute-one! conn
       ["SELECT code, display, definition, inactive, abstract, not_selectable, status
         FROM concept WHERE cs_url=? AND cs_version=? AND code=?"
        url (v version) code])))
@@ -124,11 +137,11 @@
   "Return a vector of `{:code :display}` for each parent. Joining
   to `concept` to project the parent's display matches the in-memory
   provider's lookup shape — `:description` on the parent property."
-  [ds url version code]
+  [conn url version code]
   (mapv (fn [row]
           {:code (:concept_parent/parent_code row)
            :display (:concept/display row)})
-        (jdbc/execute! ds
+        (jdbc/execute! conn
           ["SELECT cp.parent_code, c.display
             FROM concept_parent cp
             LEFT JOIN concept c
@@ -136,35 +149,56 @@
             WHERE cp.cs_url=? AND cp.cs_version=? AND cp.code=?"
            url (v version) code])))
 
-(defn- fetch-properties [ds url version code]
-  (jdbc/execute! ds
+(defn- fetch-properties [conn url version code]
+  (jdbc/execute! conn
     ["SELECT prop_code, value_type, value_str, value_int, value_bool, value_dec,
              value_coding_system, value_coding_code, value_coding_display, value_quantity
       FROM concept_property WHERE cs_url=? AND cs_version=? AND code=?"
      url (v version) code]))
 
-(defn- fetch-designations [ds url version code]
-  (mapv (fn [row]
-          (let [{:concept_designation/keys [language use_system use_code use_display value]} row]
-            (cond-> {:value value}
-              language   (assoc :language (keyword language))
-              (or use_system use_code use_display)
-              (assoc :use (cond-> {}
-                            use_system  (assoc :system use_system)
-                            use_code    (assoc :code use_code)
-                            use_display (assoc :display use_display))))))
-        (jdbc/execute! ds
-          ["SELECT language, use_system, use_code, use_display, value
-            FROM concept_designation WHERE cs_url=? AND cs_version=? AND code=?"
-           url (v version) code])))
+(defn- designation-row->entry [row]
+  (let [{:concept_designation/keys [language use_system use_code use_display value]} row]
+    (cond-> {:value value}
+      language   (assoc :language (keyword language))
+      (or use_system use_code use_display)
+      (assoc :use (cond-> {}
+                    use_system  (assoc :system use_system)
+                    use_code    (assoc :code use_code)
+                    use_display (assoc :display use_display))))))
+
+(defn- fetch-designations
+  "Fetch the concept's designations. When `languages` is a non-empty
+  seq of BCP-47 tags, narrows the scan via lenient prefix matching
+  — for each tag we accept exact (`= ?`) and prefix (`LIKE 'tag-%'`)
+  matches, so requesting `en` still picks up rows tagged `en-GB`.
+  This mirrors `display/language-matches?` so the SQL pushdown
+  doesn't change behaviour. Returns `[]` when no rows match."
+  ([conn url version code] (fetch-designations conn url version code nil))
+  ([conn url version code languages]
+   (let [base "SELECT language, use_system, use_code, use_display, value
+               FROM concept_designation WHERE cs_url=? AND cs_version=? AND code=?"
+         ;; The dynamic part of `clauses` is the *number* of `?`
+         ;; placeholders, never user data. All language values flow
+         ;; through JDBC parameter binding (PreparedStatement.setString),
+         ;; same as the standard `IN (?, ?, ?)` idiom for variadic binds.
+         [sql params]
+         (if (seq languages)
+           (let [clauses (str/join " OR "
+                                   (repeat (count languages) "language = ? OR language LIKE ?"))
+                 sql (str base " AND (" clauses ")")
+                 lang-params (mapcat (fn [l] [l (str l "-%")]) languages)]
+             [sql (into [url (v version) code] lang-params)])
+           [base [url (v version) code]])]
+     (mapv designation-row->entry
+           (jdbc/execute! conn (into [sql] params))))))
 
 (defn- fetch-children
   "Return a vector of `{:code :display}` for each child."
-  [ds url version code]
+  [conn url version code]
   (mapv (fn [row]
           {:code (:concept_parent/code row)
            :display (:concept/display row)})
-        (jdbc/execute! ds
+        (jdbc/execute! conn
           ["SELECT cp.code, c.display
             FROM concept_parent cp
             LEFT JOIN concept c
@@ -180,7 +214,7 @@
     "code"     (when value_str (keyword value_str))
     "string"   value_str
     "integer"  value_int
-    "boolean"  (case value_bool 1 true 0 false nil)
+    "boolean"  (int->bool value_bool)
     "decimal"  value_dec
     "dateTime" value_str
     "Coding"   (cond-> {}
@@ -207,12 +241,21 @@
 (defn- lookup-entry [cache url version]
   (or (when (not (str/blank? version)) (get cache (key-for url version)))
       (get cache (key-for url ""))
-      ;; If the registered key was bare-URL but the cache only has the
-      ;; versioned form (single-version auto-bind), pick any entry whose
-      ;; URL matches.
-      (some (fn [[[k-url _] entry]]
-              (when (= url k-url) entry))
-            cache)))
+      ;; If the registered key was bare-URL but the cache only has
+      ;; versioned forms, pick the SemVer-latest entry for this URL.
+      ;; Healthcare safety: hash-map iteration order is unspecified, so
+      ;; we must explicitly rank by version (per FHIR tx-ecosystem and
+      ;; the composite's `pick-latest-semver` policy).
+      (->> cache
+           (reduce-kv (fn [best [k-url k-ver] entry]
+                        (if (= url k-url)
+                          (if (or (nil? best)
+                                  (pos? (canonical/semver-compare k-ver (first best))))
+                            [k-ver entry]
+                            best)
+                          best))
+                      nil)
+           second)))
 
 (defn- params-version [params]
   (or (:version params) (:system-version params)))
@@ -461,91 +504,131 @@
     (let [meta (lookup-entry cache (:url params) (params-version params))]
       (cs-resource-from-meta meta)))
 
-  (cs-lookup [_ {:keys [system code displayLanguage] :as params}]
+  (cs-lookup [_ {:keys [system code displayLanguage properties] :as params}]
     (let [meta (lookup-entry cache system (params-version params))
-          {:keys [url version name case-sensitive]} meta
-          row (when meta (fetch-concept-row ds url version code case-sensitive))]
-      (when row
-        (let [actual-code (:concept/code row)
-              inactive? (case (:concept/inactive row) 1 true 0 false nil)
-              abstract? (case (:concept/abstract row) 1 true 0 false nil)
-              parents (fetch-parents ds url version actual-code)
-              children (fetch-children ds url version actual-code)
-              prop-rows (fetch-properties ds url version actual-code)
-              designations (fetch-designations ds url version actual-code)
-              display-langs (display/parse-display-language displayLanguage)
-              lang-display (when (seq display-langs)
-                             (display/find-display-for-language designations display-langs))]
-          {:name        name
-           :version     version
-           :display     (or lang-display (:concept/display row))
-           :system      url
-           :code        (keyword actual-code)
-           :definition  (:concept/definition row)
-           :abstract    (boolean abstract?)
-           :properties  (concat
-                          [{:code :inactive :value (boolean inactive?)}]
-                          (mapv (fn [{:keys [code display]}]
-                                  (cond-> {:code :parent :value (keyword code)}
-                                    display (assoc :description display)))
-                                parents)
-                          (mapv (fn [{:keys [code display]}]
-                                  (cond-> {:code :child :value (keyword code)}
-                                    display (assoc :description display)))
-                                children)
-                          (keep property->lookup-entry prop-rows))
-           :designations designations}))))
+          {:keys [url version name case-sensitive]} meta]
+      (if-not meta
+        (issues/unknown-system-lookup system code)
+        (with-open [conn (jdbc/get-connection ds)]
+          (if-let [row (fetch-concept-row conn url version code case-sensitive)]
+            (let [actual-code (:concept/code row)
+                  inactive? (int->bool (:concept/inactive row))
+                  abstract? (int->bool (:concept/abstract row))
+                  ;; FHIR `_property=…` filter. When unset, return the
+                  ;; full lookup; when set, restrict to those slices.
+                  ;; "designation"/"parent"/"child" are slice keys; any
+                  ;; other entry is a typed-property code.
+                  want         (when (seq properties) (set properties))
+                  slice-keys   #{"designation" "parent" "child"}
+                  want?        (fn [k] (or (nil? want) (contains? want k)))
+                  want-typed?  (or (nil? want)
+                                   (some #(not (slice-keys %)) want))
+                  display-langs (display/parse-display-language displayLanguage)
+                  ;; If the caller asks for designations explicitly we
+                  ;; must return all of them. When designations are only
+                  ;; needed to pick a display for the supplied
+                  ;; `displayLanguage`, restrict the SQL to those
+                  ;; languages — turns a 66-row scan into a 2-3 row
+                  ;; lookup on the same index.
+                  designation-langs (when (and (seq display-langs) (not (want? "designation")))
+                                      (mapv :lang display-langs))
+                  fetch-desigs? (or (want? "designation") (seq display-langs))
+                  designations (when fetch-desigs?
+                                 (fetch-designations conn url version actual-code
+                                                     designation-langs))
+                  parents      (when (want? "parent")
+                                 (fetch-parents conn url version actual-code))
+                  children     (when (want? "child")
+                                 (fetch-children conn url version actual-code))
+                  prop-rows    (when want-typed?
+                                 (fetch-properties conn url version actual-code))
+                  lang-display (when (seq display-langs)
+                                 (display/find-display-for-language designations display-langs))]
+              {:name        name
+               :version     version
+               :display     (or lang-display (:concept/display row))
+               :system      url
+               :code        (keyword actual-code)
+               :definition  (:concept/definition row)
+               :abstract    (boolean abstract?)
+               :properties  (concat
+                              [{:code :inactive :value (boolean inactive?)}]
+                              (when parents
+                                (mapv (fn [{:keys [code display]}]
+                                        (cond-> {:code :parent :value (keyword code)}
+                                          display (assoc :description display)))
+                                      parents))
+                              (when children
+                                (mapv (fn [{:keys [code display]}]
+                                        (cond-> {:code :child :value (keyword code)}
+                                          display (assoc :description display)))
+                                      children))
+                              (when prop-rows
+                                (keep property->lookup-entry prop-rows)))
+               ;; Designations fetched solely for display selection are
+               ;; consumed by `find-display-for-language` and dropped
+               ;; — only emit them on the wire when the caller asked.
+               :designations (if (want? "designation") (or designations []) [])})
+            (issues/unknown-code-lookup url code))))))
 
   (cs-validate-code [_ {:keys [system code display displayLanguage] :as params}]
     (let [meta (lookup-entry cache system (params-version params))
-          {:keys [url version case-sensitive]} meta
-          row (when meta (fetch-concept-row ds url version code case-sensitive))]
-      (cond
-        (nil? meta)
+          {:keys [url version case-sensitive]} meta]
+      (if (nil? meta)
         {:result false :code (keyword code) :system system
          :message (str "No CodeSystem found for " system)}
-
-        row
-        (let [actual-code (:concept/code row)
-              case-differs? (and (false? case-sensitive) (not= code actual-code))
-              primary-display (:concept/display row)
-              designations (fetch-designations ds url version actual-code)
-              display-langs (display/parse-display-language displayLanguage)
-              concept {:code actual-code :display primary-display :designations designations}
-              best-display (or (when (seq display-langs)
-                                 (display/find-display-for-language designations display-langs))
-                               primary-display)
-              base (cond-> {:result true
-                            :display best-display
-                            :code (keyword code)
-                            :system url
-                            :version version}
-                     case-differs? (assoc :normalized-code (keyword actual-code)))
-              case-issue (when case-differs?
-                           {:severity     "information"
-                            :type         "business-rule"
-                            :details-code "code-rule"
-                            :text         (str "The code '" code "' differs from the correct code '"
-                                               actual-code "' by case. Although the code system '"
-                                               url (when version (str "|" version))
-                                               "' is case insensitive, implementers are strongly "
-                                               "encouraged to use the correct case anyway")
-                            :expression   ["Coding.code"]})
-              display-issue (when (and display (not (display/display-matches? concept display display-langs)))
-                              (let [msg (str "The display '" display "' is incorrect for code '"
-                                             code "'; correct display is '" best-display "'")]
-                                {:severity     "error"
-                                 :type         "invalid"
-                                 :details-code "invalid-display"
-                                 :text         msg
-                                 :expression   ["Coding.display"]}))
-              issues (filterv some? [case-issue display-issue])]
-          (cond-> base
-            display-issue (assoc :result false :message (:text display-issue))
-            (seq issues) (assoc :issues issues)))
-
-        :else
-        (not-found-result meta code))))
+        (with-open [conn (jdbc/get-connection ds)]
+          (let [row (fetch-concept-row conn url version code case-sensitive)]
+            (if (nil? row)
+              (not-found-result meta code)
+              (let [actual-code (:concept/code row)
+                    case-differs? (and (false? case-sensitive) (not= code actual-code))
+                    primary-display (:concept/display row)
+                    display-langs (display/parse-display-language displayLanguage)
+                    ;; Designations are only needed to (a) verify the
+                    ;; supplied display, or (b) pick a language-specific
+                    ;; display. Skip the read entirely otherwise. When a
+                    ;; displayLanguage is set, restrict the SQL to that
+                    ;; language so we don't pull every translation just
+                    ;; to find one.
+                    need-designations? (or display (seq display-langs))
+                    designation-langs (when (seq display-langs)
+                                        (mapv :lang display-langs))
+                    designations (when need-designations?
+                                   (fetch-designations conn url version actual-code
+                                                       designation-langs))
+                    concept {:code actual-code :display primary-display :designations designations}
+                    best-display (or (when (seq display-langs)
+                                       (display/find-display-for-language designations display-langs))
+                                     primary-display)
+                    base (cond-> {:result true
+                                  :display best-display
+                                  :code (keyword code)
+                                  :system url
+                                  :version version}
+                           case-differs? (assoc :normalized-code (keyword actual-code)))
+                    case-issue (when case-differs?
+                                 {:severity     "information"
+                                  :type         "business-rule"
+                                  :details-code "code-rule"
+                                  :text         (str "The code '" code "' differs from the correct code '"
+                                                     actual-code "' by case. Although the code system '"
+                                                     url (when version (str "|" version))
+                                                     "' is case insensitive, implementers are strongly "
+                                                     "encouraged to use the correct case anyway")
+                                  :expression   ["Coding.code"]})
+                    display-issue (when (and display (not (display/display-matches? concept display display-langs)))
+                                    (let [msg (str "The display '" display "' is incorrect for code '"
+                                                   code "'; correct display is '" best-display "'")]
+                                      {:severity     "error"
+                                       :type         "invalid"
+                                       :details-code "invalid-display"
+                                       :text         msg
+                                       :expression   ["Coding.display"]}))
+                    issues (filterv some? [case-issue display-issue])]
+                (cond-> base
+                  display-issue (assoc :result false :message (:text display-issue))
+                  (seq issues) (assoc :issues issues)))))))))
 
   (cs-subsumes [_ {:keys [systemA system codeA codeB] :as params}]
     ;; FHIR's $subsumes carries `systemA` / `systemB` (the composite has
@@ -584,6 +667,7 @@
                                          (and (= "regex" op)
                                               (nil? (direct-column property))))
                                        filters)
+              display-langs (display/parse-display-language displayLanguage)
               ;; Materialise each result-set row to a plain map so it
               ;; outlives the cursor step, then push post-filtering and
               ;; max-hits capping into the transducer so `plan` can stop
@@ -598,28 +682,31 @@
                                   :concept/abstract       (:concept/abstract row)
                                   :concept/not_selectable (:concept/not_selectable row)
                                   :concept/status         (:concept/status row)}))
-              post-filter-xf (when (seq post-filters)
-                               (filter (fn [row]
-                                         (let [enriched (cond-> row
-                                                          regex-on-property?
-                                                          (assoc ::row-properties
-                                                                 (fetch-properties ds url ver (:concept/code row))))]
-                                           (every? #(% enriched) post-filters)))))
               ;; SQL applies LIMIT only when no post-filters; otherwise
               ;; we must cap survivors after filtering, which is what
               ;; lets `plan` short-circuit.
               limit-xf (when (and max-hits (seq post-filters))
-                         (take (long max-hits)))
-              xform (apply comp (filterv some? [materialise post-filter-xf limit-xf]))
-              survivors (into [] xform (jdbc/plan ds (into [sql] params)))
-              display-langs (display/parse-display-language displayLanguage)
-              concepts (mapv (fn [row]
-                               (let [desigs (when (seq display-langs)
-                                              (fetch-designations ds url ver (:concept/code row)))]
-                                 (find-matches-row->concept url ver display-langs row desigs)))
-                             survivors)]
-          (cond-> {:concepts concepts}
-            (seq issues) (assoc :issues issues)))))))
+                         (take (long max-hits)))]
+          ;; `plan` keeps using `ds` (cursor lives on its own pool
+          ;; check-out); per-row `fetch-properties` and `fetch-designations`
+          ;; share `conn` so we collapse N pool check-outs to one.
+          (with-open [conn (jdbc/get-connection ds)]
+            (let [post-filter-xf (when (seq post-filters)
+                                   (filter (fn [row]
+                                             (let [enriched (cond-> row
+                                                              regex-on-property?
+                                                              (assoc ::row-properties
+                                                                     (fetch-properties conn url ver (:concept/code row))))]
+                                               (every? #(% enriched) post-filters)))))
+                  xform (apply comp (filterv some? [materialise post-filter-xf limit-xf]))
+                  survivors (into [] xform (jdbc/plan ds (into [sql] params)))
+                  concepts (mapv (fn [row]
+                                   (let [desigs (when (seq display-langs)
+                                                  (fetch-designations conn url ver (:concept/code row)))]
+                                     (find-matches-row->concept url ver display-langs row desigs)))
+                                 survivors)]
+              (cond-> {:concepts concepts}
+                (seq issues) (assoc :issues issues)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; ValueSet catalogue

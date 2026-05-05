@@ -10,6 +10,8 @@
   (:require [clojure.spec.alpha :as s])
   (:import (java.time LocalDate)))
 
+(set! *warn-on-reflection* true)
+
 ;; ---------------------------------------------------------------------------
 ;; Scalar fields
 ;; ---------------------------------------------------------------------------

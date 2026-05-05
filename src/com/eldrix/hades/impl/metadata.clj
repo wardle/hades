@@ -5,6 +5,8 @@
             [clojure.java.io :as io]
             [clojure.string :as str]))
 
+(set! *warn-on-reflection* true)
+
 (def ^:private build-info
   (some-> (io/resource "com/eldrix/hades/version.edn") slurp edn/read-string))
 

@@ -72,10 +72,12 @@
   (let [load (time-ms (vec (fhir-loader/load-paths terminology-dir)))
         data (:result load)
         build (time-ms (sqlite-index/build! out-db data {:loader-type "fhir-r4-defs"}))
+        index (time-ms (sqlite-index/index! out-db))
         size (file-size-mb out-db)
         kinds (frequencies (map :type data))]
     {:load-ms (:ms load)
      :build-ms (:ms build)
+     :index-ms (:ms index)
      :db-size-mb size
      :resource-counts (select-keys kinds [:codesystem-meta :valueset :conceptmap :concept :skipped])}))
 
@@ -84,7 +86,7 @@
         open (time-ms (sqlite-provider/open-providers out-db))
         {:keys [codesystem valueset conceptmap datasource]} (:result open)]
     (try
-      (let [register (time-ms (hades/open
+      (let [register (time-ms (composite/from-providers
                                 (filterv some? [codesystem valueset conceptmap])))
             svc      (:result register)
             cs       (composite/find-codesystem svc bench-system)
@@ -109,7 +111,7 @@
         data (:result load)
         register (time-ms
                    (let [{:keys [providers supplements]} (load-fhir/build-from-fhir-data data)]
-                     (hades/open providers {:supplements supplements})))
+                     (composite/from-providers providers {:supplements supplements})))
         svc (:result register)
         cs (composite/find-codesystem svc bench-system)
         warm (time-ms (exercise-cs cs))

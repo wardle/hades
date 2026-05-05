@@ -29,13 +29,16 @@
   scope tx-resource Parameters to a single request, but available to
   any caller who wants per-call provider overrides.
 
-  Service authoring (writing your own backend that participates in a
-  Hades service) is an internal concern: implement the protocols in
-  `com.eldrix.hades.impl.protocols` and pass instances to `open`."
+  `open` takes paths to built terminology artefacts. Provider assembly is
+  an implementation concern; code that really needs it can use the
+  relevant `impl` namespaces directly."
   (:require [clojure.spec.alpha :as s]
+            [com.eldrix.hades.impl.paths :as paths]
             [com.eldrix.hades.impl.composite :as composite]
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.protocols.result :as result]))
+
+(set! *warn-on-reflection* true)
 
 ;; ---------------------------------------------------------------------------
 ;; Re-exported result specs — public stable contract for return values.
@@ -58,28 +61,46 @@
 ;; ---------------------------------------------------------------------------
 
 (defn open
-  "Open a Hades terminology service from a sequence of provider impls.
+  "Open a Hades terminology service from built terminology artefact paths.
 
-  Each provider must satisfy at least one of `CodeSystem`, `ValueSet`,
-  `ConceptMap`. URLs and versions are discovered via each provider's
-  `*-metadata` method. CodeSystem providers also serve the implicit
-  ValueSet of their CodeSystem.
+  Each path may point at a Hermes SNOMED DB, a FHIR terminology SQLite
+  container, or a file/tree of FHIR JSON resources:
 
-  Embedders construct providers by calling source-specific
-  constructor functions — Hades does not own a config-driven
-  factory. The CLI's `serve` subcommand is just one such embedder.
+    (hades/open [\".hades/snomed-intl-20250201.db\"
+                 \".hades/loinc-2.81.db\"])
+
+  RF2 and LOINC release sources must be imported first. Provider-level
+  construction lives in `impl` namespaces.
 
   Options (second arity):
     :supplements    — vector of `{:meta :lookup}` supplement entries
     :naming-systems — vector of resolver fns for OID/URN aliases
+    :defaults       — map of bare canonical URL to version for disambiguation
     :metadata       — load report (returned by `metadata`)
     :closers        — extra close fns
 
   Returns an opaque, `Closeable` handle. Closing releases every
   provider that implements `java.io.Closeable` in reverse order
   plus any extra `:closers`. Subsequent closes are no-ops."
-  ([providers] (composite/from-providers providers))
-  ([providers opts] (composite/from-providers providers opts)))
+  ([paths] (paths/open-paths paths))
+  ([paths opts] (paths/open-paths paths opts)))
+
+(defn open-paths
+  "Open a Hades terminology service from built terminology artefact paths.
+
+  Alias for `(open paths opts)`, retained as a named variant for call
+  sites that want to make path-based opening explicit.
+
+  Options are the same as `open`:
+    :supplements    — vector of `{:meta :lookup}` supplement entries
+    :naming-systems — vector of resolver fns for OID/URN aliases
+    :defaults       — map of bare canonical URL to version for disambiguation
+    :metadata       — load report (returned by `metadata`)
+    :closers        — extra close fns
+
+  Returns the same opaque, `Closeable` handle as `open`."
+  ([paths] (open paths))
+  ([paths opts] (open paths opts)))
 
 (defn close
   "Release the service and every closeable provider it holds. Safe to
@@ -115,12 +136,14 @@
 
 (s/fdef lookup
   :args (s/cat :svc some? :params map?)
-  :ret  (s/nilable ::lookup-result))
+  :ret  ::lookup-result)
 
 (defn lookup
   "CodeSystem $lookup. `params` carries `:system :code` and optionally
   `:version :displayLanguage :properties`. Returns a `::lookup-result`
-  or nil if the code system or code is unknown."
+  — either a found map (`:code :display :system` + properties) or a
+  not-found map (`:not-found true :not-found-reason
+  :unknown-system|:unknown-code`)."
   [svc params]
   (protos/cs-lookup svc params))
 

@@ -4,6 +4,7 @@
            org.clojure/tools.cli          {:mvn/version "1.4.256"}
            org.clojure/tools.logging      {:mvn/version "1.3.1"}
            org.clojure/data.json          {:mvn/version "2.5.2"}
+           org.clojure/core.async         {:mvn/version "1.9.865"}
            com.cnuernber/charred          {:mvn/version "1.038"}
            ch.qos.logback/logback-classic {:mvn/version "1.5.32"}
 
@@ -12,6 +13,7 @@
            io.pedestal/pedestal.service   {:mvn/version "0.8.1"}
            io.pedestal/pedestal.jetty     {:mvn/version "0.8.1"}
            lambdaisland/uri               {:mvn/version "1.19.155"}
+           version-clj/version-clj        {:mvn/version "2.0.3"}
 
            org.xerial/sqlite-jdbc                 {:mvn/version "3.53.0.0"}
            com.github.seancorfield/next.jdbc      {:mvn/version "1.3.1093"}
@@ -29,7 +31,8 @@
             :ns-default build}
 
            :run
-           {:main-opts ["-m" "com.eldrix.hades.cmd"]}
+           {:main-opts ["-m" "com.eldrix.hades.cmd"]
+            :jvm-opts  ["--enable-native-access=ALL-UNNAMED"]}
 
            :socket
            {:jvm-opts ["-Dclojure.server.repl={:port,50505,:accept,clojure.core.server/repl}"]}
@@ -81,15 +84,6 @@
                           com.squareup.okhttp3/okhttp             {:mvn/version "4.12.0"}}
             :extra-paths ["test" "test/resources"]
             :exec-fn     com.eldrix.hades.conformance-test/run
-            :exec-args   {}}
-
-           ;; Provision the canonical pinned SNOMED CT DB used by tests,
-           ;; benchmarks and conformance. Reads `.hades/snomed-int-20250201.zip`,
-           ;; writes `.hades/snomed-intl-20250201.db`. No-op if DB exists.
-           ;; See CLAUDE.md for the licensed download.
-           :build-db
-           {:extra-paths ["test"]
-            :exec-fn     com.eldrix.hades.snomed-db/build-pinned-db!
             :exec-args   {}}
 
            :bench

@@ -1,23 +1,27 @@
 # Hades — CLAUDE.md
 
 A FHIR terminology server built in Clojure, currently wrapping Hermes (SNOMED CT)
-and evolving towards a general-purpose terminology server. See `plan/roadmap.md` for the
-full plan.
+and evolving towards a general-purpose terminology server.
 
 ## Quick reference
 
 ```bash
-# CLI subcommands — hades now owns the full SNOMED lifecycle (acquisition,
-# maintenance, serving). Hermes is used as a library; users don't run it.
-clj -M:run serve --db snomed.db --port 8080           # run FHIR server
-clj -M:run install --dist uk.nhs/sct-clinical --db snomed.db --api-key trud.txt
-clj -M:run import  --db snomed.db /path/to/RF2
-clj -M:run list    /path/to/RF2                       # list importable files
-clj -M:run available                                   # list distribution providers
-clj -M:run index   --db snomed.db                     # rebuild search indices
-clj -M:run compact --db snomed.db                     # compact LMDB
-clj -M:run status  --db snomed.db [--format json]     # database status
-clj -M:run --help serve                                # per-command help
+# CLI subcommands — hades owns the full lifecycle (acquisition, maintenance,
+# serving) for both SNOMED CT and FHIR conformance packages. Positional
+# arguments are always paths; installable ids are passed via repeatable
+# `--dist` flags (with optional `@<version>` suffix).
+clj -M:run serve   snomed.db fhir.db --port 8080                                       # run FHIR server (positional sources, repeatable, mix kinds)
+clj -M:run install snomed.db --dist uk.nhs/sct-clinical@2025-02-01 --api-key trud.txt  # SNOMED CT distribution
+clj -M:run install fhir.db   --dist hl7.fhir.r4.core@4.0.1                             # FHIR package (registry: packages.fhir.org)
+clj -M:run import  snomed.db /path/to/RF2                                              # import sources into a destination DB (dest first, then sources)
+clj -M:run list    /path/to/RF2                                                        # list importable files (paths required)
+clj -M:run available                                                                   # SNOMED CT distributions + common FHIR packages
+clj -M:run available --dist uk.nhs/sct-clinical --api-key trud.txt                     # SNOMED releases (TRUD requires --api-key for listing too)
+clj -M:run available --dist hl7.fhir.r4.core                                           # FHIR package versions from the registry
+clj -M:run index   snomed.db                                                           # rebuild search indices
+clj -M:run compact snomed.db                                                           # compact LMDB
+clj -M:run status  snomed.db [--format json|edn]                                       # database status
+clj -M:run --help install                                                              # per-command help
 
 # Development
 clj -M:test                              # run tests
@@ -42,20 +46,23 @@ pinned SNOMED CT International release: 20250201**. Pinning matters: the
 IG's tx-ecosystem fixtures were authored against this exact release, and
 any other release produces failures that are data-version drift, not real
 defects. Tests, benches and conformance **only consume** the pinned DB —
-they never build it. Provisioning is a separate explicit step:
+they never build it. Provisioning uses the regular hades CLI (a SNOMED
+MLDS Affiliate licence is required):
 
 ```bash
-clj -X:build-db                                                        # use a zip already placed locally
-clj -X:build-db :username '"you@example.com"' :password '"/path/pw"'   # or download from MLDS
+# Download from MLDS, import, index, compact:
+clj -M:run install .hades/snomed-intl-20250201.db \
+  --dist ihtsdo.mlds/167@2025-02-01 \
+  --username 'you@example.com' --password /path/to/password-file
+clj -M:run index   .hades/snomed-intl-20250201.db
+clj -M:run compact .hades/snomed-intl-20250201.db
+
+# Or, if you already have the release zip on disk:
+unzip /path/to/snomed-int-20250201.zip -d /tmp/snomed-rf2
+clj -M:run import .hades/snomed-intl-20250201.db /tmp/snomed-rf2
+clj -M:run index   .hades/snomed-intl-20250201.db
+clj -M:run compact .hades/snomed-intl-20250201.db
 ```
-
-`:build-db` is idempotent — a no-op if the DB already exists. It provisions
-from the first available of:
-
-1. `.hades/snomed-intl-20250201.db` — existing built DB
-2. `.hades/snomed-int-20250201.zip` — local release zip (extract + build)
-3. SNOMED MLDS — auto-download using `:username` / `:password` (path to
-   password file; Affiliate licence required)
 
 Build takes ~2 minutes and produces a ~2.2 GB Hermes DB. CI caches the
 built DB keyed on the pinned version. Tests and conformance fail fast with
@@ -75,7 +82,7 @@ Then use `clj-nrepl-eval` to start a Hades server and test interactively:
 clj-nrepl-eval -p <port> '
 (require (quote [com.eldrix.hermes.core :as hermes]))
 (require (quote [com.eldrix.hades.core :as hades]))
-(require (quote [com.eldrix.hades.http :as http]))
+(require (quote [com.eldrix.hades.impl.http :as http]))
 (require (quote [com.eldrix.hades.impl.snomed :as snomed]))
 
 (def hermes-svc (hermes/open "/path/to/snomed.db"))
@@ -267,11 +274,18 @@ each handler's params via `merge-flags`.
 - Pure functions for all complex logic. Side effects only at edges (server, startup).
 - Functions do one thing. If you need `and` to describe it, split it.
 - Prefer threading macros (`->`, `->>`) over nested calls.
-- Destructure in argument lists when it aids readability.
+- Destructure at the function boundary, not in the body. `(fn [{:keys [request] :as ctx}] …)` reveals the shape at entry; a `let` binding that just unpacks an argument is dead weight.
 - Use `when` not `if` when there is no else branch.
-- No extraneous comments. Comments explain *why*, never *what*.
+- No extraneous comments. Comments explain *why*, never *what*. A one-line `;; why` at a `cond->` branch or a non-obvious condition is fine.
 - No docstrings on private helpers with self-evident signatures.
 - Don't add type hints unless needed for performance or disambiguation.
+
+### Bindings, control flow, and shape
+- A `let` binding should earn its name. If a local exists only to be threaded into the next line, inline it. Three named locals each used once usually want to be one threaded form.
+- `update-in` beats `assoc-in` when the new value is a function of the old one. Old code: read, compute, write. `update-in` does all three in one place.
+- Don't compute-then-`assoc` when you can `cond->` and skip. `(if pred new-val old-val)` followed by an unconditional write rewrites the same value on the no-op path; `cond->` with the predicate makes the write itself conditional. The structure now mirrors the work — common path stays untouched.
+- Nest threading macros when it sharpens the spine. An inner `->` carrying the unconditional writes inside an outer `cond->` carrying the conditional ones reads as "always do A and B; sometimes also do C." Use the shape of the form to communicate which writes are common-path and which are guarded.
+- Prefer code where the *structure* shows control flow (`cond->`, `when-let`, threading shape) over code where everything is unconditional and the conditionality lives inside expressions.
 
 ### Naming
 - Predicates end in `?`.
@@ -349,10 +363,11 @@ For a single benchmark, use the REPL:
 ```
 
 The fixture opens the canonical pinned Hermes DB (see
-`com.eldrix.hades.snomed-db`), wraps it as the SNOMED
+`com.eldrix.hades.fixtures`), wraps it as the SNOMED
 CodeSystem/ValueSet/ConceptMap provider, runs criterium, then closes
-the service. Benches are skipped when the DB is absent — run
-`clj -X:build-db` first.
+the service. Missing fixtures throw with the install hint (same
+behaviour as the live test suite); under `CI=true` the throw is fatal.
+Provision via the steps in `Conformance / integration test data` above.
 
 To add a benchmark, append an entry to the `operations` vector. No new
 deftest or var required.
@@ -455,6 +470,24 @@ Run after every task. All items must pass.
 2. **Run the full conformance suite** and confirm no regression against the
    previous release's pass count.
 3. **Update `CHANGELOG.md`** with the release's headline changes.
+4. **Verify the three conformance figures match.** Grep all three locations
+   (badge URL in `README.md`, prose sentence in `README.md`, headline in
+   `CHANGELOG.md`) and confirm pass/total/percent are identical. A drift
+   between e.g. `490/600` and `490/603` means the badge is lying — a
+   one-character typo in any one place breaks the contract.
+5. **Audit `CHANGELOG.md` for stale CLI surface.** For every CLI flag
+   removed in this release, confirm the CHANGELOG (and `README.md`) does
+   not still document it under examples or migration notes. Common
+   regressions: `--resources <dir>`, `--db`, `--snomed`, `-r`, `-s`.
+6. **`git status` must be clean of untracked source/test files.** Run
+   `git status --short` and confirm no `??` lines under `src/` or `test/`
+   — a new namespace that compiles locally but isn't tracked will pass
+   `clj -M:test` here and fail in CI (or, worse, ship a release whose jar
+   doesn't include the file).
+7. **`fixtures.clj` install hints stay current.** When CLI surface changes,
+   re-read every `assert-exists!` call site in `test/com/eldrix/hades/fixtures.clj`
+   and confirm the printed `clj -M:run install …` hint actually works
+   against the current parser.
 
 ### Bumping the tx-ecosystem pin
 

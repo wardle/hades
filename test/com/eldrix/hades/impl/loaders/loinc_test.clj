@@ -1,5 +1,6 @@
 (ns com.eldrix.hades.impl.loaders.loinc-test
-  (:require [clojure.java.io :as io]
+  (:require [clojure.core.async :as async]
+            [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
             [com.eldrix.hades.impl.loaders.loinc :as loinc]))
 
@@ -11,6 +12,18 @@
 (defn- by-code [concepts code]
   (some #(when (= code (:code %)) %) concepts))
 
+(defn- release-data
+  ([root] (release-data root nil))
+  ([root opts]
+   (let [ch (loinc/stream-release root opts)]
+     (loop [acc []]
+       (if-let [batch (async/<!! ch)]
+         (let [events (if (map? batch) [batch] batch)]
+           (if-let [err (some #(when (= :stream-error (:type %)) %) events)]
+             (throw (:ex err))
+             (recur (into acc events))))
+         acc)))))
+
 (deftest infer-version-from-directory
   (testing "version inferred from a `Loinc_X.YZ` directory name"
     (is (= "2.82" (loinc/infer-version (io/file "/tmp/Loinc_2.82"))))
@@ -18,15 +31,15 @@
     (is (= "1.0"  (loinc/infer-version (io/file "/tmp/loinc-1.0"))))
     (is (nil?     (loinc/infer-version (io/file "/tmp/no-version-here")))))
   (testing "explicit :version overrides directory inference"
-    (let [data (loinc/load-paths fixture-root {:version "9.99"})
+    (let [data (release-data fixture-root {:version "9.99"})
           meta (first (by-type data :codesystem-meta))]
       (is (= "9.99" (:version meta)))))
   (testing "missing version + un-parseable directory name throws"
     (is (thrown? clojure.lang.ExceptionInfo
-                 (loinc/load-paths "/tmp/no-version-here")))))
+                 (release-data "/tmp/no-version-here")))))
 
 (deftest codesystem-meta-shape
-  (let [data (loinc/load-paths fixture-root {:version "2.82"})
+  (let [data (release-data fixture-root {:version "2.82"})
         meta (first (by-type data :codesystem-meta))]
     (testing ":codesystem-meta header"
       (is (= "http://loinc.org" (:url meta)))
@@ -44,11 +57,11 @@
                            "VersionFirstReleased" "VersionLastChanged"]))))))
 
 (deftest concept-emission
-  (let [data (loinc/load-paths fixture-root {:version "2.82"})
+  (let [data (release-data fixture-root {:version "2.82"})
         concepts (by-type data :concept)]
     (testing "every Core row → one :concept (plus LA-codes + LP-parts)"
-      ;; 9 LOINC rows + 6 unique LA-codes + 5 LP-parts
-      (is (= 20 (count concepts))))
+      ;; 9 LOINC rows + 6 unique LA-codes + 6 LP-parts
+      (is (= 21 (count concepts))))
     (testing "Hemoglobin row maps to typed properties"
       (let [c (by-code concepts "718-7")]
         (is (some? c))
@@ -87,7 +100,7 @@
         (is (= "Agglutination" (get method "valueString")))))))
 
 (deftest answer-list-valuesets
-  (let [data (loinc/load-paths fixture-root {:version "2.82"})
+  (let [data (release-data fixture-root {:version "2.82"})
         vses (by-type data :valueset)
         by-url (group-by :url vses)]
     (testing "one ValueSet per LL-id"
@@ -102,7 +115,7 @@
                (set (map #(get % "code") concepts))))))))
 
 (deftest map-to-conceptmap
-  (let [data (loinc/load-paths fixture-root {:version "2.82"})
+  (let [data (release-data fixture-root {:version "2.82"})
         cms  (by-type data :conceptmap)]
     (testing "single ConceptMap aggregating MapTo.csv"
       (is (= 1 (count cms)))
@@ -120,39 +133,48 @@
             (is (= "Cross-domain note" (-> el :target first :comment)))))))))
 
 (deftest part-concepts-and-hierarchy
-  (let [data (loinc/load-paths fixture-root {:version "2.82"})
+  (let [data (release-data fixture-root {:version "2.82"})
         concepts (by-type data :concept)
-        sodium (by-code concepts "2951-2")
-        comp-part (by-code concepts "LP15099-2")]
+        comp-part (by-code concepts "LP15099-2")
+        parents (by-type data :concept-parent)
+        props   (by-type data :concept-property)]
     (testing "Part.csv emits LP-* concepts with PartName + STATUS + PartTypeName"
       (is (some? comp-part))
       (is (= "Sodium" (:display comp-part)))
-      (let [props (->> (:properties comp-part)
-                       (map (fn [p] [(get p "code")
-                                     (or (get p "valueCode")
-                                         (get p "valueString"))]))
-                       (into {}))]
-        (is (= "ACTIVE" (props "STATUS")))
-        (is (= "COMPONENT" (props "PartTypeName")))))
-    (testing "ComponentHierarchyBySystem populates :parents on the LOINC concept"
-      (is (= ["LP386648-2"] (:parents sodium))))
-    (testing "LoincPartLink_Primary surfaces axis Codings on the LOINC concept"
-      (let [coding-props (filter #(get % "valueCoding") (:properties sodium))
-            by-axis (group-by #(get % "code") coding-props)]
-        (is (some? (get by-axis "COMPONENT")))
-        (is (= "LP15099-2" (get-in (first (get by-axis "COMPONENT"))
-                                   ["valueCoding" "code"])))
-        (is (= "Sodium" (get-in (first (get by-axis "COMPONENT"))
-                                ["valueCoding" "display"])))))))
+      (let [m (->> (:properties comp-part)
+                   (map (fn [p] [(get p "code")
+                                 (or (get p "valueCode")
+                                     (get p "valueString"))]))
+                   (into {}))]
+        (is (= "ACTIVE" (m "STATUS")))
+        (is (= "COMPONENT" (m "PartTypeName")))))
+    (testing "core LOINC concept itself is emitted clean (no inline parents/links)"
+      (let [sodium (by-code concepts "2951-2")]
+        (is (some? sodium))
+        (is (nil? (:parents sodium)))
+        (is (every? #(not (contains? % "valueCoding")) (:properties sodium)))))
+    (testing "ComponentHierarchyBySystem emits standalone :concept-parent entries"
+      (let [for-sodium (filter #(= "2951-2" (:code %)) parents)]
+        (is (= 1 (count for-sodium)))
+        (is (= "LP386648-2" (:parent (first for-sodium))))))
+    (testing "LoincPartLink_Primary emits standalone :concept-property entries"
+      (let [for-sodium (filter #(and (= "2951-2" (:code %))
+                                     (= "COMPONENT" (get-in % [:property "code"])))
+                               props)
+            coding (get-in (first for-sodium) [:property "valueCoding"])]
+        (is (= 1 (count for-sodium)))
+        (is (= "LP15099-2" (get coding "code")))
+        (is (= "Sodium"    (get coding "display")))))))
 
 (deftest linguistic-variants-as-designations
-  (let [data (loinc/load-paths fixture-root {:version "2.82"})
-        concepts (by-type data :concept)
-        sodium (by-code concepts "2951-2")
-        de-designations (filter #(= "de-AT" (:language %)) (:designations sodium))
-        by-use (group-by #(get-in % [:use :code]) de-designations)]
-    (testing "German variant rows surface as language-tagged designations"
-      (is (seq de-designations))
+  (let [data (release-data fixture-root {:version "2.82"})
+        ling (->> data
+                  (filter #(and (= :concept-designation (:type %))
+                                (= "2951-2" (:code %))
+                                (= "de-AT" (:language %)))))
+        by-use (group-by #(get-in % [:use :code]) ling)]
+    (testing "German variant rows surface as standalone :concept-designation entries"
+      (is (seq ling))
       (is (= "Natrium"
              (:value (first (get by-use "LinguisticVariantDisplayName"))))))))
 
@@ -171,7 +193,7 @@
                        "\"X\",\"\",\"\",\"\",\"\",\"\",\"\",\"\",\"\","
                        "\"X display\",\"\",\"\",\"ACTIVE\",\"0.1\",\"0.1\"\n")))
       (try
-        (let [data (loinc/load-paths (.getPath root))]
+        (let [data (release-data (.getPath root))]
           (is (= 1 (count (by-type data :codesystem-meta))))
           (is (= 1 (count (by-type data :concept))))
           (is (zero? (count (by-type data :valueset))))
