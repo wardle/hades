@@ -85,23 +85,6 @@
   ([paths] (paths/open-paths paths))
   ([paths opts] (paths/open-paths paths opts)))
 
-(defn open-paths
-  "Open a Hades terminology service from built terminology artefact paths.
-
-  Alias for `(open paths opts)`, retained as a named variant for call
-  sites that want to make path-based opening explicit.
-
-  Options are the same as `open`:
-    :supplements    — vector of `{:meta :lookup}` supplement entries
-    :naming-systems — vector of resolver fns for OID/URN aliases
-    :defaults       — map of bare canonical URL to version for disambiguation
-    :metadata       — load report (returned by `metadata`)
-    :closers        — extra close fns
-
-  Returns the same opaque, `Closeable` handle as `open`."
-  ([paths] (open paths))
-  ([paths opts] (open paths opts)))
-
 (defn close
   "Release the service and every closeable provider it holds. Safe to
   call more than once; subsequent calls are no-ops."
