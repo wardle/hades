@@ -10,10 +10,9 @@ ConceptMap URIs. LOINC and any FHIR NPM package (`hl7.fhir.r4.core`,
 `hl7.terminology`, `hl7.fhir.us.core`, IPS, …) can be served alongside
 SNOMED in the same process — the composite dispatches by canonical URL.
 
-Hades passes **490 / 603 (81.3%)** of the
+It is exercised against the
 [HL7 FHIR Terminology Ecosystem IG](https://github.com/HL7/fhir-tx-ecosystem-ig)
-conformance tests against the pinned International release. The figure is
-reproducible — see [Conformance and benchmarks](#conformance-and-benchmarks).
+conformance test suite — see [Conformance and benchmarks](#conformance-and-benchmarks).
 
 ## Project status
 
@@ -228,18 +227,17 @@ curl -H "Accept: application/json" 'localhost:8080/fhir/ValueSet/$expand?url=htt
 
 # Conformance and benchmarks
 
-Conformance is fully reproducible from a clean checkout — that is the
-point of publishing it. Performance figures are illustrative; the
-methodology is described below so that anyone evaluating alternatives
-can apply the same shape of test.
+Conformance is fully reproducible from a clean checkout. Performance
+figures are illustrative; the methodology is described below so that
+anyone evaluating alternatives can apply the same shape of test.
 
 ## Conformance
 
 Hades is exercised against the
 [HL7 FHIR Terminology Ecosystem IG](https://github.com/HL7/fhir-tx-ecosystem-ig)
-test suite using the upstream `TxTester` harness. The current pass count
-(**490 / 603**, 81.3%) is pinned to a specific upstream commit so that
-local and CI runs see the same test population.
+test suite using the upstream `TxTester` harness. The pass count (see
+the badge above) is pinned to a specific upstream commit so that local
+and CI runs see the same test population.
 
 ```shell
 clj -X:conformance
