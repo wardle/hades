@@ -67,16 +67,6 @@ round-trip on the hot path — `$lookup`, `$validate-code` and
 `$subsumes` typically return in under a millisecond on a laptop. See
 [Benchmarks](#benchmarks) for per-operation numbers.
 
-> **A note on the Health Samurai `tx-benchmark` Round 0 chart.**
-> The published [scoreboard](https://healthsamurai.github.io/tx-benchmark/results/round-0/)
-> shows Hades at 6%. That number is from a container that pinned
-> Hades **v1.4.69 / Hermes v1.4.1520** (now several major versions
-> behind) and was configured **SNOMED-only** — no LOINC, no RxNorm, no
-> FHIR packages — even though the test mix relies on all of them. Tests
-> targeting other terminologies therefore returned 404. We have
-> contributed an updated container loading the current multi-terminology
-> Hades; an updated round is awaited.
-
 On the roadmap (see [Roadmap](#roadmap)):
 
 - Resource read and search (`GET /fhir/CodeSystem/{id}`, etc.)
@@ -474,13 +464,12 @@ perf changes) is available via `clj -M:bench`.
 
 Independent comparative benchmarks are welcome. The
 [Health Samurai `tx-benchmark`](https://github.com/HealthSamurai/tx-benchmark)
-project covers Hades, Snowstorm, Ontoserver, FHIRsmith and Termbox; its
-Round 0 results currently use **Hades v1.4.69** (several major versions
-old) configured **SNOMED-only**, so most tests in the mix — LOINC,
-RxNorm, HL7-published ValueSets — return 404 from Hades and the
-composite score is not informative. We've contributed an updated
-container running the current multi-terminology Hades; expect refreshed
-numbers once that round publishes.
+project covers Hades, Snowstorm, Ontoserver, FHIRsmith and Termbox.
+Round 0 ran **Hades v1.4.69**, an old proof-of-concept version of Hades
+predating its current development. That version used the HAPI Java
+library but current Hades is HAPI-free. We've [contributed an updated
+container](https://github.com/HealthSamurai/tx-benchmark/pull/1) and
+await a refreshed round.
 
 # Roadmap
 
