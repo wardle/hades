@@ -93,7 +93,7 @@
                   :multi true :default [] :default-desc ""
                   :parse-fn parse-dist
                   :update-fn conj]
-   :no-index     [nil "--no-index" "Skip auto-indexing the destination after install/import. Use when chaining multiple install/import calls into one database; finish with `hades index <db>` (or one final unflagged install/import)."]
+   :no-index     [nil "--no-index" "Skip auto-indexing"]
    :verbose      ["-v" "--verbose"]
    :progress     [nil "--progress" "Show progress reporting"]
    :help         ["-h" "--help"]})
