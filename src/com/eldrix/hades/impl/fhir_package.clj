@@ -21,19 +21,22 @@
 (def default-registry
   "https://packages.fhir.org")
 
+(def browsable-registry
+  "Human-browsable FHIR Package Registry index (Simplifier-hosted)."
+  "https://registry.fhir.org/")
+
 (def known-packages
   "Curated short list of FHIR packages users commonly install. The full
-  registry is not enumerable in any useful way; this list keeps the
-  `available` command honest by showing concrete examples without
-  pretending to be exhaustive."
+  registry holds >1200 packages — too many to dump to a terminal — so
+  this list shows concrete starting points and `print-known` points at
+  the browsable registry for everything else."
   [{:id "hl7.fhir.r4.core"     :description "FHIR R4 core specification"}
    {:id "hl7.fhir.r4b.core"    :description "FHIR R4B core specification"}
    {:id "hl7.fhir.r5.core"     :description "FHIR R5 core specification"}
    {:id "hl7.terminology.r4"   :description "HL7 standard CodeSystems and ValueSets (R4)"}
    {:id "hl7.terminology.r5"   :description "HL7 standard CodeSystems and ValueSets (R5)"}
    {:id "hl7.fhir.us.core"     :description "US Core implementation guide"}
-   {:id "hl7.fhir.uv.ips"      :description "International Patient Summary"}
-   {:id "us.cdc.phinvads"      :description "CDC PHIN VADS terminologies"}])
+   {:id "hl7.fhir.uv.ips"      :description "International Patient Summary"}])
 
 ;; ---------------------------------------------------------------------------
 ;; HTTP
@@ -146,12 +149,11 @@
   "Print the curated list of known FHIR packages and registry pointers."
   []
   (println "")
-  (println "Common FHIR packages (the registry is not exhaustively listed):")
+  (println "Common FHIR packages (the registry holds many more — see Browse below):")
   (pp/print-table [:id :description] known-packages)
   (println "")
   (println (str "  Registry:        " default-registry))
-  (println "  List versions:   hades available --dist <package-id>")
-  (println "  Install:         hades install <db> --dist <package-id>[@<version>]"))
+  (println (str "  Browse all:      " browsable-registry)))
 
 (defn print-versions
   "Print a versions table for a package id."
