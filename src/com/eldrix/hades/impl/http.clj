@@ -20,7 +20,8 @@
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.wire :as wire]
             [io.pedestal.connector :as conn]
-            [io.pedestal.http.jetty :as jetty])
+            [io.pedestal.http.jetty :as jetty]
+            [io.pedestal.http.tracing :as tracing])
   (:import (java.net URLDecoder)
            (java.nio.charset StandardCharsets)
            (java.sql SQLTransientConnectionException)))
@@ -249,6 +250,18 @@
 ;; ---------------------------------------------------------------------------
 ;; Shared interceptors
 ;; ---------------------------------------------------------------------------
+
+(def log-request
+  {:name  ::log-request
+   :enter (fn [ctx] (assoc ctx ::start (System/nanoTime)))
+   :leave (fn [{:keys [request response] ::keys [start] :as ctx}]
+            (log/info "request"
+                      {:method (-> request :request-method name)
+                       :uri    (:uri request)
+                       :ip     (:remote-addr request)
+                       :status (:status response)
+                       :ms     (long (/ (- (System/nanoTime) start) 1e6))})
+            ctx)})
 
 (def content-negotiation
   {:name  ::content-negotiation
@@ -722,7 +735,9 @@
                      :max-body-bytes (* 16 1024 1024)}
                     opts)]
     (-> (conn/default-connector-map (:host opts) (:port opts))
-        (conn/with-interceptors [content-negotiation catch-all-error
+        (conn/with-interceptors [(tracing/request-tracing-interceptor)
+                                 log-request
+                                 content-negotiation catch-all-error
                                  (with-max-body (:max-body-bytes opts))
                                  (inject-svc svc) tx-overlay fhir-not-found])
         (conn/with-routes (routes opts))

@@ -20,11 +20,14 @@
             [com.eldrix.hermes.core :as hermes]
             [com.eldrix.hermes.download :as download]
             [com.eldrix.hermes.importer :as importer])
-  (:import (clojure.lang ExceptionInfo)
+  (:import (ch.qos.logback.classic AsyncAppender Logger LoggerContext)
+           (ch.qos.logback.core.joran.util ConfigurationWatchListUtil)
+           (clojure.lang ExceptionInfo)
            (java.io File)
            (java.net ConnectException)
            (java.time LocalDate)
-           (java.time.format DateTimeFormatter)))
+           (java.time.format DateTimeFormatter)
+           (org.slf4j LoggerFactory)))
 
 (set! *warn-on-reflection* true)
 
@@ -339,7 +342,6 @@
       (println "\n=== SNOMED CT distributions ===")
       (download/print-providers)
       (println "\n=== FHIR packages ===")
-      (fhir-package/print-known))))
       (fhir-package/print-known)
       (println "")
       (println "List versions:   hades available --dist <id>")
@@ -398,8 +400,34 @@
   (spit path (with-out-str (json/pprint meta)))
   (log/info "wrote service metadata" {:path path}))
 
+(defn- logback-config-source [^LoggerContext ctx]
+  (or (some-> (ConfigurationWatchListUtil/getMainWatchURL ctx) str)
+      (System/getProperty "logback.configurationFile")
+      (some-> (.. Thread currentThread getContextClassLoader
+                  (getResource "logback.xml"))
+              str)))
+
+(defn- describe-logback []
+  (let [ctx ^LoggerContext (LoggerFactory/getILoggerFactory)
+        root (.getLogger ctx Logger/ROOT_LOGGER_NAME)
+        appenders (iterator-seq (.iteratorForAppenders root))]
+    {:config    (logback-config-source ctx)
+     :appenders (mapv (fn [^ch.qos.logback.core.Appender a]
+                        {:name (.getName a) :class (.getName (class a))})
+                      appenders)
+     :async?    (boolean (some #(instance? AsyncAppender %) appenders))}))
+
+(defn- log-logback-config! []
+  (let [info (describe-logback)]
+    (log/info "logback" info)
+    (when-not (:async? info)
+      (log/warn (str "synchronous log appender — under load, console writes can block "
+                     "request threads. Use -Dlogback.configurationFile=logback-async.xml "
+                     "for async logging.")))))
+
 (defn- serve [{:keys [metadata-out port bind-address] :as opts} args]
   (set-default-uncaught-exception-handler)
+  (log-logback-config!)
   (log/info "env" (-> (System/getProperties)
                       (select-keys ["os.name" "os.arch" "os.version" "java.vm.name" "java.vm.version"])
                       (update-keys keyword)))

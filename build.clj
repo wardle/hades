@@ -88,6 +88,10 @@
                   :class-dir  class-dir})
   (b/copy-dir {:src-dirs   ["src" "resources"]
                :target-dir class-dir})
+  ;; Uberjar uses the async logback config; dev (`clj -M:run`) keeps the
+  ;; sync default from resources/logback.xml.
+  (io/copy (io/file "resources/logback-async.xml")
+           (io/file class-dir "logback.xml"))
   (write-version-edn!)
   (b/uber {:class-dir class-dir
            :uber-file uber-file
