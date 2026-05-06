@@ -28,9 +28,19 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:private json-write-opts
-  {:escape-js-separators false
-   :escape-slash         false})
+(def ^:private write-json-fn
+  "Cached charred writer. Configured once at boot so the option map is
+  unpacked ahead of the hot path; charred recommends caching the fn
+  rather than calling `write-json-str` per request. FHIR-friendly:
+  no escape on `/` or JS separators."
+  (charred/write-json-fn {:escape-js-separators false
+                          :escape-slash         false}))
+
+(defn- write-json-str
+  ^String [data]
+  (let [sw (java.io.StringWriter. 1024)]
+    (write-json-fn sw data)
+    (.toString sw)))
 
 (defn- decode [^String s]
   (when s (URLDecoder/decode s StandardCharsets/UTF_8)))
@@ -270,7 +280,7 @@
               (if (map? body)
                 (-> context
                     (assoc-in [:response :body]
-                              (charred/write-json-str body json-write-opts))
+                              (write-json-str body))
                     (assoc-in [:response :headers "Content-Type"]
                               "application/fhir+json; charset=utf-8"))
                 context)))})
@@ -717,7 +727,7 @@
                 (assoc context :response
                        {:status  404
                         :headers {"Content-Type" "application/fhir+json; charset=utf-8"}
-                        :body    (charred/write-json-str body json-write-opts)}))
+                        :body    (write-json-str body)}))
               context))})
 
 (defn make-server
