@@ -22,11 +22,10 @@ conformance test suite — see [Conformance and benchmarks](#conformance-and-ben
 
 ## Project status
 
-Hades runs from a developer or analyst's laptop, as a single instance, or
-behind an API gateway as a horizontally scaled fleet sharing a read-only
-database volume. The store has no external dependencies — no Postgres,
-no Elasticsearch — and a release update for any terminology is a single
-command.
+Hades is lightweight, self-contained, and runs pretty much anywhere. 
+The same binary serves an analyst exploring concepts on a laptop, a single instance
+backing a clinical service, or a horizontally scaled fleet of servers. 
+There are no external dependencies — no Postgres, no Elasticsearch — and rolling out a new terminology release is a single command.
 
 Capabilities:
 
