@@ -340,6 +340,10 @@
       (download/print-providers)
       (println "\n=== FHIR packages ===")
       (fhir-package/print-known))))
+      (fhir-package/print-known)
+      (println "")
+      (println "List versions:   hades available --dist <id>")
+      (println "Install:         hades install <db> --dist <id>[@<version>]"))))
 
 (defn- compact [_opts paths]
   (run! compact-one (files-or-throw paths)))
