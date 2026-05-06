@@ -228,16 +228,19 @@
       (is (empty? (entries-by-kind (sources/tx-file-seq (.getPath root)) :hermes-db)))
       (finally (delete-tree! root)))))
 
-(deftest manifest-with-missing-linked-files-is-not-recognised
-  (let [root (mk-tmp-dir "missing-linked")]
-    (try
-      ;; Real-shaped manifest, but none of the linked dirs exist.
-      (let [d (io/file root "incomplete.db")]
-        (.mkdirs d)
-        (spit (io/file d "manifest.edn")
-              (pr-str @#'com.eldrix.hermes.core/expected-manifest)))
-      (is (empty? (entries-by-kind (sources/tx-file-seq (.getPath root)) :hermes-db)))
-      (finally (delete-tree! root)))))
+(deftest partial-hermes-db-recognised-by-identity
+  (testing "a manifest with matching :version is recognised even when the
+            linked artefacts (search.db, members.db) are missing —
+            completeness is a `hermes/open` concern, not the recogniser's.
+            Lets `hades index` operate on a freshly-imported pre-index DB."
+    (let [root (mk-tmp-dir "missing-linked")]
+      (try
+        (let [d (io/file root "incomplete.db")]
+          (.mkdirs d)
+          (spit (io/file d "manifest.edn")
+                (pr-str @#'com.eldrix.hermes.core/expected-manifest)))
+        (is (= 1 (count (entries-by-kind (sources/tx-file-seq (.getPath root)) :hermes-db))))
+        (finally (delete-tree! root))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Walker policy.

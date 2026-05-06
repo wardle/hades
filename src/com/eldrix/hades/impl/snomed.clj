@@ -2,7 +2,6 @@
   "Implementation of Hades protocols for SNOMED CT.
   A thin wrapper around the Hermes SNOMED terminology service"
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
             [clojure.string :as str]
             [com.eldrix.hades.impl.issues :as issues]
             [com.eldrix.hades.impl.property-filter :as property-filter]
@@ -917,8 +916,12 @@
 
 (defn- hermes-db-recognise
   "Recognise a Hermes SNOMED database by its `manifest.edn`. We read
-  the manifest, require its `:version` to match Hermes'
-  `expected-manifest`, and confirm every linked artefact exists.
+  the manifest and require its `:version` to match Hermes'
+  `expected-manifest` — that's identity. Whether every linked artefact
+  exists on disk is a *completeness* concern; it's checked at
+  `hermes/open` time (where the failure surfaces a clear, Hermes-level
+  error). A partial DB (post-import, pre-index) is still a Hermes DB
+  by identity, and `hades index` exists precisely to complete it.
 
   Hermes' `expected-manifest` is private, but we share the author —
   reaching in via the var means schema drift (a renamed `:store`,
@@ -927,13 +930,9 @@
   [^File f _probe?]
   (when (and (.isFile f) (= "manifest.edn" (.getName f)))
     (when-let [manifest (try (edn/read-string (slurp f)) (catch Exception _ nil))]
-      (let [expected @#'com.eldrix.hermes.core/expected-manifest
-            root     (.getParentFile f)
-            linked   (vals (dissoc expected :version))]
-        (when (and (= (:version manifest) (:version expected))
-                   (every? string? linked)
-                   (every? #(.exists (io/file root %)) linked))
-          {:dir root :version (:version manifest)})))))
+      (let [expected @#'com.eldrix.hermes.core/expected-manifest]
+        (when (= (:version manifest) (:version expected))
+          {:dir (.getParentFile f) :version (:version manifest)})))))
 
 (def hermes-db-recogniser
   {:id          :hermes-db
