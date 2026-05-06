@@ -2,7 +2,7 @@
 
 This log documents significant changes for each release.
 
-## Not yet released - v2.0
+## [v2.0.161] - 2025-05-06 
 
 Headline: Hades is now a **multi-terminology** FHIR server. SNOMED CT,
 LOINC, and arbitrary FHIR NPM packages run side-by-side in one process,
