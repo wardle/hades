@@ -181,6 +181,29 @@
             {"include" [{"system" snomed-uri
                          "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}]}]}
             {:count 100}))}
+
+   ;; --- 2×2 page-10 comparison for EX01-vs-EX02 investigation ------------
+   ;; Same SCTID (clinical-finding), same page size (10), three paths into
+   ;; SNOMED expansion. The implicit `isa/{id}` URL hits the
+   ;; expand-paginated-query fast path (PagingDedupCollector early-term).
+   ;; Compose paths translate to ECL (<< or <) and go through the generic
+   ;; expand-paginated which materialises the full subtree to compute
+   ;; :total. Expected: URL ≪ both compose entries.
+   {:id :expand/isa-page-10
+    :fn (fn [svc]
+          (hades/expand svc {:url (expand-url (str "isa/" clinical-finding)) :count 10}))}
+   {:id :compose/is-a-page-10
+    :fn (fn [svc]
+          (compose/expand-compose svc
+            {"include" [{"system" snomed-uri
+                         "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}]}]}
+            {:count 10}))}
+   {:id :compose/descendent-of-page-10
+    :fn (fn [svc]
+          (compose/expand-compose svc
+            {"include" [{"system" snomed-uri
+                         "filter" [{"property" "concept" "op" "descendent-of" "value" (str clinical-finding)}]}]}
+            {:count 10}))}
    ;; Mirrors tx-benchmark's EX05 — focus concept + attribute refinement.
    {:id :compose/refinement
     :fn (fn [svc]

@@ -662,14 +662,19 @@
           {:keys [ecl issues]} (compose-filters->ecl filters)]
       (if (seq issues)
         {:concepts [] :issues issues}
-        (let [{:keys [concepts]}
+        (let [{:keys [concepts total]}
               (expansion/expand {:svc            svc
                                  :ecl            ecl
                                  :filter         (when-not (str/blank? text) text)
                                  :active-only?   (boolean active-only)
                                  :limit          max-hits
                                  :language-range (when-not (str/blank? displayLanguage) displayLanguage)})]
-          {:concepts (expansion->concepts concepts ver)}))))
+          ;; Propagate `:total` — `expand-paginated` already pays the
+          ;; materialisation cost to count unique concepts. compose's
+          ;; `expand-include` reads it and surfaces it as
+          ;; `expansion.total`.
+          (cond-> {:concepts (expansion->concepts concepts ver)}
+            (some? total) (assoc :total total))))))
   protos/ValueSet
   (vs-metadata [_]
     ;; Implicit ValueSet of every installed SNOMED module.
