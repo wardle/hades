@@ -435,27 +435,37 @@ land in `test/resources/conformance/latest.json`.
 ## Benchmarks
 
 The numbers below come from driving a running Hades over HTTP with
-[hurl](https://hurl.dev) at `--parallel --jobs=10`. The methodology is
-described so anyone can apply the same shape of test to alternative
-servers — these are not a marketing claim, but they are reproducible.
+[hurl](https://hurl.dev) at `--parallel --jobs=10`. They will vary by
+machine and content version; the methodology and the order-of-magnitude
+shape are reproducible.
 
 - Hardware: Apple M1 MacBook Pro, 16 GB RAM
-- Data: SNOMED CT International 2025-02-01
-- Iterations: 60 per call, 10 in parallel
+- Data: SNOMED CT International 2025-02-01, LOINC 2.81,
+  `hl7.fhir.r4.core` 4.0.1, `hl7.terminology.r4` 7.0.1
+- Storage: SNOMED via Hermes (LMDB + Lucene); the FHIR-package
+  catalogue providers can be SQLite-backed or in-memory and perform
+  within ~10% of each other on these operations
+- Iterations: 200 per call, 10 in parallel, after a 20-iteration
+  warmup. Times are end-to-end including HTTP. `min` is the fastest
+  single observation, `p50` is the median (half of requests were
+  faster), `p95` is the 95th percentile (1 in 20 requests was slower).
 
-| Operation                                                                 | p50 (ms) | p95 (ms) |
-|---------------------------------------------------------------------------|---------:|---------:|
-| `CodeSystem/$lookup` — SNOMED concept (`73211009`)                        |        1 |        4 |
-| `ValueSet/$validate-code` — SNOMED concept against implicit VS            |      <1  |        2 |
-| `ValueSet/$validate-code` — with display string                           |      <1  |        3 |
-| `ValueSet/$validate-code` — within an implicit `isa/…` subtree VS         |      <1  |        2 |
-| `CodeSystem/$subsumes` — two SNOMED concepts                              |      <1  |        1 |
-| `ValueSet/$expand` — implicit `isa/…` subtree, page of 10                 |       14 |      158 |
-| `ValueSet/$expand` — POST, `descendent-of` filter, page of 10             |        6 |       70 |
-| `ValueSet/$expand` — text filter "diabetes" across all SNOMED, page of 100 |        3 |       29 |
-| `ValueSet/$expand` — POST, ECL refinement, page of 10                     |        2 |        4 |
-| `ValueSet/$expand` — POST, refinement + text filter "fracture"            |        3 |        9 |
-| `ConceptMap/$translate` — SNOMED map reference set                        |      <1  |        2 |
+| Operation                                                                  |     min |     p50 |     p95 |
+|----------------------------------------------------------------------------|--------:|--------:|--------:|
+| `CodeSystem/$lookup` — SNOMED concept (`73211009`)                         | 1.82 ms | 3.68 ms | 10.8 ms |
+| `CodeSystem/$lookup` — LOINC code (`8867-4`)                               | 1.39 ms | 2.30 ms | 8.60 ms |
+| `CodeSystem/$lookup` — DICOM code (`121054`)                               |  542 µs | 1.14 ms | 3.88 ms |
+| `ValueSet/$validate-code` — SNOMED concept against implicit VS             |  886 µs | 1.59 ms | 4.61 ms |
+| `ValueSet/$validate-code` — with display string                            |  738 µs | 1.62 ms | 5.65 ms |
+| `ValueSet/$validate-code` — within an implicit `isa/…` subtree VS          | 1.02 ms | 1.98 ms | 6.36 ms |
+| `CodeSystem/$subsumes` — two SNOMED concepts                               |  459 µs | 1.17 ms | 4.29 ms |
+| `ValueSet/$expand` — implicit `isa/…` subtree, page of 10                  |  791 µs | 1.64 ms | 5.39 ms |
+| `ValueSet/$expand` — POST, `descendent-of` filter, page of 10              | 15.6 ms | 19.1 ms | 40.9 ms |
+| `ValueSet/$expand` — text filter "diabetes" across all SNOMED, page of 100 | 4.32 ms | 6.61 ms | 16.1 ms |
+| `ValueSet/$expand` — POST, ECL refinement, page of 10                      | 2.69 ms | 5.06 ms | 13.4 ms |
+| `ValueSet/$expand` — POST, refinement + text filter "fracture"             | 2.94 ms | 4.92 ms | 12.7 ms |
+| `ConceptMap/$translate` — SNOMED map reference set                         |  934 µs | 1.71 ms | 5.72 ms |
+| `ConceptMap/$translate` — HL7 v3 administrative-gender                     |  711 µs | 1.36 ms | 5.05 ms |
 
 A registry-layer Criterium suite (HTTP bypassed, useful for bisecting
 perf changes) is available via `clj -M:bench`.
@@ -465,7 +475,7 @@ perf changes) is available via `clj -M:bench`.
 Independent comparative benchmarks are welcome. The
 [Health Samurai `tx-benchmark`](https://github.com/HealthSamurai/tx-benchmark)
 project covers Hades, Snowstorm, Ontoserver, FHIRsmith and Termbox.
-Round 0 ran **Hades v1.4.69**, an old proof-of-concept version of Hades
+Round 0 ran **Hades v1.4.69**, a very old proof-of-concept version of Hades
 predating its current development. That version used the HAPI Java
 library but current Hades is HAPI-free. We've [contributed an updated
 container](https://github.com/HealthSamurai/tx-benchmark/pull/1) and
@@ -486,9 +496,10 @@ Planned work, in rough priority order:
 
 Hades is built on:
 
-- [hermes](https://github.com/wardle/hermes) — SNOMED CT terminology
-  engine (LMDB + Lucene); does the heavy lifting for SNOMED storage,
-  search and ECL evaluation
+- [hermes](https://github.com/wardle/hermes) — an efficient SNOMED CT
+  terminology engine built on [lmdb](https://github.com/lmdbjava/lmdbjava)
+  and [Apache Lucene](https://lucene.apache.org/); does the heavy lifting
+  for SNOMED storage, search and ECL evaluation
 - [Pedestal](https://pedestal.io) on Jetty — the HTTP layer
 - [charred](https://github.com/cnuernber/charred) — JSON serialisation
 - [HAPI FHIR](https://hapifhir.io) structures and the `TxTester` harness
@@ -496,3 +507,8 @@ Hades is built on:
 
 Conformance work draws on the test fixtures and `messages.json` externals
 authored by the HL7 Terminology Ecosystem IG team.
+
+Performance work has been helped enormously by the HealthSamurai team
+and their work on [tx-benchmark](https://github.com/HealthSamurai/tx-benchmark).
+
+*Mark*
