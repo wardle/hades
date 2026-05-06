@@ -141,9 +141,12 @@
       ;; Fall back to a live call when the impl was found via
       ;; canonical/version stripping that bypasses the precomputed
       ;; map (rare: bare-URL request with only a versioned binding
-      ;; precomputed). Keeps semantics identical to the old code.
+      ;; precomputed). Pass `:url`/`:system` so multi-resource impls
+      ;; can dispatch.
       (when-let [cs (find-codesystem svc system)]
-        (protos/cs-resource cs {}))))
+        (let [[url version] (canonical/parse-versioned-uri system)]
+          (protos/cs-resource cs (cond-> {:url url :system url}
+                                   version (assoc :version version)))))))
 
 (defn vs-meta
   [{:keys [vs-meta-by-key naming-systems] :as svc} url]
@@ -152,7 +155,9 @@
         (when (and resolved (not= resolved url))
           (get vs-meta-by-key resolved)))
       (when-let [vs (find-valueset svc url)]
-        (protos/vs-resource vs {}))))
+        (let [[u version] (canonical/parse-versioned-uri url)]
+          (protos/vs-resource vs (cond-> {:url u}
+                                   version (assoc :version version)))))))
 
 (defn add-cs-status-warnings
   "Add informational issues for CodeSystem publication status (draft/retired/experimental)."
@@ -676,9 +681,23 @@
            ;; helper consults these maps with O(1) lookup; no per-request
            ;; DB hit. Recompute on `with-overlays` so layered services
            ;; get matching meta for their layered impls.
-           cs-meta-by-key (reduce-kv (fn [m k cs] (assoc m k (protos/cs-resource cs {})))
+           ;;
+           ;; Pass `:url`/`:system`/`:version` derived from each key so
+           ;; multi-resource impls (catalogues serving thousands of CSs
+           ;; or VSs through one provider, e.g. SQLite) can return the
+           ;; right entry. Single-resource impls ignore the params.
+           ;;
+           ;; Pass `:url`/`:system`/`:version` derived from each key so
+           ;; multi-resource impls (catalogues serving thousands of CSs
+           ;; or VSs through one provider, e.g. SQLite) can return the
+           ;; right entry. Single-resource impls ignore the params.
+           key->params (fn [k]
+                         (let [[url version] (canonical/parse-versioned-uri k)]
+                           (cond-> {:url url :system url}
+                             version (assoc :version version))))
+           cs-meta-by-key (reduce-kv (fn [m k cs] (assoc m k (protos/cs-resource cs (key->params k))))
                                      {} (:codesystems with-supps))
-           vs-meta-by-key (reduce-kv (fn [m k vs] (assoc m k (protos/vs-resource vs {})))
+           vs-meta-by-key (reduce-kv (fn [m k vs] (assoc m k (protos/vs-resource vs (key->params k))))
                                      {} (:valuesets with-supps))]
        (->TerminologyService
          (:codesystems with-supps)

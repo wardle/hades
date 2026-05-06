@@ -87,6 +87,82 @@
     (testing "implicit VS for a CodeSystem is cached too"
       (is (some? (composite/vs-meta svc "http://example.com/r/cs"))))))
 
+;; ---------------------------------------------------------------------------
+;; Multi-resource provider — regression for the cache-build bug where
+;; `cs-meta-by-key` was populated by calling `(cs-resource impl {})`
+;; with empty params. Single-resource impls (in-memory CS, Hermes)
+;; ignore params and so worked by accident; multi-resource impls
+;; (SQLite catalogues serving thousands of CSs through one impl)
+;; dispatch on `:url` and silently returned nil for every registered
+;; key — leaving `composite/cs-meta` to return nil, which in turn
+;; suppressed status warnings on `$validate-code` / `$expand` against
+;; any SQLite-backed CodeSystem. The cache is now built by parsing
+;; each registration key into `{:url :system :version}`; the live-call
+;; fallback in `cs-meta` / `vs-meta` does the same.
+;; ---------------------------------------------------------------------------
+
+(defn- multi-cs-provider
+  "Mock provider that serves multiple CodeSystems through one impl —
+  mirrors `SqliteCodeSystemCatalogue/cs-resource` (sqlite/provider.clj),
+  which dispatches on `(:url params)`. Returns nil from `cs-resource`
+  unless the call carries a `:url` matching one of the configured
+  entries. Empty params → nil, which is exactly the failure mode the
+  bug-fixed cache build now avoids."
+  [entries]
+  (let [by-url (into {} (map (juxt :url identity)) entries)]
+    (reify protos/CodeSystem
+      (cs-metadata [_]
+        (mapv (fn [{:keys [url version]}]
+                (cond-> {:url url}
+                  (some? version) (assoc :version version)))
+              entries))
+      (cs-resource [_ {:keys [url]}]
+        (when-let [m (get by-url url)]
+          (select-keys m [:url :version :name :title :status :description]))))))
+
+(defn- multi-vs-provider
+  "Mock provider that serves multiple ValueSets through one impl —
+  mirrors `SqliteValueSetCatalogue/vs-resource`."
+  [entries]
+  (let [by-url (into {} (map (juxt :url identity)) entries)]
+    (reify protos/ValueSet
+      (vs-metadata [_]
+        (mapv (fn [{:keys [url version]}]
+                (cond-> {:url url}
+                  (some? version) (assoc :version version)))
+              entries))
+      (vs-resource [_ {:keys [url]}]
+        (when-let [m (get by-url url)]
+          (select-keys m [:url :version :name :title :status :description]))))))
+
+(deftest cs-meta-by-key-built-with-url-params
+  (testing "cs-meta-by-key is populated for every registration of a
+            multi-resource provider — without the fix, every value is
+            nil and `cs-meta` returns nil for any registered URL"
+    (let [entries [{:url "http://x/cs/a" :version "1.0" :status "active"
+                    :name "Aye"}
+                   {:url "http://x/cs/b" :version "1.0" :status "draft"
+                    :name "Bee"}
+                   {:url "http://x/cs/c" :version "1.0" :status "retired"
+                    :name "Cee"}]
+          svc     (composite/from-providers [(multi-cs-provider entries)])]
+      (is (= "active"  (:status (composite/cs-meta svc "http://x/cs/a"))))
+      (is (= "draft"   (:status (composite/cs-meta svc "http://x/cs/b"))))
+      (is (= "retired" (:status (composite/cs-meta svc "http://x/cs/c"))))
+      (testing "versioned-key lookup also resolves"
+        (is (= "active" (:status (composite/cs-meta svc "http://x/cs/a|1.0"))))))))
+
+(deftest vs-meta-by-key-built-with-url-params
+  (testing "vs-meta-by-key is populated for every registration of a
+            multi-resource provider"
+    (let [entries [{:url "http://x/vs/p" :version "1.0" :status "active"
+                    :name "Pee"}
+                   {:url "http://x/vs/q" :version "1.0" :status "draft"
+                    :name "Queue"}]
+          svc     (composite/from-providers [(multi-vs-provider entries)])]
+      (is (= "active" (:status (composite/vs-meta svc "http://x/vs/p"))))
+      (is (= "draft"  (:status (composite/vs-meta svc "http://x/vs/q")))))))
+
 (deftest cs-meta-honours-naming-system-aliases-test
   (let [base (svc-of [cs-v1])
         resolver (fn [id]
