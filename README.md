@@ -26,6 +26,8 @@ Hades is lightweight, self-contained, and runs pretty much anywhere.
 The same binary serves an analyst exploring concepts on a laptop, a single instance
 backing a clinical service, or a horizontally scaled fleet of servers. 
 There are no external dependencies — no Postgres, no Elasticsearch — and rolling out a new terminology release is a single command.
+ 
+Despite running in a single self-contained JVM, Hades matches or outperforms the leading commercial terminology servers on most operations on a fraction of the resources — often by an order of magnitude on expansion. See benchmarks for methodology and per-operation results.
 
 Capabilities:
 
