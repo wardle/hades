@@ -15,7 +15,7 @@
 (def ^:dynamic *server* nil)
 
 (defn server-fixture [f]
-  (let [svc (hades/open [(fixtures/assert-snomed-db!)])
+  (let [svc (hades/open [fixtures/snomed-db-path])
         srv (fixtures/start-server svc)]
     (binding [*svc* svc *server* srv]
       (try (f)

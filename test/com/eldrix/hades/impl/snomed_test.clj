@@ -186,7 +186,7 @@
 (def ^:dynamic *svc* nil)
 
 (defn- live-fixture [f]
-  (let [svc (hermes/open (fixtures/assert-snomed-db!))]
+  (let [svc (hermes/open fixtures/snomed-db-path)]
     (binding [*svc* svc]
       (try (f) (finally (hermes/close svc))))))
 

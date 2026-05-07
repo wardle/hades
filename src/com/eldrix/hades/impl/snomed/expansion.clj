@@ -321,7 +321,7 @@
            '[com.eldrix.hades.fixtures :as fixtures]
            '[criterium.core :as crit])
 
-  (def svc (hermes/open (fixtures/assert-snomed-db!)))
+  (def svc (hermes/open fixtures/snomed-db-path))
 
   (def asthma            195967001)
   (def clinical-finding  404684003)

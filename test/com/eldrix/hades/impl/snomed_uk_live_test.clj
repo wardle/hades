@@ -18,7 +18,7 @@
 
 (deftest ^:live uk-monolith-routes-bare-and-module-versions
   (testing "real UK Monolith Hermes DB has multiple modules and one provider route"
-    (let [db-path (fixtures/assert-snomed-uk-db!)]
+    (let [db-path fixtures/snomed-uk-db-path]
       (with-open [hermes-svc (hermes/open db-path)]
         (let [releases (vec (hermes/release-information hermes-svc))]
           (is (>= (count releases) 2)
@@ -56,8 +56,8 @@
 
 (deftest ^:live separate-snomed-providers-require-default-but-keep-exact-versions
   (testing "International and UK Monolith as separate providers"
-    (with-open [intl-hermes (hermes/open (fixtures/assert-snomed-db!))
-                uk-hermes (hermes/open (fixtures/assert-snomed-uk-db!))]
+    (with-open [intl-hermes (hermes/open fixtures/snomed-db-path)
+                uk-hermes (hermes/open fixtures/snomed-uk-db-path)]
       (let [intl-provider (snomed/->HermesService intl-hermes)
             uk-provider (snomed/->HermesService uk-hermes)
             intl-version (module-version-uri (first (hermes/release-information intl-hermes)))

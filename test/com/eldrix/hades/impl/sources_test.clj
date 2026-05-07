@@ -274,7 +274,6 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest ^:live recognises-real-hermes-db
-  (fixtures/assert-snomed-db!)
   (let [files   (sources/tx-file-seq fixtures/snomed-db-path)
         entries (entries-by-kind files :hermes-db)]
     (is (= 1 (count entries))

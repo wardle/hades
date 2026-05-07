@@ -107,8 +107,7 @@
   (when @state
     (throw (ex-info "Server already running. Call (stop!) first." {})))
   (ensure-test-data!)
-  (let [snomed-path (or snomed (fixtures/assert-snomed-db!))
-        _ (fixtures/assert-loinc-db!)
+  (let [snomed-path (or snomed fixtures/snomed-db-path)
         svc (hades/open [snomed-path fixtures/loinc-db-path])
         {:keys [server url] :as srv}
         (fixtures/start-server svc (cond-> {:max-expansion-size 1000}

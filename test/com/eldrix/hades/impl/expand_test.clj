@@ -126,7 +126,7 @@
 (def ^:dynamic *svc* nil)
 
 (defn- svc-fixture [f]
-  (let [svc (hades/open [(fixtures/assert-snomed-db!)])]
+  (let [svc (hades/open [fixtures/snomed-db-path])]
     (binding [*svc* svc]
       (try (f) (finally (hades/close svc))))))
 

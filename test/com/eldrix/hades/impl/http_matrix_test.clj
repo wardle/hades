@@ -544,18 +544,12 @@
              (hades/close svc))))))
 
 (defn- in-memory-fixture [f]
-  (fixtures/assert-snomed-db!)
-  (fixtures/assert-loinc-db!)
-  (fixtures/assert-fhir-packages!)
   (with-server [fixtures/snomed-db-path
                 fixtures/loinc-db-path
                 fixtures/fhir-packages-dir]
     f))
 
 (defn- sqlite-fixture [f]
-  (fixtures/assert-snomed-db!)
-  (fixtures/assert-loinc-db!)
-  (fixtures/assert-fhir-packages!)
   (with-server [fixtures/snomed-db-path
                 fixtures/loinc-db-path
                 fixtures/fhir-smoke-db-path]

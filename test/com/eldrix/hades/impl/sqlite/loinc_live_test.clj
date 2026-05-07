@@ -1,7 +1,6 @@
 (ns com.eldrix.hades.impl.sqlite.loinc-live-test
   "Live integration tests against the pinned LOINC SQLite container.
-  Tagged `^:live`; provisioning hint comes from `fixtures/assert-loinc-db!`
-  if the DB is missing. Exercises the SQLite provider end-to-end:
+  Tagged `^:live`. Exercises the SQLite provider end-to-end:
   catalogue load, point queries (lookup / validate-code), text search
   (find-matches), and registry dispatch."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
@@ -26,11 +25,11 @@
   ;; for the OID resolver test. The application file ships without
   ;; NamingSystem entries by default.
   (let [{:keys [datasource codesystem valueset conceptmap]}
-        (sqlite-provider/open-providers (fixtures/assert-loinc-db!))]
+        (sqlite-provider/open-providers fixtures/loinc-db-path)]
     (db/add-naming-system! datasource
       {:url loinc-url :name "LOINC" :status "active" :kind "codesystem"
        :id-type "oid" :value "2.16.840.1.113883.6.1" :preferred true})
-    (let [{:keys [naming-system]} (sqlite-provider/open-providers (fixtures/assert-loinc-db!))
+    (let [{:keys [naming-system]} (sqlite-provider/open-providers fixtures/loinc-db-path)
           svc (composite/from-providers (filterv some? [codesystem valueset conceptmap])
                           (cond-> {:closers [#(db/close! datasource)]}
                             naming-system (assoc :naming-systems [naming-system])))]
