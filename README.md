@@ -1,6 +1,6 @@
 # Hades — a HL7 FHIR terminology server
 
-[![Conformance](https://img.shields.io/badge/conformance-490%2F603%20(81.3%25)-blue)](https://github.com/HL7/fhir-tx-ecosystem-ig)
+[![Conformance](https://img.shields.io/badge/conformance-491%2F603%20(81.4%25)-blue)](https://github.com/HL7/fhir-tx-ecosystem-ig)
 
 Hades is an open-source HL7 FHIR terminology server. It serves `CodeSystem`,
 `ValueSet` and `ConceptMap` operations — `$lookup`, `$validate-code`,
@@ -487,6 +487,12 @@ predating its current development. That version used the HAPI Java
 library but current Hades is HAPI-free. We've [contributed an updated
 container](https://github.com/HealthSamurai/tx-benchmark/pull/1) and
 await a refreshed round.
+
+# Development
+
+Setting up a hades dev environment, provisioning test fixtures, and
+running the test / conformance / benchmark suites is documented in
+[`doc/development.md`](doc/development.md).
 
 # Roadmap
 
