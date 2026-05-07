@@ -279,7 +279,23 @@
              "  hades serve snomed.db loinc.db packages/hl7.fhir.r4.core/package"])
     :opts [(option :metadata-out)
            (option :port) (option :bind-address) (option :locale)
-           (option :default) (option :help)]}])
+           (option :default) (option :help)]}
+   {:cmd  "mcp" :usage "mcp <paths...>"
+    :args {:min 1 :hint "<paths...>"}
+    :desc "Start the MCP (Model Context Protocol) server over stdio."
+    :long (str/join \newline
+            ["Start a Model Context Protocol server over stdio. Exposes Hades'"
+             "FHIR terminology operations as MCP tools to any compliant host"
+             "(Claude Desktop, Claude Code, Cursor). Each positional path is a"
+             "source — kind is auto-detected, identical to `serve`."
+             ""
+             "Use --default URL=VERSION when multiple providers serve the same"
+             "bare CodeSystem or ValueSet URL."
+             ""
+             "Examples:"
+             "  hades mcp snomed.db"
+             "  hades mcp snomed.db loinc.db packages/hl7.fhir.r4.core/package"])
+    :opts [(option :locale) (option :default) (option :help)]}])
 
 (def commands
   (reduce (fn [acc {:keys [cmd] :as v}] (assoc acc cmd v)) {} commands*))
