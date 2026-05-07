@@ -285,6 +285,21 @@
                               "application/fhir+json; charset=utf-8"))
                 context)))})
 
+(defn- issue->status
+  "Map a FHIR `OperationOutcome.issue.type` to an HTTP status. Used
+  when a handler completes normally but the result carries an
+  error-severity issue. Mirrors `exception-response`'s keyword-keyed
+  mapping so a typed failure surfaced via the result map and the same
+  failure raised as `ex-info` produce the same status."
+  [issue]
+  (case (:type issue)
+    "not-found"     404
+    "not-supported" 501
+    "processing"    422
+    "invalid"       422
+    "exception"     500
+    422))
+
 (defn- exception-response
   [^Throwable ex]
   (let [data   (when (instance? clojure.lang.ExceptionInfo ex) (ex-data ex))
@@ -592,7 +607,7 @@
                         :text (str "A definition for the value Set '" url "' could not be found")}])}
 
             error-issue
-            {:status 404 :body (wire/operation-outcome (:issues result))}
+            {:status (issue->status error-issue) :body (wire/operation-outcome (:issues result))}
 
             (and max-size (nil? count-value) (> (or (:total result) 0) max-size))
             {:status 422
