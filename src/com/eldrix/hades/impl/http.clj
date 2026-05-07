@@ -265,12 +265,12 @@
   {:name  ::log-request
    :enter (fn [ctx] (assoc ctx ::start (System/nanoTime)))
    :leave (fn [{:keys [request response] ::keys [start] :as ctx}]
-            (log/info "request"
-                      {:method (-> request :request-method name)
-                       :uri    (:uri request)
-                       :ip     (:remote-addr request)
-                       :status (:status response)
-                       :ms     (long (/ (- (System/nanoTime) start) 1e6))})
+            (log/trace "request"
+                       {:method (-> request :request-method name)
+                        :uri    (:uri request)
+                        :ip     (:remote-addr request)
+                        :status (:status response)
+                        :ms     (long (/ (- (System/nanoTime) start) 1e6))})
             ctx)})
 
 (def content-negotiation
@@ -765,9 +765,9 @@
 
 (defn- parse-search-params [multimap]
   (reduce-kv
-    (fn [acc k vals] (parse-search-entry acc k (first vals)))
-    {:params {} :unknown [] :errors []}
-    multimap))
+   (fn [acc k vals] (parse-search-entry acc k (first vals)))
+   {:params {} :unknown [] :errors []}
+   multimap))
 
 (defn- prefer-strict? [request]
   (when-let [hdr (get-in request [:headers "prefer"])]
@@ -802,19 +802,19 @@
       (and (seq unknown) (prefer-strict? request))
       {:status 400
        :body   (wire/operation-outcome
-                 (mapv (fn [k]
-                         {:severity "error" :type "not-supported"
-                          :details-code "MSG_PARAM_UNKNOWN"
-                          :text (str "Unknown search parameter '" k "'")})
-                       unknown))}
+                (mapv (fn [k]
+                        {:severity "error" :type "not-supported"
+                         :details-code "MSG_PARAM_UNKNOWN"
+                         :text (str "Unknown search parameter '" k "'")})
+                      unknown))}
 
       :else
       {:status 200
        :body   (wire/search-bundle
-                 (search-fn svc (apply-defaults params resource-type))
-                 {:type          resource-type
-                  :self-link     (request-self-link request)
-                  :resource->map resource->map})})))
+                (search-fn svc (apply-defaults params resource-type))
+                {:type          resource-type
+                 :self-link     (request-self-link request)
+                 :resource->map resource->map})})))
 
 (defn- cs-search [request]
   (search-response request "CodeSystem"
