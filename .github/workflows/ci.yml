@@ -542,6 +542,11 @@ jobs:
       - name: Preflight
         working-directory: tx-benchmark
         run: |
+          # k6's handleSummary() writes results/${RUN_ID}/${SERVER_NAME}/preflight.json
+          # but won't create the parent directories itself. The full
+          # `scripts/run.ts` in tx-benchmark mkdir's first; we invoke k6
+          # directly, so do it here.
+          mkdir -p results/ci/hades
           k6 run \
             --env BASE_URL=http://localhost:8080/fhir \
             --env SERVER_NAME=hades \
