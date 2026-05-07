@@ -55,14 +55,83 @@
                          (fhir-extract/flatten-concepts (get cs-map "concept")))]
     (cons meta-entry concepts)))
 
+(defn- flatten-contains
+  "Recursively flatten an `expansion.contains` array. FHIR allows
+  hierarchical contains (parent → child); compose is flat. Drop the
+  inner `contains` field on emitted entries."
+  [contains]
+  (mapcat (fn [c]
+            (cons (dissoc c "contains")
+                  (flatten-contains (get c "contains" []))))
+          contains))
+
+(defn- dedupe-by
+  "Keep the first occurrence of each (keyfn x), preserving source order."
+  [keyfn xs]
+  (:out (reduce (fn [{:keys [seen out]} x]
+                  (let [k (keyfn x)]
+                    (if (contains? seen k)
+                      {:seen seen :out out}
+                      {:seen (conj seen k) :out (conj out x)})))
+                {:seen #{} :out []}
+                xs)))
+
+(defn- contains->concept
+  "Translate a flattened `expansion.contains` entry to a compose
+  `include.concept` entry. `abstract`/`inactive` per-entry flags are
+  dropped — they are sourced from the CodeSystem at expand time."
+  [c]
+  (cond-> {"code" (get c "code")}
+    (get c "display")     (assoc "display"     (get c "display"))
+    (get c "designation") (assoc "designation" (get c "designation"))))
+
+(defn- synthesise-compose
+  "Translate a baked `expansion` map into an equivalent `compose` map.
+  Groups contains entries by (system, version) and emits one `include`
+  per group. Returns nil when no entries are translatable.
+
+  Lossy on:
+    - hierarchical `contains` (flattened — caller can re-derive via
+      $expand `excludeNested=false` if a CodeSystem is loaded)
+    - header-only entries (no system+code) — dropped
+    - `abstract`/`inactive` per-entry flags — dropped (re-derived from
+      the CodeSystem at expand time)
+    - `valueSet`-only entries — dropped (rare in practice)"
+  [expansion]
+  (let [contains (flatten-contains (get expansion "contains" []))
+        members  (->> contains
+                      (filter #(and (get % "system") (get % "code")))
+                      (dedupe-by (juxt #(get % "system")
+                                       #(get % "version")
+                                       #(get % "code"))))
+        by-key   (group-by (juxt #(get % "system") #(get % "version")) members)]
+    (when (seq by-key)
+      {"include"
+       (mapv (fn [[[system version] group-members]]
+               (cond-> {"system" system}
+                 version (assoc "version" version)
+                 (seq group-members)
+                 (assoc "concept" (mapv contains->concept group-members))))
+             by-key)})))
+
 (defn- vs-resource->fhir-data [vs-map source-path]
-  [(cond-> {:type :valueset
-            :url      (get vs-map "url")
-            :metadata (fhir-extract/vs-passthrough-metadata vs-map)
-            :source-path source-path}
-     (get vs-map "version")   (assoc :version   (get vs-map "version"))
-     (get vs-map "compose")   (assoc :compose   (get vs-map "compose"))
-     (get vs-map "expansion") (assoc :expansion (get vs-map "expansion")))])
+  (let [authored-compose (get vs-map "compose")
+        expansion        (get vs-map "expansion")
+        ;; A baked `expansion` with no `compose` is structurally
+        ;; equivalent to a compose listing the same codes explicitly.
+        ;; Synthesise so the rest of Hades treats it uniformly: the
+        ;; compose engine consults registered CodeSystem providers when
+        ;; available (refreshing displays, hierarchy, inactive flags)
+        ;; and falls back to provided displays when no provider serves
+        ;; the system.
+        compose          (or authored-compose
+                             (when expansion (synthesise-compose expansion)))]
+    [(cond-> {:type :valueset
+              :url         (get vs-map "url")
+              :metadata    (fhir-extract/vs-passthrough-metadata vs-map)
+              :source-path source-path}
+       (get vs-map "version") (assoc :version (get vs-map "version"))
+       compose                (assoc :compose compose))]))
 
 (defn- cm-group->fhir-data [g]
   (cond-> {:source         (get g "source")

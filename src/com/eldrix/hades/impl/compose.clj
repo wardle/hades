@@ -66,7 +66,10 @@
                               (protos/cs-lookup svc (cond-> {:system system :code code}
                                                       version (assoc :version version))))
                   looked-up (when-not (:not-found raw) raw)]
-              (when (or looked-up (nil? system))
+              ;; `include.concept` lists explicit codes that are by FHIR
+              ;; semantics part of the value set: emit them even when no
+              ;; provider serves the system, using the provided display.
+              (when (or looked-up (nil? system) provided-display)
                 (let [display-langs (display/parse-display-language (:displayLanguage params))
                       lang-display (when (and (seq display-langs) looked-up)
                                      (display/find-display-for-language (:designations looked-up) display-langs))
@@ -170,6 +173,11 @@
                bad-filter-issue      (conj bad-filter-issue)
                (seq match-issues)    (into match-issues))
      :total (:total match-result)
+     ;; True when this include's concepts are fully materialised — no
+     ;; truncation by `:count` is possible. Concept-driven includes
+     ;; ignore `max-hits`; vs-refs recurse with the same params and may
+     ;; paginate, so we conservatively flag those as unsafe.
+     :fully-materialised? (and (some? concepts) (empty? vs-urls))
      :concepts (if (and (some? system-results) (seq vs-concepts))
                  (let [vs-set (set (map concept-key vs-concepts))]
                    (filter (fn [c] (contains? vs-set (concept-key c))) system-results))
@@ -253,24 +261,44 @@
                         (remove (fn [[k _]] (contains? excluded k)) included)
                         included)
         merged-concepts (map second after-exclude)
-        used-cs (collect-used-codesystems svc compose merged-concepts)
+        ;; `expand-include-concepts` returns explicit-concept lists
+        ;; verbatim (it has no FTS to consult). Apply the filter text
+        ;; here so concept-driven includes honour `$expand`'s `filter`
+        ;; param. Match-driven includes pre-filter via `cs-find-matches`,
+        ;; so this post-filter is a no-op for them.
+        filter-text (:text params)
+        filtered (if filter-text
+                   (let [needle (str/lower-case filter-text)]
+                     (filter (fn [c]
+                               (when-let [d (:display c)]
+                                 (str/includes? (str/lower-case d) needle)))
+                             merged-concepts))
+                   merged-concepts)
+        used-cs (collect-used-codesystems svc compose filtered)
         sys->versions (reduce (fn [acc c]
                                 (if-let [sys (:system c)]
                                   (update acc sys (fnil conj #{}) (:version c))
                                   acc))
-                              {} merged-concepts)
+                              {} filtered)
         multi-version (into #{} (keep (fn [[sys vers]]
                                         (when (> (count vers) 1) sys)))
                             sys->versions)
         offset' (or (:offset params) 0)
-        paged (cond->> merged-concepts
+        paged (cond->> filtered
                 (pos? offset')  (drop offset')
                 (:count params) (take (:count params)))
         singleton-total (when (and (= 1 (count include-results)) (empty? excludes))
                           (:total (first include-results)))
+        ;; Counting `filtered` is only safe when no include can have
+        ;; been silently truncated by `:count`. That holds for include
+        ;; results explicitly flagged fully-materialised (concept-driven
+        ;; with no vs-refs) and when no paging is in effect.
+        all-materialised? (every? :fully-materialised? include-results)
         total (cond
-                singleton-total        singleton-total
-                (nil? (:count params)) (count merged-concepts))]
+                singleton-total                        singleton-total
+                (or all-materialised?
+                    (nil? (:count params)))            (count filtered)
+                :else                                  nil)]
     (cond-> {:concepts              (vec paged)
              :used-codesystems      used-cs
              :compose-pins          (extract-compose-pins compose)

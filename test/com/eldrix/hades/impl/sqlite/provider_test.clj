@@ -1,7 +1,9 @@
 (ns com.eldrix.hades.impl.sqlite.provider-test
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
+            [com.eldrix.hades.impl.composite :as composite]
             [com.eldrix.hades.impl.index.sqlite :as sqlite-index]
+            [com.eldrix.hades.impl.loaders.fhir :as loaders-fhir]
             [com.eldrix.hades.impl.loaders.loinc :as loinc]
             [com.eldrix.hades.impl.protocols :as protos]
             [com.eldrix.hades.impl.sqlite.provider :as sqlite-provider])
@@ -375,3 +377,112 @@
             (is (= (str "v=" expected) (:display r))
                 "the returned version's content must match"))
           (finally (delete-quietly path)))))))
+
+;; ---------------------------------------------------------------------------
+;; Expansion-only ValueSet — round-tripped through the SQLite indexer.
+;;
+;; Parity contract with the in-memory provider: when an ingested
+;; ValueSet has a baked `:expansion` and no `:compose`, both providers
+;; must serve the baked entries from `vs-expand`. Today the SQLite
+;; indexer drops `:expansion` entirely (no column in the schema) and
+;; the provider falls through to `compose/expand-compose` with a nil
+;; compose definition.
+;; ---------------------------------------------------------------------------
+
+(def ^:private baked-vs-fhir-map
+  ;; Mirrors `in_memory_test/baked-vs-map`: same shape on both sides so
+  ;; the parity contract is testable against identical input. Routed
+  ;; through `loaders-fhir/resource->fhir-data` here so the full
+  ;; loader → indexer → SQLite → provider pipeline is exercised.
+  {"resourceType" "ValueSet"
+   "url"          "http://example.com/baked-vs"
+   "version"      "1.0"
+   "name"         "BakedVS"
+   "status"       "active"
+   "expansion"    {"identifier" "urn:uuid:test-baked"
+                   "timestamp"  "2026-01-01T00:00:00Z"
+                   "total"      5
+                   "contains"   [{"system"  "http://example.com/external-cs"
+                                  "code"    "alpha"
+                                  "display" "Alpha"}
+                                 {"system"  "http://example.com/external-cs"
+                                  "code"    "bravo"
+                                  "display" "Bravo"}
+                                 {"system"  "http://example.com/external-cs"
+                                  "code"    "charlie"
+                                  "display" "Charlie"}
+                                 {"system"  "http://example.com/external-cs"
+                                  "code"    "delta"
+                                  "display" "Delta"}
+                                 {"system"  "http://example.com/external-cs"
+                                  "code"    "echo"
+                                  "display" "Echo"}]}})
+
+(defn- build-baked-vs-db [path]
+  (sqlite-index/build! path
+    (loaders-fhir/resource->fhir-data baked-vs-fhir-map :tx-resource)
+    {:loader-type "synthetic-baked"})
+  (sqlite-index/index! path))
+
+(deftest expansion-only-vs-survives-sqlite-roundtrip
+  (testing "synthesised compose for an expansion-only ValueSet survives SQLite round-trip"
+    (let [path (new-temp-path)]
+      (try
+        (build-baked-vs-db path)
+        (let [{:keys [valueset]} (sqlite-provider/open-providers path)
+              r (protos/vs-resource valueset {:url "http://example.com/baked-vs"
+                                              :version "1.0"})
+              compose (:compose r)
+              include (first (get compose "include"))]
+          (is (some? compose) "synthesised compose is persisted via the existing compose column")
+          (is (= 1 (count (get compose "include"))))
+          (is (= "http://example.com/external-cs" (get include "system")))
+          (is (= 5 (count (get include "concept")))))
+        (finally (delete-quietly path))))))
+
+(deftest expansion-only-vs-expand-via-sqlite
+  (testing "vs-expand returns baked entries from a SQLite-backed ValueSet"
+    (let [path (new-temp-path)]
+      (try
+        (build-baked-vs-db path)
+        (let [{:keys [valueset]} (sqlite-provider/open-providers path)
+              svc (composite/from-providers [valueset])
+              {:keys [concepts total]}
+              (protos/vs-expand valueset svc {:url "http://example.com/baked-vs"
+                                              :version "1.0"})]
+          (is (= 5 (count concepts)))
+          (is (= 5 total))
+          (is (= #{"alpha" "bravo" "charlie" "delta" "echo"}
+                 (set (map :code concepts))))
+          (is (every? #(= "http://example.com/external-cs" (:system %)) concepts)))
+        (finally (delete-quietly path))))))
+
+(deftest expansion-only-vs-offset-count-via-sqlite
+  (testing "offset/count slice of baked expansion (parity with in-memory)"
+    (let [path (new-temp-path)]
+      (try
+        (build-baked-vs-db path)
+        (let [{:keys [valueset]} (sqlite-provider/open-providers path)
+              svc (composite/from-providers [valueset])
+              {:keys [concepts total]}
+              (protos/vs-expand valueset svc {:url "http://example.com/baked-vs"
+                                              :version "1.0"
+                                              :offset 1 :count 2})]
+          (is (= 2 (count concepts)))
+          (is (= 5 total))
+          (is (= ["bravo" "charlie"] (mapv :code concepts))))
+        (finally (delete-quietly path))))))
+
+(deftest expansion-only-vs-filter-via-sqlite
+  (testing "filter narrows baked expansion (parity with in-memory)"
+    (let [path (new-temp-path)]
+      (try
+        (build-baked-vs-db path)
+        (let [{:keys [valueset]} (sqlite-provider/open-providers path)
+              svc (composite/from-providers [valueset])
+              {:keys [concepts]}
+              (protos/vs-expand valueset svc {:url "http://example.com/baked-vs"
+                                              :version "1.0"
+                                              :filter "alp"})]
+          (is (= ["alpha"] (mapv :code concepts))))
+        (finally (delete-quietly path))))))

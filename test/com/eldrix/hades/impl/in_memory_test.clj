@@ -473,3 +473,95 @@
 
     (testing "cs-subsumes: pass-through to base"
       (is (= "equivalent" (:outcome (protos/cs-subsumes wrapped {:codeA "A" :codeB "A"})))))))
+
+;; ---------------------------------------------------------------------------
+;; Expansion-only ValueSet — `compose` absent, `expansion.contains` baked.
+;;
+;; Many published FHIR packages (IPS, US Core, IG-shipped terminology
+;; bundles) ship ValueSets whose only definition is a pre-computed
+;; expansion — typically because the source terminology (SNOMED, LOINC)
+;; is too large or unstable to express via compose rules. The loader
+;; preserves `:expansion` on the fhir-data entry; both in-memory and
+;; SQLite providers must serve those baked entries from `vs-expand`,
+;; otherwise such ValueSets are silently empty after import.
+;;
+;; The CodeSystem referenced by the baked entries is intentionally NOT
+;; in the service — these tests assert that the expansion is served
+;; *without* needing the upstream CodeSystem registered.
+;; ---------------------------------------------------------------------------
+
+(def baked-vs-map
+  {"resourceType" "ValueSet"
+   "url"          "http://example.com/baked-vs"
+   "version"      "1.0"
+   "name"         "BakedVS"
+   "status"       "active"
+   "expansion"    {"identifier" "urn:uuid:test-baked"
+                   "timestamp"  "2026-01-01T00:00:00Z"
+                   "total"      5
+                   "contains"   [{"system"  "http://example.com/external-cs"
+                                  "code"    "alpha"
+                                  "display" "Alpha"}
+                                 {"system"  "http://example.com/external-cs"
+                                  "code"    "bravo"
+                                  "display" "Bravo"}
+                                 {"system"  "http://example.com/external-cs"
+                                  "code"    "charlie"
+                                  "display" "Charlie"}
+                                 {"system"  "http://example.com/external-cs"
+                                  "code"    "delta"
+                                  "display" "Delta"}
+                                 {"system"  "http://example.com/external-cs"
+                                  "code"    "echo"
+                                  "display" "Echo"}]}})
+
+(deftest expansion-only-vs-resource-test
+  (testing "vs-resource exposes a synthesised compose for an expansion-only ValueSet"
+    (let [vs (load-fhir/from-fhir baked-vs-map)
+          r  (protos/vs-resource vs {})]
+      (is (= "http://example.com/baked-vs" (:url r)))
+      (is (= "1.0" (:version r)))
+      (let [compose (:compose r)
+            include (first (get compose "include"))]
+        (is (some? compose)
+            "loader synthesises compose so vs-resource has a definition to return")
+        (is (= 1 (count (get compose "include")))
+            "all baked entries share one (system, version) so one include suffices")
+        (is (= "http://example.com/external-cs" (get include "system")))
+        (is (= 5 (count (get include "concept"))))))))
+
+(deftest expansion-only-vs-expand-test
+  (testing "vs-expand serves baked entries from an expansion-only ValueSet, with no CodeSystem in the service"
+    (let [vs  (load-fhir/from-fhir baked-vs-map)
+          svc (composite/from-providers [vs])
+          {:keys [concepts total]} (protos/vs-expand vs svc {:url "http://example.com/baked-vs"})]
+      (is (= 5 (count concepts)))
+      (is (= 5 total))
+      (is (= #{"alpha" "bravo" "charlie" "delta" "echo"}
+             (set (map :code concepts))))
+      (is (every? #(= "http://example.com/external-cs" (:system %)) concepts))
+      (testing "displays carried through"
+        (let [by-code (into {} (map (juxt :code :display)) concepts)]
+          (is (= "Alpha" (get by-code "alpha")))
+          (is (= "Echo"  (get by-code "echo"))))))))
+
+(deftest expansion-only-vs-offset-count-test
+  (testing "offset/count slice baked expansion deterministically"
+    (let [vs  (load-fhir/from-fhir baked-vs-map)
+          svc (composite/from-providers [vs])
+          {:keys [concepts total]}
+          (protos/vs-expand vs svc {:url "http://example.com/baked-vs"
+                                    :offset 1 :count 2})]
+      (is (= 2 (count concepts)))
+      (is (= 5 total) "total reflects pre-paging size of baked expansion")
+      (is (= ["bravo" "charlie"] (mapv :code concepts))))))
+
+(deftest expansion-only-vs-filter-test
+  (testing "filter narrows baked expansion to displays matching the term"
+    (let [vs  (load-fhir/from-fhir baked-vs-map)
+          svc (composite/from-providers [vs])
+          {:keys [concepts]}
+          (protos/vs-expand vs svc {:url "http://example.com/baked-vs"
+                                    :filter "alp"})]
+      (is (= ["alpha"] (mapv :code concepts))
+          "filter must restrict baked entries to those whose display contains the term"))))

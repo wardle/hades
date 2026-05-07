@@ -350,6 +350,24 @@ not an error. The `params_hash` key is implementation-defined; it
 are reproducible. Writers **MUST NOT** rely on cache rows being
 present.
 
+#### Baked expansions in source resources
+
+A FHIR ValueSet may carry a baked `expansion.contains` block instead
+of (or in addition to) `compose`. FTRM stores only `compose`, so
+writers ingesting an expansion-only resource **MUST** synthesise an
+equivalent `compose` from the baked entries: group `contains` by
+`(system, version)` and emit one `include` per group with the
+explicit codes as `concept` entries (preserving `display` and
+`designation` where present). This translation is faithful for the
+common case (`{system, code, display}`); writers **MAY** drop fields
+without a compose equivalent (per-entry `inactive`/`abstract`,
+hierarchical `contains` nesting) provided they document what they
+drop. This keeps the format vendor-neutral: readers consume
+`compose` uniformly regardless of how the source resource was
+authored, and the layered terminology service consults canonical
+CodeSystems at expand time so live displays/inactive-flags refresh
+the IG-shipped snapshot when a provider for the system is loaded.
+
 ### 5.5 ConceptMap
 
 ```sql

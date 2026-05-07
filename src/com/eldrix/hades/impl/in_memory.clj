@@ -511,11 +511,10 @@
        (:version vs-data) (assoc :version (:version vs-data)))])
 
   (vs-resource [_ _params]
-    (let [{:keys [url version metadata]} vs-data
+    (let [{:keys [url version metadata compose]} vs-data
           experimental (get metadata "experimental")
           standards    (fhir-extract/extract-standards-status metadata)
-          supplements  (fhir-extract/extract-vs-supplements metadata)
-          compose      (get metadata "compose")]
+          supplements  (fhir-extract/extract-vs-supplements metadata)]
       (cond-> {:url url}
         version             (assoc :version version)
         (get metadata "name")   (assoc :name (get metadata "name"))
