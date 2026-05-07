@@ -68,12 +68,17 @@ round-trip on the hot path — `$lookup`, `$validate-code` and
 `$subsumes` typically return in under a millisecond on a laptop. See
 [Benchmarks](#benchmarks) for per-operation numbers.
 
-On the roadmap (see [Roadmap](#roadmap)):
-
-- Resource read and search (`GET /fhir/CodeSystem/{id}`, etc.)
-- Health endpoints / tagged uberjar releases
-
 Hades requires Java 21 or above.
+
+## How is hades different to other terminology servers?
+
+* It is open-source - many are proprietary requiring commercial licensing
+* It is very fast, even on low-end Hardware
+* It provides a range of command-line tools to discover, inspect and install different terminologies
+* It 'installs' one or more SNOMED CT distributions into a specialised and highly optimised 'snomed' database
+* It provides an open specification of a generic SQLite-based container of FHIR terminology data: [FTRM](doc/ftrm.md)
+* It can install LOINC and HL7 FHIR terminologies (usually distributed as JSON via npm packages) into those containers
+* It can serve multiple SNOMED databases, multiple FTRM databases and on-disk JSON directly with high conformance to the FHIR terminology conformance suite
 
 # Quickstart
 
