@@ -2,21 +2,24 @@
 
 This log documents significant changes for each release.
 
-## [v2.0.161] - 2025-05-06 
+## Not yet released
 
 Headline: Hades is now a **multi-terminology** FHIR server. SNOMED CT,
 LOINC, and arbitrary FHIR NPM packages run side-by-side in one process,
 dispatched by canonical URL. v1.x served SNOMED only.
 
 Hades passes **490 / 603 (81.3%)** of the HL7 FHIR Terminology Ecosystem
-IG conformance tests against the pinned tx-ecosystem rev (`fb9078f6`) —
-13 more passes than v1.4.138 (477 / 603) against the same upstream
-fixture set.
+IG conformance tests against the pinned tx-ecosystem rev (`fb9078f6`). 
 
 The major version bump signals two things: the surface is broader (LOINC,
 FHIR packages, mixed sources on a single `serve`), and the CLI now takes
 **positional paths** for terminology sources rather than `--db` flags.
 v1.x command lines need to be reworked.
+
+### New: FTRM open specification for SQLite FHIR terminology containers
+
+* An open specification for single fine, re-usable, versioned FHIR terminology containers based on SQLite.
+* Hades can build FTRM files from LOINC and from FHIR terminology packages 
 
 ### New: LOINC support
 
@@ -31,7 +34,7 @@ v1.x command lines need to be reworked.
   `displayLanguage`, regex / equals / in property filters), `$subsumes`,
   `$translate` against LOINC's MapTo refset.
 * `import loinc.db /path/to/Loinc_2.81` — single command from release
-  archive to served database.
+  archive to an FTRM container ready to be served.
 
 ### New: FHIR NPM package support
 
@@ -39,7 +42,7 @@ v1.x command lines need to be reworked.
   --dist hl7.fhir.r4.core@4.0.1 --dist hl7.terminology.r4@7.0.1`
   resolves versions against the registry, downloads the tgz, extracts,
   and ingests CodeSystem / ValueSet / ConceptMap / NamingSystem /
-  CodeSystem-supplement resources into a SQLite container.
+  CodeSystem-supplement resources into a FTRM SQLite container.
 * **In-memory serving as an alternative.** Pass an extracted package
   directory directly to `serve` — Hades parses it on boot and serves
   from heap for sub-microsecond hashmap lookups. `--cache-dir` on
