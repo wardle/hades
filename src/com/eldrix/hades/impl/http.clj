@@ -69,9 +69,7 @@
                        (read-bounded in limit)))))
 
 ;; ---------------------------------------------------------------------------
-;; FHIR Parameters body parsing. Pure functions over the parsed shape
-;; (a vector of `{"name", "valueXxx", "resource"}` maps) live alongside
-;; so handlers read explicitly from `::fhir-params`.
+;; FHIR Parameter accessors
 ;; ---------------------------------------------------------------------------
 
 (def ^:private value-keys
@@ -150,11 +148,6 @@
     (nil? s)    nil
     (number? s) (int s)
     :else       (try (Integer/parseInt (str s)) (catch Exception _ nil))))
-
-;; ---------------------------------------------------------------------------
-;; tx-resource overlay support — build provider impls for inbound
-;; transient resources.
-;; ---------------------------------------------------------------------------
 
 (defn- build-overlay-providers
   "Build provider impls and supplement entries from a seq of FHIR JSON
@@ -287,21 +280,11 @@
                 (assoc context :response (exception-response ex)))))})
 
 (defn inject-svc
-  "Inject the configured service onto each request as ::svc. The
-  base service is shared across requests; per-request overlays derive
-  from it via `with-overlays`."
+  "Inject the configured service onto each request as `::svc`."
   [svc]
   {:name ::inject-svc
    :enter (fn [context]
             (assoc-in context [:request ::svc] svc))})
-
-;; ---------------------------------------------------------------------------
-;; FHIR Parameters normalisation. Operations accept the same parameters
-;; via either GET query string or POST `application/fhir+json` Parameters
-;; body. We coerce both into a single `::fhir-params` vector of FHIR
-;; Parameter entries — query entries first so `first`-style lookups
-;; honour GET-wins. Handlers read this single shape.
-;; ---------------------------------------------------------------------------
 
 (defn- fhir-json? [request]
   (when-let [ct (get-in request [:headers "content-type"])]
@@ -348,14 +331,6 @@
                   combined   (into from-query (or from-body []))]
               (assoc-in context [:request ::fhir-params] combined)))})
 
-;; ---------------------------------------------------------------------------
-;; tx-resource + inline-valueSet overlays. Reads `::fhir-params`,
-;; folds in any `tx-resource` providers and (for $expand) an inline
-;; `valueSet`, and replaces `::svc` with a derived service. Stores any
-;; synthetic overlay URL as `::overlay-url` so handlers can fall back to
-;; it when the request did not supply `url`.
-;; ---------------------------------------------------------------------------
-
 (defn- inline-valueset-overlay
   "When the request carries an inline `valueSet` parameter and no
   caller-supplied `url`, build a single-provider overlay for it. Returns
@@ -377,7 +352,7 @@
     - inline `valueSet` (POST `$expand` only) → single provider with a
       synthetic URL exposed as `::overlay-url`
 
-  Mounted per-route on every operation route. Reads `::fhir-params`."
+  Reads `::fhir-params`."
   {:name  ::tx-overlay
    :enter (fn [{:keys [request] :as context}]
             (let [fhir-params  (::fhir-params request)
@@ -395,14 +370,6 @@
 
                 (:overlay-url inline)
                 (assoc-in [:request ::overlay-url] (:overlay-url inline)))))})
-
-;; ---------------------------------------------------------------------------
-;; Operation flags. Some operation parameters affect cross-layer
-;; behaviour (`system-version`, `useSupplement`, `displayLanguage`, …).
-;; They flow as flat keys on the per-handler `params` map. This
-;; interceptor extracts them once from `::fhir-params`
-;; into `::flags` so handlers don't repeat the dual-source dance.
-;; ---------------------------------------------------------------------------
 
 (defn- collect-version-param [fhir-params nm]
   (let [values (fhir-param-all fhir-params nm)]
@@ -724,14 +691,6 @@
                                      "exact"    :exact
                                      "contains" :contains})
 
-;; Result-control defaults applied per server policy. An unfiltered
-;; `GET /ValueSet` against the smoke catalogues returns a 121 MB
-;; Bundle without any limits and 3.2 MB with `_summary=true`. Hence:
-;;   `_count` default 10 (FHIR convention), capped at 1000.
-;;   ValueSet search defaults `_summary=true` so unfiltered browse
-;;   ships the lighter shape; clients send `_summary=false` to opt
-;;   back into compose. CodeSystem search has no comparable shape
-;;   pressure (957 KB unfiltered) so we leave its default unchanged.
 (def ^:private default-count 10)
 (def ^:private max-count     1000)
 
@@ -793,9 +752,11 @@
 
 (defn- apply-defaults
   "Apply HTTP-layer defaults to parsed search params: clamp `_count`
-  on every search; default `_summary=true` for ValueSet so unfiltered
-  browse ships the lighter shape (3.2 MB vs 121 MB on the smoke
-  catalogue)."
+  (FHIR convention default 10, hard cap 1000); default `_summary=true`
+  for ValueSet so unfiltered browse ships the lighter shape (3.2 MB
+  with summary vs 121 MB without, on the smoke catalogue). CodeSystem
+  has no comparable shape pressure (957 KB unfiltered) so its default
+  is unchanged."
   [params resource-type]
   (cond-> (update params :_count resolve-count)
     (and (= "ValueSet" resource-type) (nil? (:_summary params)))
@@ -913,7 +874,7 @@
         op-base     [parse-params parse-fhir-params tx-overlay request-flags]
         cs-search-i [parse-params (parse-search-params "CodeSystem")]
         vs-search-i [parse-params (parse-search-params "ValueSet")]
-        expand-cap  (max-expansion max-expansion-size)]
+        max-expand  (max-expansion max-expansion-size)]
     #{["/fhir/metadata"                   :get  [parse-params metadata]                              :route-name ::metadata]
 
       ["/fhir/CodeSystem/$lookup"         :get  (conj op-base cs-lookup)                            :route-name ::cs-lookup-get]
@@ -928,8 +889,8 @@
       ["/fhir/ValueSet/$validate-code"    :get  (conj op-base vs-validate-code)                     :route-name ::vs-validate-get]
       ["/fhir/ValueSet/$validate-code"    :post (conj op-base vs-validate-code)                     :route-name ::vs-validate-post]
 
-      ["/fhir/ValueSet/$expand"           :get  (conj op-base expand-cap vs-expand)                 :route-name ::vs-expand-get]
-      ["/fhir/ValueSet/$expand"           :post (conj op-base expand-cap vs-expand)                 :route-name ::vs-expand-post]
+      ["/fhir/ValueSet/$expand"           :get  (conj op-base max-expand vs-expand)                 :route-name ::vs-expand-get]
+      ["/fhir/ValueSet/$expand"           :post (conj op-base max-expand vs-expand)                 :route-name ::vs-expand-post]
 
       ["/fhir/ConceptMap/$translate"      :get  (conj op-base cm-translate)                         :route-name ::cm-translate-get]
       ["/fhir/ConceptMap/$translate"      :post (conj op-base cm-translate)                         :route-name ::cm-translate-post]
