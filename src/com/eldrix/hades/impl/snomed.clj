@@ -9,12 +9,14 @@
             [com.eldrix.hades.impl.snomed.batch :as batch]
             [com.eldrix.hades.impl.snomed.expansion :as expansion]
             [com.eldrix.hermes.core :as hermes]
+            [com.eldrix.hermes.impl.ecl :as hermes.ecl]
             [com.eldrix.hermes.impl.search :as hermes.search]
             [com.eldrix.hermes.snomed :as snomed]
             [lambdaisland.uri :as uri])
   (:import (com.eldrix.hermes.snomed Description)
            (java.io File)
-           (java.time.format DateTimeFormatter)))
+           (java.time.format DateTimeFormatter)
+           (org.apache.lucene.search Query)))
 
 (set! *warn-on-reflection* true)
 
@@ -108,100 +110,133 @@
   [property]
   (boolean (and (string? property) (re-matches #"\d+" property))))
 
-(defn- compose-filter->ecl-part
-  "Translate a single FHIR compose filter into an ECL fragment.
+(defn- parse-ecl-or-issue
+  "Parse a client-supplied ECL expression via Hermes. On parser
+  failure returns `{:issue …}` carrying a FHIR `:processing` issue;
+  on success returns `{:query <Lucene Query>}`. Used at the two sites
+  that consume opaque ECL strings — the compose `expression` filter
+  property and the implicit-VS URL `?fhir_vs=ecl/...` path. Every
+  other filter shape is structurally known and builds its Lucene
+  Query directly via `hermes.search/q-*`, never round-tripping through
+  the ECL parser."
+  [svc ecl]
+  (try
+    {:query (hermes.ecl/parse svc ecl)}
+    (catch clojure.lang.ExceptionInfo ex
+      {:issue {:severity     "error"
+               :type         "processing"
+               :details-code "vs-invalid"
+               :text         (str "invalid ECL expression"
+                                  (when-let [m (.getMessage ex)]
+                                    (str ": " m)))}})))
 
-  Returns one of:
-  - `{:hierarchy \"<< 73211009\"}` — a top-level concept-set constraint
-  - `{:refinement \"116676008 = 72704001\"}` — an attribute refinement
-  - `{:unsupported <msg>}` — filter shape is not representable in ECL
+(defn- value-issue [property op value]
+  {:severity     "error"
+   :type         "invalid"
+   :details-code "vs-invalid"
+   :text         (str "filter property=" property " op=" op
+                      " value=" (pr-str value)
+                      " is not a valid SNOMED concept id")})
+
+(defn- not-supported-issue [msg]
+  {:severity "error" :type "not-supported"
+   :details-code "filter-not-supported" :text msg})
+
+(defn- compose-filter->query
+  "Translate a single FHIR compose filter into a Lucene Query, an
+  issue map (FHIR OperationOutcome.issue shape) when the filter is
+  unsupported or its value invalid, or nil when the filter is a
+  no-op at the engine level (e.g. `expressions = true|false`).
+
+  Two return types — a `Query` instance contributes a constraint to
+  the AND-combiner; a map carries a typed issue. Hierarchy vs
+  refinement is irrelevant once we're building Lucene queries
+  directly: every clause is just a constraint and `q-and` combines
+  them uniformly.
 
   FHIR compose filter properties for SNOMED CT:
-  - `concept`  : hierarchical ops (`is-a`, `descendent-of`, `is-not-a`,
-                 `generalizes`, `in`, `=`)
-  - `parent`   : direct-parent exact match (`=`)
-  - `child`    : direct-child exact match (`=`)
-  - `expression`: raw ECL string (`=` or `in`)
-  - `<sctid>`  : attribute refinement (`=` only)"
-  [{:keys [property op value]}]
-  (if (or (nil? value) (and (string? value) (str/blank? value)))
-    ;; vs-invalid is caught upstream in compose/broken-filter-issue; still
-    ;; guard here so a malformed filter can never poison the ECL string.
-    {:unsupported (str "filter property=" (or property "?")
-                       " op=" (or op "?") " missing value")}
-    (cond
-      (= property "concept")
+  - `concept`    : hierarchical ops (`is-a`, `descendent-of`, `is-not-a`,
+                   `generalizes`, `in`, `=`)
+  - `parent`     : direct-parent exact match (`=`)
+  - `child`      : direct-child exact match (`=`)
+  - `expression` : raw ECL string (`=` or `in`)
+  - `<sctid>`    : attribute-value refinement (`=` only)
+  - `expressions`: post-coordinated expression toggle — engine no-op."
+  [svc {:keys [property op value]}]
+  (cond
+    (or (nil? value) (and (string? value) (str/blank? value)))
+    (not-supported-issue (str "filter property=" (or property "?")
+                              " op=" (or op "?") " missing value"))
+
+    (= property "concept")
+    (if-let [cid (parse-long (str value))]
       (case op
-        "=" {:hierarchy value}
-        "is-a" {:hierarchy (str "<< " value)}
-        ("descendent-of" "descendant-of") {:hierarchy (str "< " value)}
-        "is-not-a" {:hierarchy (str "* MINUS << " value)}
-        "generalizes" {:hierarchy (str ">> " value)}
-        "in" {:hierarchy (str "^ " value)}
-        {:unsupported (str "filter property=concept op=" op " not supported")})
+        "=" (hermes.search/q-concept-id cid)
+        "is-a" (hermes.search/q-descendantOrSelfOf cid)
+        ("descendent-of" "descendant-of") (hermes.search/q-descendantOf cid)
+        "is-not-a" (hermes.search/q-not (hermes.search/q-any)
+                                        (hermes.search/q-descendantOrSelfOf cid))
+        "generalizes" (hermes.search/q-ancestorOrSelfOf (:store svc) cid)
+        "in" (hermes.search/q-memberOf cid)
+        (not-supported-issue (str "filter property=concept op=" op " not supported")))
+      (value-issue property op value))
 
-      (= property "parent")
-      (if (= op "=")
-        {:hierarchy (str ">! " value)}
-        {:unsupported (str "filter property=parent op=" op " not supported")})
+    (= property "parent")
+    (cond
+      (not= op "=")            (not-supported-issue (str "filter property=parent op=" op " not supported"))
+      (parse-long (str value)) (hermes.search/q-parentOf (:store svc) (parse-long (str value)))
+      :else                    (value-issue property op value))
 
-      (= property "child")
-      (if (= op "=")
-        {:hierarchy (str "<! " value)}
-        {:unsupported (str "filter property=child op=" op " not supported")})
+    (= property "child")
+    (cond
+      (not= op "=")            (not-supported-issue (str "filter property=child op=" op " not supported"))
+      (parse-long (str value)) (hermes.search/q-childOf (parse-long (str value)))
+      :else                    (value-issue property op value))
 
-      (= property "expression")
-      (if (contains? #{"=" "in"} op)
-        {:hierarchy value}
-        {:unsupported (str "filter property=expression op=" op " not supported")})
+    (= property "expression")
+    (if (contains? #{"=" "in"} op)
+      (let [{:keys [query issue]} (parse-ecl-or-issue svc value)]
+        (or issue query))
+      (not-supported-issue (str "filter property=expression op=" op " not supported")))
 
-      ;; `expressions` (plural) signals whether an enumeration should
-      ;; include post-coordinated expression codes. Hermes validates
-      ;; post-coordinated expressions via SCG + MRCM (see
-      ;; `hermes/validate-expression`), but the description index is
-      ;; pre-coordinated only — there is no finite enumeration of
-      ;; post-coord expressions for a `<<` filter. No-op for both
-      ;; true/false.
-      (= property "expressions")
-      (if (and (= op "=") (contains? #{"true" "false"} (str value)))
-        {}
-        {:unsupported (str "filter property=expressions op=" op
-                           " value=" value " not supported")})
+    ;; `expressions` toggles inclusion of post-coordinated expressions
+    ;; in the enumeration. The description index is pre-coordinated only,
+    ;; so no finite enumeration of post-coord expressions exists for a
+    ;; `<<` filter. No-op for both true/false.
+    (= property "expressions")
+    (if (and (= op "=") (contains? #{"true" "false"} (str value)))
+      nil
+      (not-supported-issue (str "filter property=expressions op=" op
+                                " value=" value " not supported")))
 
-      (numeric-property-id? property)
-      (if (= op "=")
-        {:refinement (str property " = " value)}
-        {:unsupported (str "filter property=" property " op=" op " not supported")})
+    (numeric-property-id? property)
+    (cond
+      (not= op "=")            (not-supported-issue (str "filter property=" property " op=" op " not supported"))
+      (parse-long (str value)) (hermes.search/q-attribute-descendantOrSelfOf
+                                 (parse-long property) (parse-long (str value)))
+      :else                    (value-issue property op value))
 
-      :else
-      {:unsupported (str "filter property=" (or property "?")
-                         " op=" (or op "?") " not supported")})))
+    :else
+    (not-supported-issue (str "filter property=" (or property "?")
+                              " op=" (or op "?") " not supported"))))
 
-(defn compose-filters->ecl
-  "Combine a seq of compose filters into a single ECL expression.
-
-  Hierarchy parts are AND'd; refinement parts become a comma-separated
-  refinement clause attached to the hierarchy. Returns `{:ecl <string>}`
-  on success, or `{:issues [{:severity \"error\" ...}]}` when any filter
-  is unsupported — callers should return zero results plus the issue."
-  [filters]
+(defn compose-filters->query
+  "Combine a seq of compose filters into a single Lucene Query.
+  Returns `{:query <Query>}` on success, or `{:issues [...]}` when any
+  filter is unsupported or has an invalid value — callers should
+  return zero results plus the issues. Empty filter list ⇒ match-any."
+  [svc filters]
   (if-not (seq filters)
-    {:ecl "*"}
-    (let [parts (mapv compose-filter->ecl-part filters)
-          unsupported (keep :unsupported parts)
-          hierarchies (keep :hierarchy parts)
-          refinements (keep :refinement parts)]
-      (if (seq unsupported)
-        {:issues (mapv (fn [msg]
-                         {:severity "error" :type "not-supported"
-                          :details-code "filter-not-supported" :text msg})
-                       unsupported)}
-        (let [base (if (seq hierarchies)
-                     (str/join " AND " hierarchies)
-                     "*")]
-          {:ecl (if (seq refinements)
-                  (str "(" base ") : " (str/join ", " refinements))
-                  base)})))))
+    {:query (hermes.search/q-any)}
+    (let [parts   (keep #(compose-filter->query svc %) filters)
+          issues  (filter map? parts)
+          queries (filter #(instance? Query %) parts)]
+      (if (seq issues)
+        {:issues (vec issues)}
+        {:query (cond
+                  (empty? queries)      (hermes.search/q-any)
+                  (= 1 (count queries)) (first queries)
+                  :else                 (hermes.search/q-and (vec queries)))}))))
 
 ;; FHIR R4 ConceptMap equivalence codes for the SNOMED historical
 ;; association reference sets. See
@@ -656,15 +691,15 @@
          ;; look up historical associations, and check for equivalence  - this catches SAME-AS and REPLACED-BY etc.
          (and (= systemA systemB) ((hermes/with-historical svc [codeA']) codeB')) "equivalent"
          :else "not-subsumed")}))
-  (cs-find-matches [_ query]
-    (let [{:keys [version filters max-hits text active-only displayLanguage]} query
+  (cs-find-matches [_ q]
+    (let [{:keys [version filters max-hits text active-only displayLanguage]} q
           ver (or version (version-uri svc))
-          {:keys [ecl issues]} (compose-filters->ecl filters)]
+          {base-q :query issues :issues} (compose-filters->query svc filters)]
       (if (seq issues)
         {:concepts [] :issues issues}
         (let [{:keys [concepts total]}
               (expansion/expand {:svc            svc
-                                 :ecl            ecl
+                                 :query          base-q
                                  :filter         (when-not (str/blank? text) text)
                                  :active-only?   (boolean active-only)
                                  :limit          max-hits
@@ -710,7 +745,7 @@
               ;; expensive-to-compute expansions. Anything else (filter
               ;; present, :ecl, :all, or no count) falls through to the ECL
               ;; path, which keeps its existing :total computation.
-              {:keys [concepts total]}
+              {:keys [concepts total issues]}
               (cond
                 (and (= query :isa) no-filter? cnt)
                 (expansion/expand-paginated-query
@@ -746,16 +781,20 @@
                                                  :term)})))})
 
                 :else
-                (expansion/expand {:svc          svc
-                                   :ecl          ecl
-                                   :filter       filter
-                                   :active-only? (true? activeOnly)
-                                   :offset       offset
-                                   :limit        cnt}))]
+                (let [{base-q :query issue :issue} (parse-ecl-or-issue svc ecl)]
+                  (if issue
+                    {:concepts [] :total 0 :issues [issue]}
+                    (expansion/expand {:svc          svc
+                                       :query        base-q
+                                       :filter       filter
+                                       :active-only? (true? activeOnly)
+                                       :offset       offset
+                                       :limit        cnt}))))]
           (cond-> {:concepts         (expansion->concepts concepts ver)
                    :used-codesystems [{:uri (str snomed-system-uri "|" ver) :status "active"}]
                    :compose-pins     []}
-            total (assoc :total total))))))
+            total        (assoc :total total)
+            (seq issues) (assoc :issues issues))))))
   (vs-validate-code [_ _svc {:keys [url code system display displayLanguage]}]
     (when (and (= system snomed-system-uri) (not (str/blank? code)))
       (let [code' (parse-long code)

@@ -1,8 +1,13 @@
 (ns com.eldrix.hades.impl.snomed-test
   (:require [clojure.set :as set]
             [clojure.string :as str]
-            [clojure.test :refer [deftest is testing]]
-            [com.eldrix.hades.impl.snomed :as snomed]))
+            [clojure.test :refer [deftest is testing use-fixtures]]
+            [com.eldrix.hades.fixtures :as fixtures]
+            [com.eldrix.hades.impl.snomed :as snomed]
+            [com.eldrix.hades.impl.snomed.expansion :as expansion]
+            [com.eldrix.hermes.core :as hermes]
+            [com.eldrix.hermes.impl.search :as hermes.search])
+  (:import (org.apache.lucene.search Query)))
 
 
 (def implicit-value-sets
@@ -39,84 +44,195 @@
       (is (= expected-vs (snomed/parse-implicit-value-set uri))))))
 
 
+;; -- compose-filters->query ---------------------------------------------------
+;;
+;; The unit tests below cover the filter shapes that build their Lucene
+;; Query *without* consulting the SNOMED store — `concept`, `child`,
+;; `<sctid>` attribute refinement, `expressions`, and the issue/unsupported
+;; paths. `parent` and `generalizes` need a real Hermes store at query-
+;; build time and are exercised by the live tests + the generative
+;; expand-fuzz test against the pinned fixture.
 
-(deftest compose-filters->ecl
-  (testing "no filters → wildcard"
-    (is (= {:ecl "*"} (snomed/compose-filters->ecl nil)))
-    (is (= {:ecl "*"} (snomed/compose-filters->ecl []))))
-  (testing "concept hierarchy ops"
-    (is (= {:ecl "<< 73211009"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "is-a" :value "73211009"}])))
-    (is (= {:ecl "< 73211009"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "descendent-of" :value "73211009"}])))
-    (is (= {:ecl "< 73211009"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "descendant-of" :value "73211009"}])))
-    (is (= {:ecl ">> 73211009"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "generalizes" :value "73211009"}])))
-    (is (= {:ecl "* MINUS << 73211009"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "is-not-a" :value "73211009"}])))
-    (is (= {:ecl "^ 900000000000497000"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "in" :value "900000000000497000"}])))
-    (is (= {:ecl "73211009"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "=" :value "73211009"}]))))
-  (testing "parent/child"
-    (is (= {:ecl ">! 73211009"}
-           (snomed/compose-filters->ecl
-             [{:property "parent" :op "=" :value "73211009"}])))
-    (is (= {:ecl "<! 73211009"}
-           (snomed/compose-filters->ecl
-             [{:property "child" :op "=" :value "73211009"}]))))
-  (testing "raw ECL via expression"
-    (is (= {:ecl "<< 73211009 OR << 22298006"}
-           (snomed/compose-filters->ecl
-             [{:property "expression" :op "="
-               :value "<< 73211009 OR << 22298006"}]))))
+(defn- only-query
+  "Pull the :query value out of a successful compose-filters->query result.
+   Asserts no :issues, returns the Lucene Query."
+  [r]
+  (is (nil? (:issues r)))
+  (let [q (:query r)]
+    (is (instance? Query q))
+    q))
+
+(deftest compose-filters->query
+  (testing "no filters → match-any"
+    (is (= (.toString (hermes.search/q-any))
+           (.toString (only-query (snomed/compose-filters->query nil nil)))))
+    (is (= (.toString (hermes.search/q-any))
+           (.toString (only-query (snomed/compose-filters->query nil []))))))
+
+  (testing "concept hierarchy ops produce the expected Lucene Query"
+    (is (= (.toString (hermes.search/q-descendantOrSelfOf 73211009))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "concept" :op "is-a" :value "73211009"}])))))
+    (is (= (.toString (hermes.search/q-descendantOf 73211009))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "concept" :op "descendent-of" :value "73211009"}])))))
+    (is (= (.toString (hermes.search/q-descendantOf 73211009))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "concept" :op "descendant-of" :value "73211009"}]))))
+        "British and US spellings both accepted")
+    (is (= (.toString (hermes.search/q-not (hermes.search/q-any)
+                                           (hermes.search/q-descendantOrSelfOf 73211009)))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "concept" :op "is-not-a" :value "73211009"}])))))
+    (is (= (.toString (hermes.search/q-memberOf 900000000000497000))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "concept" :op "in" :value "900000000000497000"}])))))
+    (is (= (.toString (hermes.search/q-concept-id 73211009))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "concept" :op "=" :value "73211009"}]))))))
+
+  (testing "child = SCTID maps to q-childOf (no store needed)"
+    (is (= (.toString (hermes.search/q-childOf 73211009))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "child" :op "=" :value "73211009"}]))))))
+
+  (testing "expressions = true|false is a no-op (drops the filter, leaves match-any)"
+    (is (= (.toString (hermes.search/q-any))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "expressions" :op "=" :value "true"}])))))
+    (is (= (.toString (hermes.search/q-any))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "expressions" :op "=" :value "false"}]))))))
+
   (testing "attribute-id refinement (regression: EX05/EX08)"
-    (is (= {:ecl "(<< 195967001) : 363698007 = 89187006"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "is-a" :value "195967001"}
-              {:property "363698007" :op "=" :value "89187006"}])))
-    (is (= {:ecl "(<< 404684003) : 116676008 = 72704001"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "is-a" :value "404684003"}
-              {:property "116676008" :op "=" :value "72704001"}])))
-    (is (= {:ecl "(*) : 116676008 = 72704001"}
-           (snomed/compose-filters->ecl
-             [{:property "116676008" :op "=" :value "72704001"}]))
-        "refinement with no hierarchy gets a wildcard focus")
-    (is (= {:ecl "(<< 404684003) : 116676008 = 72704001, 363698007 = 302509004"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "is-a" :value "404684003"}
-              {:property "116676008" :op "=" :value "72704001"}
-              {:property "363698007" :op "=" :value "302509004"}]))
-        "multiple refinements comma-joined"))
+    (is (= (.toString
+             (hermes.search/q-and
+               [(hermes.search/q-descendantOrSelfOf 195967001)
+                (hermes.search/q-attribute-descendantOrSelfOf 363698007 89187006)]))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "concept" :op "is-a" :value "195967001"}
+                           {:property "363698007" :op "=" :value "89187006"}])))))
+    (is (= (.toString (hermes.search/q-attribute-descendantOrSelfOf 116676008 72704001))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "116676008" :op "=" :value "72704001"}]))))
+        "single-clause output is the bare query — no redundant q-any wrapper"))
+
   (testing "multiple hierarchies AND-combined"
-    (is (= {:ecl "<< 64572001 AND << 404684003"}
-           (snomed/compose-filters->ecl
-             [{:property "concept" :op "is-a" :value "64572001"}
-              {:property "concept" :op "is-a" :value "404684003"}]))))
-  (testing "unsupported filters emit issues, not silently drop"
-    (let [{:keys [ecl issues]}
-          (snomed/compose-filters->ecl
+    (is (= (.toString
+             (hermes.search/q-and
+               [(hermes.search/q-descendantOrSelfOf 64572001)
+                (hermes.search/q-descendantOrSelfOf 404684003)]))
+           (.toString (only-query
+                        (snomed/compose-filters->query nil
+                          [{:property "concept" :op "is-a" :value "64572001"}
+                           {:property "concept" :op "is-a" :value "404684003"}]))))))
+
+  (testing "missing value → invalid issue, not a poisoned query"
+    (let [{:keys [query issues]}
+          (snomed/compose-filters->query nil
+            [{:property "concept" :op "is-a" :value nil}])]
+      (is (nil? query))
+      (is (= 1 (count issues)))
+      (is (str/includes? (:text (first issues)) "missing value"))))
+
+  (testing "non-numeric value where SCTID required → invalid issue (no parser crash)"
+    (doseq [op ["is-a" "is-not-a" "descendent-of" "descendant-of"
+                "generalizes" "in" "="]]
+      (let [{:keys [query issues]}
+            (snomed/compose-filters->query nil
+              [{:property "concept" :op op :value "pain"}])]
+        (is (nil? query) (str "op=" op " should not produce a query"))
+        (is (= 1 (count issues)) (str "op=" op " should produce one issue"))
+        (is (= "invalid" (:type (first issues))))
+        (is (str/includes? (:text (first issues))
+                           "is not a valid SNOMED concept id"))))
+    (testing "child = non-numeric"
+      (let [{:keys [query issues]}
+            (snomed/compose-filters->query nil
+              [{:property "child" :op "=" :value "pain"}])]
+        (is (nil? query))
+        (is (= "invalid" (:type (first issues))))))
+    (testing "<sctid> = non-numeric"
+      (let [{:keys [query issues]}
+            (snomed/compose-filters->query nil
+              [{:property "363698007" :op "=" :value "pain"}])]
+        (is (nil? query))
+        (is (= "invalid" (:type (first issues)))))))
+
+  (testing "unsupported filters emit not-supported issues"
+    (let [{:keys [query issues]}
+          (snomed/compose-filters->query nil
             [{:property "concept" :op "is-a" :value "404684003"}
              {:property "display" :op "regex" :value "^fracture"}])]
-      (is (nil? ecl))
+      (is (nil? query))
       (is (= 1 (count issues)))
-      (is (= "error" (:severity (first issues))))
       (is (= "not-supported" (:type (first issues))))
-      (is (str/includes? (:text (first issues)) "display")))
-    (let [{:keys [issues]}
-          (snomed/compose-filters->ecl
-            [{:property "concept" :op "is-a" :value nil}])]
-      (is (= 1 (count issues)))
-      (is (str/includes? (:text (first issues)) "missing value")))))
+      (is (str/includes? (:text (first issues)) "display")))))
+
+
+;; -- Live tests ---------------------------------------------------------------
+;;
+;; Exercises filter shapes that depend on the Hermes store at query-build
+;; time — `parent =` (proximal parents) and `concept generalizes`
+;; (ancestor closure). End-to-end: build the Query via
+;; `compose-filters->query`, expand it through `expansion/expand`, and
+;; assert real concepts come back. Catches regressions where the store
+;; field accessor breaks (e.g. nil-store ⇒ NPE only at query time).
+
+(def ^:dynamic *svc* nil)
+
+(defn- live-fixture [f]
+  (let [svc (hermes/open (fixtures/assert-snomed-db!))]
+    (binding [*svc* svc]
+      (try (f) (finally (hermes/close svc))))))
+
+(use-fixtures :once live-fixture)
+
+(deftest ^:live parent-eq-resolves-against-store
+  (let [{:keys [query issues]}
+        (snomed/compose-filters->query *svc*
+          [{:property "parent" :op "=" :value "73211009"}])]   ; diabetes mellitus
+    (is (nil? issues))
+    (is (instance? Query query))
+    (let [{:keys [concepts]} (expansion/expand
+                               {:svc *svc* :query query :limit 50})]
+      (is (seq concepts) "parent= must return at least one proximal parent")
+      (is (every? (fn [c] (pos? (:conceptId c))) concepts)))))
+
+(deftest ^:live generalizes-resolves-against-store
+  (let [{:keys [query issues]}
+        (snomed/compose-filters->query *svc*
+          [{:property "concept" :op "generalizes" :value "73211009"}])]
+    (is (nil? issues))
+    (is (instance? Query query))
+    (let [{:keys [concepts]} (expansion/expand
+                               {:svc *svc* :query query :limit 50})]
+      (is (seq concepts)
+          "generalizes must return at least one ancestor (including self)")
+      ;; The diabetes mellitus concept itself must appear in the ancestor set
+      (is (some #(= 73211009 (:conceptId %)) concepts)))))
+
+(deftest ^:live attribute-refinement-resolves-end-to-end
+  (let [{:keys [query issues]}
+        (snomed/compose-filters->query *svc*
+          [{:property "concept" :op "is-a" :value "195967001"}        ; asthma
+           {:property "363698007" :op "=" :value "89187006"}])]       ; finding site = lung structure (or descendant)
+    (is (nil? issues))
+    (is (instance? Query query))
+    (let [{:keys [concepts]} (expansion/expand
+                               {:svc *svc* :query query :limit 50})]
+      (is (seq concepts) "asthma + lung-finding-site refinement should return concepts"))))
 
 (comment
   (#'snomed/parse-snomed-uri "http://snomed.info/sct"))

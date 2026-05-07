@@ -83,7 +83,7 @@
     (.preferredTerm r) (assoc :display (.preferredTerm r))))
 
 (defn- build-query
-  "Compose ECL ∩ filter ∩ active into a single Lucene Query.
+  "Compose `base-q` ∩ filter ∩ active into a single Lucene Query.
 
   `filter` is interpreted as autocomplete-style token-prefix match (each
   token must appear in the description either exactly or as a prefix —
@@ -96,12 +96,11 @@
   so it matches the pre-folded `nterm` field (StandardAnalyzer lowercases
   but does not strip accents). Mirrors Hermes' own ECL `matchSearchTerm`
   handling in `impl.ecl`."
-  ^Query [svc ecl {:keys [filter active-only?]}]
-  (let [q1       (hermes.ecl/parse svc ecl)
-        filter-q (when-not (str/blank? filter)
+  ^Query [svc ^Query base-q {:keys [filter active-only?]}]
+  (let [filter-q (when-not (str/blank? filter)
                    (hermes.search/q-term (hermes.ecl/fold svc filter)))
         active-q (when active-only? (hermes.search/q-concept-active true))
-        clauses  (cond-> [q1]
+        clauses  (cond-> [base-q]
                    filter-q (conj filter-q)
                    active-q (conj active-q))]
     (hermes.search/q-and clauses)))
@@ -109,21 +108,19 @@
 (defn- expand-non-paginated
   "Single-pass expansion for callers that don't set `:limit`.
 
-  Parses the ECL once, then issues one Lucene query for active
-  concepts and (when `active-only?` is false) a second for inactives.
-  Each stream feeds a single fused transducer — `distinct-by` +
-  row-builder in one pass — so there's no intermediate vector.
-  Display is read from the description's `preferredTerm` stored
-  field; every description doc of a concept stores that concept's
-  preferred synonym for each refset, so whichever representative
-  wins the dedupe yields the same display."
-  [svc ecl {:keys [active-only? filter language-range]}]
+  Issues one Lucene query for active concepts and (when `active-only?`
+  is false) a second for inactives. Each stream feeds a single fused
+  transducer — `distinct-by` + row-builder in one pass — so there's no
+  intermediate vector. Display is read from the description's
+  `preferredTerm` stored field; every description doc of a concept
+  stores that concept's preferred synonym for each refset, so whichever
+  representative wins the dedupe yields the same display."
+  [svc ^Query base-q {:keys [active-only? filter language-range]}]
   (let [lang-ids  (hermes/match-locale svc language-range true)
         ^IndexSearcher searcher (:searcher svc)
-        ecl-q     (hermes.ecl/parse svc ecl)
         filter-q  (when-not (str/blank? filter)
                     (hermes.search/q-term (hermes.ecl/fold svc filter)))
-        base-cls  (cond-> [ecl-q]
+        base-cls  (cond-> [base-q]
                     filter-q (conj filter-q))
         run       (fn [active? row-fn]
                     (let [q (hermes.search/q-and
@@ -146,10 +143,10 @@
   Phase 2: Lucene re-query restricted to the page's concept-ids;
   dedupe and pick display from the first representative description
   doc per concept. No LMDB in either phase."
-  [svc ecl {:keys [active-only? offset limit language-range] :as opts}]
+  [svc ^Query base-q {:keys [active-only? offset limit language-range] :as opts}]
   (let [lang-ids  (hermes/match-locale svc language-range true)
         ^IndexSearcher searcher (:searcher svc)
-        q         (build-query svc ecl opts)
+        q         (build-query svc base-q opts)
         all-arr   (concept-ids-longs searcher q)
         _         (Arrays/sort all-arr)
         total     (alength all-arr)
@@ -280,16 +277,23 @@
      :total    nil}))
 
 (defn expand
-  "Expand an ECL expression to a FHIR-shaped concept-level result.
+  "Expand to a FHIR-shaped concept-level result.
 
   Dispatches on `:limit`:
   - omitted  → single-pass stream + dedupe (`expand-non-paginated`).
   - supplied → two-phase; Phase 1 builds the concept-id set, Phase 2
     re-queries for the page's displays (`expand-paginated`).
 
+  The base concept set is supplied as either `:query` (a pre-built
+  Lucene Query — preferred when the caller has typed structural
+  information, e.g. compose-filter translation) or `:ecl` (an ECL
+  expression string, parsed once via `hermes.ecl/parse`). Exactly one
+  of `:query` or `:ecl` must be provided; `:query` wins when both are.
+
   Params (map):
     :svc             Hermes Svc                              (required)
-    :ecl             ECL expression string                   (required)
+    :query           Pre-built Lucene Query                  (required if :ecl absent)
+    :ecl             ECL expression string                   (required if :query absent)
     :filter          FHIR `filter` substring (case-insensitive)
     :active-only?    Exclude inactive concepts (default false)
     :offset          Integer, default 0 (ignored when :limit omitted)
@@ -301,10 +305,11 @@
                  :display   <string or nil>
                  :inactive  true  (only when concept is inactive)} ...]
      :total    <long>}"
-  [{:keys [svc ecl limit] :as opts}]
-  (if limit
-    (expand-paginated svc ecl opts)
-    (expand-non-paginated svc ecl opts)))
+  [{:keys [svc query ecl limit] :as opts}]
+  (let [base-q (or query (hermes.ecl/parse svc ecl))]
+    (if limit
+      (expand-paginated svc base-q opts)
+      (expand-non-paginated svc base-q opts))))
 
 (comment
   ;; Rapid-iteration bench harness for `expand-non-paginated`.
@@ -322,6 +327,7 @@
   (def clinical-finding  404684003)
 
   (defn run [ecl opts]
+    ;; convenience wrapper; production callers pass :query directly.
     (expand (merge {:svc svc :ecl ecl} opts)))
 
   (:total (run (str "<<" asthma) {:active-only? true}))
