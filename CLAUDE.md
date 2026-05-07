@@ -41,6 +41,10 @@ clj -X:conformance :url '"http://localhost:8080/fhir"'   # test an already-runni
 
 ### Conformance / integration test data
 
+> Full fixture catalogue and provisioning recipes live in
+> [`doc/development.md`](doc/development.md), mirroring CI exactly. The
+> notes below cover only the conformance pin.
+
 Conformance, `^:live` integration tests and benchmarks all run against **one
 pinned SNOMED CT International release: 20250201**. Pinning matters: the
 IG's tx-ecosystem fixtures were authored against this exact release, and
@@ -292,6 +296,24 @@ pinned Hermes DB (see the test fixtures namespace) and closes the service
 afterwards. Missing fixtures throw with the install hint (same behaviour
 as the live test suite); under `CI=true` the throw is fatal. Provision
 via the steps in `Conformance / integration test data` above.
+
+### tx-benchmark
+
+When the user says **"run tx-benchmark"** — with or without a flavor —
+they mean one of three pre-defined recipes documented in
+[`doc/development.md`](doc/development.md) § *Run tx-benchmark*:
+
+- **`preflight`** — correctness check across every op (~1 min)
+- **`quick`** — preflight + every passing test at 1 VU / 10 s (broad regression sweep, ~5 min)
+- **`full`** — preflight + warmup + bench at VUs 1 / 10 / 50 (~30+ min, Docker)
+
+If the user doesn't name a flavor, ask which one — don't invent a new
+shape. Each flavor in the doc is a single self-contained shell block
+that boots hades, waits, runs, and tears down — execute it as written.
+Don't read or run scripts under `~/Dev/tx-benchmark/scripts/` that
+aren't present at the pinned SHA (untracked local additions like
+`run-native.ts`, `bench-hades-native.sh` are stale scaffolding from
+prior sessions).
 
 ### Conformance testing
 
