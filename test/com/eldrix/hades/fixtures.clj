@@ -1,15 +1,8 @@
 (ns com.eldrix.hades.fixtures
-  "Shared test fixtures: pinned identifiers, fixture preflight, HTTP
-  server lifecycle, and request helper.
-
-  Tests that need real terminology fixtures use `^:live`, assert the
-  required well-known path exists, then call `hades/open` with those
-  paths. Missing fixtures throw with the provisioning command.
-
-  Run live tests with `clj -M:test`; skip them with `clj -M:test -e :live`."
+  "Shared test fixtures: pinned fixture paths, HTTP server lifecycle, and
+  a request helper. Tests open Hades directly; if a fixture is missing,
+  `hades/open` throws on the path."
   (:require [clojure.data.json :as json]
-            [clojure.java.io :as io]
-            [clojure.string]
             [com.eldrix.hades.impl.http :as http])
   (:import (java.net ServerSocket URI)
            (java.net.http HttpClient HttpRequest HttpRequest$Builder
@@ -17,74 +10,36 @@
                           HttpResponse$BodyHandlers)))
 
 ;; ---------------------------------------------------------------------------
-;; Pinned fixture identifiers
+;; Pinned fixture paths
 ;; ---------------------------------------------------------------------------
 
-(def snomed-version       "20250201")
-(def snomed-release-date  "2025-02-01")
-(def snomed-mlds-package  "ihtsdo.mlds/167")
-(def snomed-db-path       (str ".hades/snomed-intl-" snomed-version ".db"))
-
+(def snomed-version    "20250201")
+(def snomed-db-path    (str ".hades/snomed-intl-" snomed-version ".db"))
 (def snomed-uk-db-path ".hades/snomed-uk-monolith.db")
 
-(def loinc-version        "2.81")
-(def loinc-db-path        (str ".hades/loinc-" loinc-version ".db"))
+(def loinc-version     "2.81")
+(def loinc-db-path     (str ".hades/loinc-" loinc-version ".db"))
 
-(def fhir-packages-dir    ".hades/fhir-packages")
-(def fhir-smoke-db-path   ".hades/fhir-smoke.db")
-
-(def tx-ecosystem-dir     ".hades/tx-ecosystem")
-
-;; ---------------------------------------------------------------------------
-;; Fixture preflight — assertions throw with a clear provisioning hint
-;; ---------------------------------------------------------------------------
-
-(defn- assert-exists!
-  [path label install-hint]
-  (when-not (.exists (io/file path))
-    (throw (ex-info (str "Missing test fixture (" label ") at " path
-                         ". Provision with:\n  " install-hint)
-                    {:fixture label :path path :install install-hint})))
-  path)
-
-(defn assert-snomed-db! []
-  (assert-exists! snomed-db-path "SNOMED CT International"
-    (str "clj -M:run install " snomed-db-path
-         " --dist " snomed-mlds-package "@" snomed-release-date
-         " --username <MLDS user> --password <password file>"
-         " && clj -M:run index " snomed-db-path
-         " && clj -M:run compact " snomed-db-path)))
-
-(defn assert-snomed-uk-db! []
-  (assert-exists! snomed-uk-db-path "SNOMED CT UK Monolith"
-    (str "clj -M:run install " snomed-uk-db-path
-         " --dist uk.nhs/sct-monolith"
-         " --api-key <trud-api-key-file>"
-         " && clj -M:run index "   snomed-uk-db-path
-         " && clj -M:run compact " snomed-uk-db-path)))
-
-(defn assert-loinc-db! []
-  (assert-exists! loinc-db-path (str "LOINC " loinc-version)
-    (str "clj -M:run import " loinc-db-path " /path/to/Loinc_" loinc-version)))
+(def fhir-packages-dir ".hades/fhir-packages")
+(def fhir-smoke-db-path ".hades/fhir-smoke.db")
+(def tx-ecosystem-dir  ".hades/tx-ecosystem")
 
 (def fhir-packages
-  "Pinned FHIR packages used by the parity test. Versions track the CI
-  cache key in `.github/workflows/ci.yml`; bump both together."
-  ["hl7.terminology.r4@7.0.1"
-   "hl7.fhir.us.core@6.1.0"
-   "hl7.fhir.uv.ips@2.0.0"])
-
-(defn assert-fhir-packages! []
-  ;; --cache-dir makes install land the extracted JSON at
-  ;; <cache>/<id>-<version>/package/ — exactly the layout the parity
-  ;; test walks. The SQLite container is the positional dest.
-  (let [install-hint (str "clj -M:run install " fhir-smoke-db-path
-                          " "
-                          (clojure.string/join " "
-                                               (map #(str "--dist " %) fhir-packages))
-                          " --cache-dir " fhir-packages-dir)]
-    (assert-exists! fhir-packages-dir "FHIR packages directory" install-hint)
-    (assert-exists! fhir-smoke-db-path "FHIR packages SQLite container" install-hint)))
+  "Canonical FHIR R4 package set used by both the SQLite smoke DB
+  (`fhir-smoke-db-path`) and the in-memory parity test. Each entry is
+  `[id version]`; the on-disk directory under `fhir-packages-dir` is
+  `<id>-<version>/package/`. Keep CI's `provision-fhir` `--dist` list
+  in sync with this — both sides of the parity test must see the
+  same packages or the catalogue diff is meaningless. Mirrors
+  fhirsmith's `library.yml` minus `us.cdc.phinvads` (empty without
+  UMLS) and `us.nlm.vsac` (latest registry version drifts from
+  fhirsmith's bucket version)."
+  [["hl7.fhir.r4.core"     "4.0.1"]
+   ["hl7.terminology.r4"   "7.0.1"]
+   ["hl7.fhir.us.core"     "6.1.0"]
+   ["hl7.fhir.uv.ips"      "2.0.0"]
+   ["hl7.fhir.uv.ips"      "1.1.0"]
+   ["fhir.tx.support.r4"   "0.34.0"]])
 
 ;; ---------------------------------------------------------------------------
 ;; HTTP server lifecycle

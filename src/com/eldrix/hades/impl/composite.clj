@@ -655,8 +655,15 @@
 ;; tuples across providers.
 ;; ---------------------------------------------------------------------------
 
-(defn- versioned-key [url version]
-  (canonical/versioned-uri url version))
+(defn- versioned-key
+  "Registry-key form of `(url, version)`: always `\"url|version\"`,
+  with empty-string version for unversioned entries. Distinct from
+  `canonical/versioned-uri`, which returns the bare URL when version
+  is nil — fine for FHIR canonicals, but it collides with
+  `bare-bindings` in the registry and would let a bare-URL default
+  overwrite an unversioned provider on `merge`."
+  [url version]
+  (str url "|" (or version "")))
 
 (defn- collect-cs-entries [providers]
   (for [p providers

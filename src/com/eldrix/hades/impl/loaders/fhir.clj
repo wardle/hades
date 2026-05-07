@@ -279,10 +279,12 @@
 ;; ---------------------------------------------------------------------------
 
 (def ^:private json-detect-max-bytes
-  "Cap on file size when sniffing for FHIR JSON. The header is in the
-  first few KiB; arbitrarily large JSON in the tree is almost certainly
-  not what we're looking for and parsing it would be wasteful."
-  (* 16 1024 1024))
+  "Cap on file size when sniffing for FHIR JSON. Aligned with the
+  parse-time `default-max-bytes` so any file we'd accept at parse
+  time also passes recognition. A tighter cap silently drops valid
+  FHIR resources — e.g. `fhir.tx.support.r4` ships ICD-10-CM at 25MB
+  and MDC at 20MB."
+  default-max-bytes)
 
 (def ^:private fhir-resource-types
   ["CodeSystem" "ValueSet" "ConceptMap" "Bundle"])

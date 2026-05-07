@@ -16,7 +16,7 @@
        :conceptmaps    [{:impl provider :description {...}} ...]}
     :supplements      [{:meta codesystem-meta-data
                         :lookup {code → {:designations [...] :properties [...]}}} ...]
-    :diagnostics      {:skipped [...] :duplicates [...]}
+    :diagnostics      {:skipped [...]}
 
   CodeSystem-backed providers register against both :codesystems and
   :valuesets so the implicit ValueSet of a CodeSystem can answer
@@ -149,12 +149,22 @@
 ;; Indexing
 ;; ---------------------------------------------------------------------------
 
+(defn- versioned-key
+  "Compose the registry key for `(url, version)`. nil/missing version
+  becomes `\"\"` so an unversioned resource gets a distinct key
+  (`\"url|\"`) — important when another package later registers the
+  same URL at an explicit version."
+  [url version]
+  (str url "|" (or version "")))
+
 (defn- assoc-versioned
-  "Register `provider` against both `url` and `url|version` keys
-  (when version is present)."
+  "Register `provider` against `url|version`. The bare-URL form is
+  resolved in the composite layer (`bare-url-binding`) — registering
+  an additional bare-URL alias here would let a later versioned
+  registration overwrite an earlier unversioned one for the same URL,
+  hiding it from `cs-metadata` enumeration."
   [overlay url version provider]
-  (cond-> (assoc overlay url provider)
-    version (assoc (str url "|" version) provider)))
+  (assoc overlay (versioned-key url version) provider))
 
 (defn- index-codesystems
   "Group concepts by their parent CS meta entry. Build a provider for
@@ -201,16 +211,22 @@
             {} vses)))
 
 (defn- index-conceptmaps
+  "Build providers for every distinct (url, version) ConceptMap. When
+  two source files publish the same canonical (url, version), the
+  later-loaded copy wins — `into {}` is right-fold so a duplicate key
+  overwrites. Mirrors the SQLite indexer's `INSERT OR REPLACE` on
+  `conceptmap`."
   [fhir-data]
-  (let [cms (filterv #(= :conceptmap (:type %)) fhir-data)]
-    (mapv (fn [cm]
-            (let [provider (build-conceptmap-provider cm)]
-              {:impl provider
-               :description (cond-> {:url (:url cm)}
-                              (:source-uri cm) (assoc :system (:source-uri cm))
-                              (:target-uri cm) (assoc :target (:target-uri cm))
-                              (:version cm)    (assoc :version (:version cm)))}))
-          cms)))
+  (->> fhir-data
+       (filter #(= :conceptmap (:type %)))
+       (reduce (fn [m cm] (assoc m [(:url cm) (:version cm)] cm)) {})
+       vals
+       (mapv (fn [cm]
+               {:impl (build-conceptmap-provider cm)
+                :description (cond-> {:url (:url cm)}
+                               (:source-uri cm) (assoc :system (:source-uri cm))
+                               (:target-uri cm) (assoc :target (:target-uri cm))
+                               (:version cm)    (assoc :version (:version cm)))}))))
 
 (defn index
   "Build providers and diagnostics from the accumulated fhir-data.
@@ -218,7 +234,7 @@
   Returns:
     {:providers   {:codesystems {...} :valuesets {...} :conceptmaps [...]}
      :supplements [...]
-     :diagnostics {:skipped [...] :duplicates [...]}}
+     :diagnostics {:skipped [...]}}
 
   CodeSystem-backed providers are registered under both :codesystems and
   :valuesets so a CodeSystem can answer the implicit-ValueSet form of

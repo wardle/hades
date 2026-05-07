@@ -280,22 +280,30 @@ jobs:
           restore-keys: deps-
           fail-on-cache-miss: true
 
+      # Cache key encodes the canonical package set declared in
+      # `test/com/eldrix/hades/fixtures.clj` (`fhir-packages`). Keep
+      # both in sync — adding/removing a `--dist` line below requires
+      # an edit to fixtures + a key bump, otherwise the parity test
+      # silently runs against stale cached content.
       - uses: actions/cache/restore@v5
         id: cache
         with:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-terminology7.0.1-uscore6.1.0-ips2.0.0-v2
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v1
 
       - name: Provision pinned FHIR packages (in-memory + SQLite)
         id: provision
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
           clojure -M:run install compact .hades/fhir-smoke.db \
+            --dist hl7.fhir.r4.core@4.0.1 \
             --dist hl7.terminology.r4@7.0.1 \
             --dist hl7.fhir.us.core@6.1.0 \
             --dist hl7.fhir.uv.ips@2.0.0 \
+            --dist hl7.fhir.uv.ips@1.1.0 \
+            --dist fhir.tx.support.r4@0.34.0 \
             --cache-dir .hades/fhir-packages
 
       - uses: actions/cache/save@v5
@@ -304,7 +312,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-terminology7.0.1-uscore6.1.0-ips2.0.0-v2
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v1
 
   # ---------------------------------------------------------------------------
   # Test + conformance: each restores only the caches it actually consumes.
@@ -363,7 +371,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-terminology7.0.1-uscore6.1.0-ips2.0.0-v2
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v1
           fail-on-cache-miss: true
 
       - name: Compile check
@@ -440,4 +448,124 @@ jobs:
         with:
           name: conformance-results
           path: test/resources/conformance/latest.json
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # tx-benchmark preflight: correctness coverage for the ops the public
+  # benchmark exercises. Runs against an in-process hades fed by the same
+  # cached DBs the test job uses. The bar is simple: no preflight test may
+  # have status `fail`. `skip` is fine — it means the operation is not
+  # claimed by hades and tx-benchmark excludes it from the benchmark phase.
+  #
+  # The pinned tx-benchmark commit lives in test/resources/tx-benchmark-pin.txt
+  # so the workflow checkout matches local dev. Bumping is a deliberate act,
+  # mirroring tx-ecosystem-pinned-rev. The repo is wardle/tx-benchmark (our
+  # fork) until the supported() heuristic patch lands upstream — then move
+  # back to HealthSamurai/tx-benchmark and bump the pin.
+  # ---------------------------------------------------------------------------
+
+  preflight:
+    needs: [provision-snomed-intl, provision-loinc, provision-fhir]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: DeLaGuardo/setup-clojure@13.6.0
+        with:
+          cli: latest
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            ~/.deps.clj
+          key: deps-${{ hashFiles('deps.edn') }}
+          restore-keys: deps-
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: .hades/snomed-intl-20250201.db
+          key: snomed-intl-20250201-v1
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: .hades/loinc-2.81.db
+          key: loinc-2.81-v2
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            .hades/fhir-packages
+            .hades/fhir-smoke.db
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v1
+          fail-on-cache-miss: true
+
+      - id: pin
+        name: Read pinned tx-benchmark SHA
+        run: echo "sha=$(cat test/resources/tx-benchmark-pin.txt)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        with:
+          repository: wardle/tx-benchmark
+          ref: ${{ steps.pin.outputs.sha }}
+          path: tx-benchmark
+
+      - uses: grafana/setup-k6-action@v1
+
+      - name: Start hades
+        run: |
+          clojure -M:run serve \
+            .hades/snomed-intl-20250201.db \
+            .hades/loinc-2.81.db \
+            .hades/fhir-smoke.db \
+            --port 8080 &
+          echo $! > hades.pid
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:8080/fhir/metadata >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::hades did not become live within 60s"
+          exit 1
+
+      - name: Preflight
+        working-directory: tx-benchmark
+        run: |
+          k6 run \
+            --env BASE_URL=http://localhost:8080/fhir \
+            --env SERVER_NAME=hades \
+            --env RUN_ID=ci \
+            preflight/run.js
+
+      - name: Gate — no preflight failures
+        run: |
+          pf=tx-benchmark/results/ci/hades/preflight.json
+          fails=$(jq -r '.tests | to_entries[] | select(.value.status == "fail") | .key' "$pf")
+          if [ -n "$fails" ]; then
+            echo "::error::Preflight has failing tests: $(echo $fails | tr '\n' ' ')"
+            jq '.tests | with_entries(select(.value.status == "fail"))' "$pf"
+            exit 1
+          fi
+          jq -r '"OK — \([.tests[] | select(.status == "pass")] | length) pass, \([.tests[] | select(.status == "skip")] | length) skip, 0 fail"' "$pf"
+
+      - name: Stop hades
+        if: always()
+        run: kill "$(cat hades.pid)" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: tx-benchmark-preflight
+          path: tx-benchmark/results/ci/hades/preflight.json
           retention-days: 30

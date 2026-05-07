@@ -151,32 +151,18 @@
         props))
 
 ;; ---------------------------------------------------------------------------
-;; Per-target deletes — called lazily when a tuple is first observed
-;; during the streaming insert. A two-pass pre-scan would force a full
-;; walk of the (potentially 30M-element) lazy seq just to collect
-;; tuples, blowing the heap on big LOINC imports.
+;; Per-target tx_resource cleanup — called lazily when a tuple is first
+;; observed during the streaming insert. The data tables (concept,
+;; codesystem_meta, valueset, …) handle PK collisions natively via
+;; INSERT OR REPLACE, so no per-target DELETE is needed there. The
+;; tx_resource catalogue lacks an OR REPLACE path (it's written once
+;; per import after the rows land), so we clear any prior catalogue
+;; row up-front to keep `imported_at` and `concept_count` honest.
 ;; ---------------------------------------------------------------------------
 
-(defn- delete-codesystem-target! [^Connection conn url version]
-  ;; Order matters: dependents first, then concept (FK referent), then
-  ;; codesystem_meta (FK referent for concept).
-  (jdbc/execute! conn ["DELETE FROM concept_property    WHERE cs_url=? AND cs_version=?" url version])
-  (jdbc/execute! conn ["DELETE FROM concept_designation WHERE cs_url=? AND cs_version=?" url version])
-  (jdbc/execute! conn ["DELETE FROM concept_parent      WHERE cs_url=? AND cs_version=?" url version])
-  (jdbc/execute! conn ["DELETE FROM concept_ancestor    WHERE cs_url=? AND cs_version=?" url version])
-  (jdbc/execute! conn ["DELETE FROM concept             WHERE cs_url=? AND cs_version=?" url version])
-  (jdbc/execute! conn ["DELETE FROM codesystem_meta     WHERE url=?    AND version=?"    url version])
-  (jdbc/execute! conn ["DELETE FROM tx_resource         WHERE resource_type='CodeSystem' AND url=? AND version=?" url version]))
-
-(defn- delete-valueset-target! [^Connection conn url version]
-  (jdbc/execute! conn ["DELETE FROM valueset_expansion  WHERE vs_url=? AND vs_version=?" url version])
-  (jdbc/execute! conn ["DELETE FROM valueset            WHERE url=?    AND version=?"    url version])
-  (jdbc/execute! conn ["DELETE FROM tx_resource         WHERE resource_type='ValueSet' AND url=? AND version=?" url version]))
-
-(defn- delete-conceptmap-target! [^Connection conn url version]
-  (jdbc/execute! conn ["DELETE FROM conceptmap_element  WHERE cm_url=? AND cm_version=?" url version])
-  (jdbc/execute! conn ["DELETE FROM conceptmap          WHERE url=?    AND version=?"    url version])
-  (jdbc/execute! conn ["DELETE FROM tx_resource         WHERE resource_type='ConceptMap' AND url=? AND version=?" url version]))
+(defn- clear-tx-resource! [^Connection conn rt url version]
+  (jdbc/execute! conn ["DELETE FROM tx_resource WHERE resource_type=? AND url=? AND version=?"
+                       rt url version]))
 
 ;; ---------------------------------------------------------------------------
 ;; Row builders — pure fns from a fhir-data entry to the params vector(s)
@@ -308,15 +294,23 @@
 ;; SQL
 ;; ---------------------------------------------------------------------------
 
+;; All inserts use OR REPLACE so a row whose composite primary key (or
+;; equivalent UNIQUE INDEX) collides with an existing one overwrites in
+;; place. This is the layered/last-wins semantics: when two source
+;; files publish the same canonical resource at the same version, the
+;; later-loaded copy wins per row. The whole-CS delete-then-insert
+;; approach was dropped — it gave full-replace, not merge, and made
+;; cross-package overlap (e.g. an OID-based CodeSystem shipped in both
+;; r4.core and tx.support.r4) wipe the earlier package's rows.
 (def ^:private codesystem-meta-sql
-  "INSERT INTO codesystem_meta
+  "INSERT OR REPLACE INTO codesystem_meta
      (url, version, case_sensitive, hierarchy_meaning, content, supplements,
       status, experimental, name, title, description, publisher, jurisdiction,
       standards_status, property_defs, filter_defs, metadata)
    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 
 (def ^:private concept-sql
-  "INSERT INTO concept
+  "INSERT OR REPLACE INTO concept
      (cs_url, cs_version, code, display, definition,
       inactive, abstract, not_selectable, status)
    VALUES (?,?,?,?,?,?,?,?,?)")
@@ -340,13 +334,13 @@
    VALUES (?,?,?,?,?,?,?,?,?)")
 
 (def ^:private valueset-sql
-  "INSERT INTO valueset
+  "INSERT OR REPLACE INTO valueset
      (url, version, name, title, status, experimental,
       publisher, jurisdiction, description, metadata, compose)
    VALUES (?,?,?,?,?,?,?,?,?,?,?)")
 
 (def ^:private conceptmap-sql
-  "INSERT INTO conceptmap
+  "INSERT OR REPLACE INTO conceptmap
      (url, version, name, title, status, experimental,
       source_uri, source_version, target_uri, target_version,
       unmapped_mode, unmapped_code, unmapped_url, metadata)
@@ -386,9 +380,9 @@
   and runs the corresponding `delete-…-target!` lazily before the
   first insert touching that tuple. Buffers are pre-flushed when
   needed so the delete sees a clean slate on disk for the rows it
-  removes. Returns `{:targets #{[rt url version] …}
-  :cs-counts {[url version] n} :cm-counts {[url version] n}}` for
-  the catalogue write."
+  removes. Returns `{:targets #{[rt url version] …}}` — the catalogue
+  write counts rows directly from the database after the streaming
+  inserts commit."
   [^Connection conn take-fhir-data!]
   (with-open [^PreparedStatement ps-cs   (jdbc/prepare conn [codesystem-meta-sql])
               ^PreparedStatement ps-c    (jdbc/prepare conn [concept-sql])
@@ -406,37 +400,18 @@
           b-vs   (ArrayList.)
           b-cm   (ArrayList.)
           b-cme  (ArrayList.)
-          cs-counts (HashMap.)
-          cm-counts (HashMap.)
           targets   (HashMap.)        ; "rt|url|version" string → [rt url version]
-          inc-count! (fn [^HashMap m k]
-                       (.put m k (inc (or (.get m k) 0))))
-          ensure-cs! (fn [url version]
-                       (let [k (str "CodeSystem|" url "|" version)]
-                         (when-not (.containsKey targets k)
-                           ;; Flush any concept-bound buffers first so the
-                           ;; deletes don't precede already-batched rows
-                           ;; for the same (url, version).
-                           (flush-batch! conn ps-cs  b-cs)
-                           (flush-batch! conn ps-c   b-c)
-                           (flush-batch! conn ps-cp  b-cp)
-                           (flush-batch! conn ps-cpp b-cpp)
-                           (flush-batch! conn ps-cd  b-cd)
-                           (delete-codesystem-target! conn url version)
-                           (.put targets k ["CodeSystem" url version]))))
-          ensure-vs! (fn [url version]
-                       (let [k (str "ValueSet|" url "|" version)]
-                         (when-not (.containsKey targets k)
-                           (flush-batch! conn ps-vs b-vs)
-                           (delete-valueset-target! conn url version)
-                           (.put targets k ["ValueSet" url version]))))
-          ensure-cm! (fn [url version]
-                       (let [k (str "ConceptMap|" url "|" version)]
-                         (when-not (.containsKey targets k)
-                           (flush-batch! conn ps-cm  b-cm)
-                           (flush-batch! conn ps-cme b-cme)
-                           (delete-conceptmap-target! conn url version)
-                           (.put targets k ["ConceptMap" url version]))))]
+          ;; Mark a (resource-type, url, version) as touched by this
+          ;; import. First observation also clears any prior
+          ;; tx_resource catalogue row so the post-import write isn't
+          ;; rejected by the PK on (resource_type, url, version). Data
+          ;; rows themselves overwrite via INSERT OR REPLACE — no
+          ;; whole-CS DELETE phase.
+          ensure! (fn [rt url version]
+                    (let [k (str rt "|" url "|" version)]
+                      (when-not (.containsKey targets k)
+                        (clear-tx-resource! conn rt url version)
+                        (.put targets k [rt url version]))))]
       (loop []
         (when-let [item (take-fhir-data!)]
           (doseq [fd (if (map? item) [item] item)]
@@ -446,14 +421,12 @@
 
               :codesystem-meta
               (let [url (v (:url fd)) version (v (:version fd))]
-                (ensure-cs! url version)
+                (ensure! "CodeSystem" url version)
                 (add-row! conn ps-cs b-cs (codesystem-meta-row fd)))
 
               :concept
-              (let [url (v (:system fd)) version (v (:version fd))
-                    k [url version]]
-                (ensure-cs! url version)
-                (inc-count! cs-counts k)
+              (let [url (v (:system fd)) version (v (:version fd))]
+                (ensure! "CodeSystem" url version)
                 (add-row! conn ps-c b-c (concept-row fd))
                 (doseq [r (concept-parent-rows fd)]   (add-row! conn ps-cp  b-cp  r))
                 (doseq [r (concept-property-rows fd)] (add-row! conn ps-cpp b-cpp r))
@@ -461,33 +434,31 @@
 
               :concept-designation
               (let [url (v (:system fd)) version (v (:version fd))]
-                (ensure-cs! url version)
+                (ensure! "CodeSystem" url version)
                 (add-row! conn ps-cd b-cd (standalone-designation-row fd)))
 
               :concept-property
               (let [url (v (:system fd)) version (v (:version fd))]
-                (ensure-cs! url version)
+                (ensure! "CodeSystem" url version)
                 (when-let [r (standalone-property-row fd)]
                   (add-row! conn ps-cpp b-cpp r)))
 
               :concept-parent
               (let [url (v (:system fd)) version (v (:version fd))]
-                (ensure-cs! url version)
+                (ensure! "CodeSystem" url version)
                 (when-let [r (standalone-parent-row fd)]
                   (add-row! conn ps-cp b-cp r)))
 
               :valueset
               (let [url (v (:url fd)) version (v (:version fd))]
-                (ensure-vs! url version)
+                (ensure! "ValueSet" url version)
                 (add-row! conn ps-vs b-vs (valueset-row fd)))
 
               :conceptmap
-              (let [url (v (:url fd)) version (v (:version fd))
-                    k [url version]]
-                (ensure-cm! url version)
+              (let [url (v (:url fd)) version (v (:version fd))]
+                (ensure! "ConceptMap" url version)
                 (add-row! conn ps-cm b-cm (conceptmap-row fd))
                 (doseq [r (conceptmap-element-rows fd)]
-                  (inc-count! cm-counts k)
                   (add-row! conn ps-cme b-cme r)))
 
               ;; default — `:skipped` from FHIR JSON loader, etc.
@@ -502,9 +473,7 @@
       (flush-batch! conn ps-vs   b-vs)
       (flush-batch! conn ps-cm   b-cm)
       (flush-batch! conn ps-cme  b-cme)
-      {:targets   (into #{} (.values targets))
-       :cs-counts (into {} cs-counts)
-       :cm-counts (into {} cm-counts)})))
+      {:targets (into #{} (.values targets))})))
 
 (defn- channel-taker [fhir-data-ch]
   #(async/<!! fhir-data-ch))
@@ -557,14 +526,27 @@
 ;; tx_resource catalogue update — driven by streaming counters
 ;; ---------------------------------------------------------------------------
 
+(defn- count-rows
+  "Count rows in `table` matching `(url-col, version-col) = (url, version)`.
+  Used for `tx_resource.concept_count` so the catalogue reflects actual
+  on-disk row counts after any per-CS dedup or layered overwrites."
+  [^Connection conn table url-col version-col url version]
+  (-> (jdbc/execute-one! conn
+        [(str "SELECT COUNT(*) AS cnt FROM " table
+              " WHERE " url-col "=? AND " version-col "=?")
+         url version])
+      :cnt
+      long))
+
 (defn- write-resource-catalogue!
-  [^Connection conn target-set cs-counts cm-counts]
+  [^Connection conn target-set]
   (let [now (now-iso)]
     (doseq [[rt url version] target-set]
       (let [cnt (case rt
-                  "CodeSystem" (or (get cs-counts [url version]) 0)
+                  "CodeSystem" (count-rows conn "concept" "cs_url" "cs_version" url version)
                   "ValueSet"   nil
-                  "ConceptMap" (when-let [n (get cm-counts [url version])]
+                  "ConceptMap" (let [n (count-rows conn "conceptmap_element"
+                                                   "cm_url" "cm_version" url version)]
                                  (when (pos? n) n))
                   nil)]
         (jdbc/execute! conn
@@ -659,13 +641,13 @@
                 (fn []
                   (.setAutoCommit conn false)
                   (try
-                    (let [{:keys [targets cs-counts cm-counts] :as r}
+                    (let [{:keys [targets] :as r}
                           (run-import! conn (channel-taker fhir-data-ch))
                           cs-targets (->> targets
                                           (filter #(= "CodeSystem" (first %)))
                                           (mapv (fn [[_ url version]] [url version])))]
                       (prune-dangling-parents! conn cs-targets)
-                      (write-resource-catalogue! conn targets cs-counts cm-counts)
+                      (write-resource-catalogue! conn targets)
                       (.commit conn)
                       r)
                     (finally
@@ -717,13 +699,13 @@
                 (fn []
                   (.setAutoCommit conn false)
                   (try
-                    (let [{:keys [targets cs-counts cm-counts] :as r}
+                    (let [{:keys [targets] :as r}
                           (run-import! conn (collection-taker (data-fn)))
                           cs-targets (->> targets
                                           (filter #(= "CodeSystem" (first %)))
                                           (mapv (fn [[_ url version]] [url version])))]
                       (prune-dangling-parents! conn cs-targets)
-                      (write-resource-catalogue! conn targets cs-counts cm-counts)
+                      (write-resource-catalogue! conn targets)
                       (.commit conn)
                       r)
                     (finally

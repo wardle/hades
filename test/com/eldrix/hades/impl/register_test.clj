@@ -141,16 +141,23 @@
                                 {:code "A"})]
         (is (= "Alpha released" (:display r)))))))
 
-(deftest duplicate-resource-fails-fast-test
-  (let [ex (try
-             (load-fhir/build-from-fhir-data
-               (concat (fhir-data [cs-v1])
-                       (fhir-data [cs-v1])))
-             nil
-             (catch clojure.lang.ExceptionInfo e e))]
-    (is (some? ex))
-    (is (= :duplicate-resource (:reason (ex-data ex))))
-    (is (seq (:duplicates (ex-data ex))))))
+(deftest duplicate-resource-last-wins-test
+  (testing "two source files publishing the same (url, version) merge per code: collisions resolve last-wins, novel codes from the earlier file are preserved"
+    (let [cs-a-file1 {"resourceType" "CodeSystem"
+                      "url" "http://example.com/r/cs"  "version" "1.0" "status" "active"
+                      "content" "complete" "caseSensitive" true
+                      "concept" [{"code" "A" "display" "Alpha"}
+                                 {"code" "B" "display" "Beta"}]}
+          cs-a-file2 {"resourceType" "CodeSystem"
+                      "url" "http://example.com/r/cs"  "version" "1.0" "status" "active"
+                      "content" "complete" "caseSensitive" true
+                      "concept" [{"code" "A" "display" "Alpha-v2"}
+                                 {"code" "C" "display" "Charlie"}]}
+          svc (svc-of [cs-a-file1 cs-a-file2])
+          cs  (composite/find-codesystem svc "http://example.com/r/cs|1.0")]
+      (is (= "Alpha-v2" (:display (protos/cs-lookup cs {:code "A"}))) "collision resolves to the later file")
+      (is (= "Beta"     (:display (protos/cs-lookup cs {:code "B"}))) "code only in first file is preserved")
+      (is (= "Charlie"  (:display (protos/cs-lookup cs {:code "C"}))) "code only in second file is added"))))
 
 (deftest supplement-wraps-registered-base-test
   (let [svc (svc-of [cs-v1 supp])]

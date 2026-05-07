@@ -6,8 +6,7 @@
 
   Tagged `^:live` — needs `.hades/fhir-packages/` (extracted FHIR JSON)
   and `.hades/fhir-smoke.db` (SQLite container of the same packages).
-  Provision once via the install CLI (the pinned package list lives in
-  `fixtures/fhir-packages`):
+  Provision once via the install CLI:
 
     clj -M:run install .hades/fhir-smoke.db \\
       --dist hl7.terminology.r4@7.0.1 \\
@@ -29,15 +28,24 @@
 (def ^:dynamic *mem-svc* nil)
 (def ^:dynamic *sql-svc* nil)
 
-(defn- package-dirs []
-  (->> (.listFiles ^File (io/file fixtures/fhir-packages-dir))
-       (filter (fn [^File f] (.isDirectory f)))
-       (map (fn [^File f]
-              (let [pkg (io/file f "package")]
-                (if (.isDirectory pkg) pkg f))))))
+(defn- package-dirs
+  "Resolve the canonical `fixtures/fhir-packages` list to the on-disk
+  `<id>-<version>/package/` directories produced by `clojure -M:run install
+  --cache-dir .hades/fhir-packages`. Driving from the explicit list (rather
+  than walking `fhir-packages-dir`) keeps the in-memory side aligned with
+  the SQLite smoke DB even when the cache directory has stale extracts
+  from earlier installs."
+  []
+  (mapv (fn [[id version]]
+          (let [base (io/file fixtures/fhir-packages-dir (str id "-" version))
+                pkg  (io/file base "package")]
+            (when-not (.isDirectory base)
+              (throw (ex-info (str "missing FHIR package extract: " base)
+                              {:id id :version version :path (.getPath base)})))
+            (if (.isDirectory pkg) pkg base)))
+        fixtures/fhir-packages))
 
 (defn parity-fixture [f]
-  (fixtures/assert-fhir-packages!)
   (let [data (mapcat #(fhir-loader/load-paths (str %)) (package-dirs))
         {:keys [providers supplements]} (load-fhir/build-from-fhir-data data)
         mem-svc (composite/from-providers providers {:supplements supplements})
