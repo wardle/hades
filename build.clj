@@ -12,6 +12,9 @@
                                  :aliases [:run]}))
 (def jar-file (format "target/%s-lib-%s.jar" (name lib) version))
 (def uber-file (format "target/%s-%s.jar" (name lib) version))
+;; Versionless mirror so users can `wget .../latest/download/hades.jar` —
+;; the URL stays stable across releases.
+(def stable-uber-file "target/hades.jar")
 (def github {:org    "wardle"
              :repo   "hades"
              :tag    (str "v" version)
@@ -103,5 +106,7 @@
    variable."
   [_]
   (uber nil)
+  (io/copy (io/file uber-file) (io/file stable-uber-file))
   (println "Deploying release to github.")
-  (gh/release-artifact github))
+  (gh/release-artifact github)
+  (gh/release-artifact (assoc github :file stable-uber-file)))
