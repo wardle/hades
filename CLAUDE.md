@@ -76,32 +76,13 @@ clj -M:nrepl                    # without conformance deps
 clj -M:nrepl:conformance        # with conformance deps (for REPL-driven conformance testing)
 ```
 
-Then use `clj-nrepl-eval` to start a Hades server and test interactively:
-```bash
-# Start Hermes + Hades on port 8080
-clj-nrepl-eval -p <port> '
-(require (quote [com.eldrix.hermes.core :as hermes]))
-(require (quote [com.eldrix.hades.core :as hades]))
-(require (quote [com.eldrix.hades.impl.http :as http]))
-(require (quote [com.eldrix.hades.impl.snomed :as snomed]))
-
-(def hermes-svc (hermes/open "/path/to/snomed.db"))
-(def svc (hades/open [(snomed/->HermesService hermes-svc)]))
-(def srv (http/start! (http/make-server svc {:port 8080})))
-'
-
-# Test an endpoint via HTTP
-curl -s 'http://localhost:8080/fhir/CodeSystem/$lookup?system=http://snomed.info/sct&code=73211009'
-
-# Test the same thing internally — returns the plain Clojure map
-# before serialisation
-clj-nrepl-eval -p <port> '
-(hades/lookup svc {:system "http://snomed.info/sct" :code "73211009"})
-'
-
-# Stop
-clj-nrepl-eval -p <port> '(http/stop! srv) (hades/close svc)'
-```
+Then use `clj-nrepl-eval` to drive Hades interactively. The two public
+namespaces you need are `com.eldrix.hades.core` (open / close service,
+in-process operation calls) and `com.eldrix.hades.impl.http` (HTTP server
+lifecycle). Open them to see the current public functions and call them
+from the REPL — that is the source of truth and won't drift. The
+conformance-test REPL helpers below are usually a faster on-ramp than
+hand-wiring a server.
 
 ### REPL-driven conformance testing (the default workflow)
 
@@ -114,55 +95,21 @@ on changes: edit code, `restart!`, run filtered tests, check diffs.
 clj -M:nrepl:conformance
 ```
 
-**REPL API** in `com.eldrix.hades.conformance-test`:
+**REPL API.** The conformance test namespace exposes lifecycle (start /
+stop / restart), test-running (with filtering by suite or test name),
+result inspection (per-suite tables, failure clustering, single-test
+detail), single-test replay through the live HTTP server, and result
+persistence (latest archive, baseline). Open the namespace in your editor
+or `(dir com.eldrix.hades.conformance-test)` from the REPL to see the
+current functions and their docstrings — that is the source of truth.
 
-| Function | Purpose |
-|----------|---------|
-| `(start! path)` | Start server with Hermes, store state. Optional `:port`. |
-| `(stop!)` | Stop server, close Hermes. |
-| `(restart!)` | Stop, reload all Hades namespaces, restart. |
-| `(run-tests)` | Run all conformance tests. Optional `:filter`, `:modes`. |
-| `(print-suites r)` | Per-suite pass/fail table. |
-| `(print-failures r)` | All failures with parsed expected/actual. |
-| `(print-failures r "suite")` | Failures in one suite. |
-| `(print-clusters r)` | Group failures by (path, expected, actual); biggest cluster first — your highest-leverage fix candidate. |
-| `(print-clusters r "suite")` | Same, restricted to one suite. |
-| `(print-detail r "suite/test")` | Full detail for one test, including expected response JSON. |
-| `(replay-test "test")` | Replay one test through the live HTTP server; returns `{:request :expected :actual :status}`. (Test name only — no suite prefix.) |
-| `(list-tests)` / `(list-tests "suite")` | List test cases with operation + expected http-code. Use this instead of grepping `test-cases.json`. |
-| `(test-info "test")` | Return `{:name :suite :operation :http-code :request :expected :setup-files :setup-resources}` for one test. Use this instead of `cat`-ing fixture files. |
-| `(print-diff old new)` | Gained/lost tests between two runs. |
-| `(save-results! r)` | Timestamped archive + latest.json. |
-| `(save-baseline! r)` | Update baseline (intentional only). |
-| `(load-latest)` | Load most recent saved results. |
-| `(load-baseline)` | Load baseline counts. |
+**Typical edit→test cycle.** Require the conformance namespace, start the
+server (once per session — uses the pinned DB), run tests (optionally
+filtered to one suite while iterating), inspect failures, edit code,
+restart to reload Hades namespaces, re-run, diff against the previous
+result, and save the baseline only when intentional.
 
-**Typical edit→test cycle from Claude Code** (using `clj-nrepl-eval`):
-
-```bash
-# 1. Start (once per session) — use double quotes to avoid shell escaping issues
-clj-nrepl-eval -p $(cat .nrepl-port) "(require '[com.eldrix.hades.conformance-test :as ct])"
-clj-nrepl-eval -p $(cat .nrepl-port) "(ct/start!)"   # uses the pinned DB
-
-# 2. Run tests (filtered or all)
-clj-nrepl-eval -p $(cat .nrepl-port) "(def r (ct/run-tests))"
-clj-nrepl-eval -p $(cat .nrepl-port) "(def r (ct/run-tests :filter \"permutations\"))"
-clj-nrepl-eval -p $(cat .nrepl-port) "(ct/print-suites r)"
-clj-nrepl-eval -p $(cat .nrepl-port) "(ct/print-failures r \"permutations\")"
-
-# 3. Edit code, then reload and retest
-clj-nrepl-eval -p $(cat .nrepl-port) "(ct/restart!)"
-clj-nrepl-eval -p $(cat .nrepl-port) "(def r2 (ct/run-tests :filter \"permutations\"))"
-clj-nrepl-eval -p $(cat .nrepl-port) "(ct/print-diff r r2)"
-
-# 4. When satisfied, save baseline
-clj-nrepl-eval -p $(cat .nrepl-port) "(ct/save-baseline! r2)"
-
-# 5. Stop when done
-clj-nrepl-eval -p $(cat .nrepl-port) "(ct/stop!)"
-```
-
-**Important shell escaping notes for `clj-nrepl-eval`:**
+**Shell escaping notes for `clj-nrepl-eval`:**
 - Wrap the entire Clojure form in double quotes: `"(ct/start! ...)"`
 - Escape inner double quotes with backslash: `\"/path/to/snomed.db\"`
 - The `!` character does NOT need escaping when inside double quotes
@@ -172,14 +119,16 @@ clj-nrepl-eval -p $(cat .nrepl-port) "(ct/stop!)"
 
 Source layout:
 
-- `src/com/eldrix/hades/core.clj` — public library API (currently empty; no
-  stable surface yet).
+- `src/com/eldrix/hades/core.clj` — public library API: service lifecycle
+  and the FHIR terminology operations as plain Clojure functions. Read the
+  ns docstring for the current surface.
 - `src/com/eldrix/hades/impl/**` — library internals. Subject to breaking
   changes; nothing outside the project should depend on these namespaces.
 - `src/com/eldrix/hades/cmd.clj` + `impl/cli.clj` — CLI application
   (entry point + option parsing). Not part of the library surface.
 
-The internal layering under `impl/`:
+The internal layering under `impl/` (read each file for the current
+public surface — names drift, the layering doesn't):
 
 ```
 impl/http.clj                  Pedestal HTTP layer — routes, interceptors,
@@ -192,10 +141,11 @@ impl/composite.clj             TerminologyService — dispatch by URL/version,
                                cross-provider concerns (status warnings,
                                supplements check, CodeableConcept aggregation)
     │
-impl/protocols.clj             Abstract interfaces (CodeSystem, ValueSet, ConceptMap)
+impl/protocols/                Abstract interfaces and result/input specs
+                               (CodeSystem, ValueSet, ConceptMap)
     │
 impl/snomed.clj                SNOMED CT via Hermes
-impl/in_memory.clj             In-memory deftypes + SupplementedCodeSystem wrapper
+impl/in_memory.clj             In-memory providers
 impl/sqlite/provider.clj       SQLite-backed catalogue providers
 impl/compose.clj               ValueSet compose engine (include/exclude, filter, etc.)
 
@@ -203,6 +153,7 @@ impl/loaders/fhir.clj          FHIR JSON → fhir-data
 impl/loaders/loinc.clj         LOINC release dir → fhir-data
 impl/index/memory.clj          fhir-data → in-memory providers
 impl/index/sqlite.clj          fhir-data → SQLite container
+impl/load.clj                  Convenience constructors over the load pipeline
 impl/sqlite/db.clj             SQLite open/create/schema/pragmas
 
 cmd.clj                        CLI entry point (-main)
@@ -225,15 +176,15 @@ impl/cli.clj                   CLI option parsing
 
 - **Protocol impls** (snomed.clj, in_memory.clj, sqlite/provider.clj) know
   their domain. They return **complete, self-describing results** that match
-  the specs in `impl/protocols.clj` (e.g. `::protos/validate-result`,
-  `::protos/expansion-result`). No downstream layer should need to patch,
-  enrich, or re-derive fields.
+  the result specs under `impl/protocols/` — read those for the current
+  contract. No downstream layer should need to patch, enrich, or re-derive
+  fields.
 - **Composite** dispatches to the right impl by URL/version and handles
-  version resolution (`force-system-version` / `system-version` /
-  `check-system-version`). It does **not** patch results, add issues
-  retroactively, look up other resources to fill gaps, or fix FHIRPath
-  expressions. If the composite is doing post-call surgery on a result, the
-  impl's return value is incomplete — fix the impl.
+  version resolution (the version-resolution flags carried in the operation
+  params). It does **not** patch results, add issues retroactively, look up
+  other resources to fill gaps, or fix FHIRPath expressions. If the
+  composite is doing post-call surgery on a result, the impl's return value
+  is incomplete — fix the impl.
 - **HTTP handlers are thin.** Each operation handler parses its parameters
   (from GET query or POST `Parameters`), calls the operation, and stores
   the result on the Pedestal context. The per-operation response interceptor
@@ -244,29 +195,24 @@ impl/cli.clj                   CLI option parsing
   maps and returns string-keyed FHIR maps. No HTTP, no dispatch, no state.
 - **No secret channels.** Data flows through explicit function parameters and
   return values — never through metadata maps, dynamic vars, or by reaching
-  back through `vs-resource` / `cs-resource` to get data that should have
-  been in the result.
+  back through protocol resource-fetching methods to recover data that
+  should already have been in the result.
 
 ### Request-scoped overlays (`tx-resource`)
 
 FHIR operations accept `tx-resource` parameters — temporary CodeSystem,
-ValueSet, and ConceptMap resources scoped to a single request. The
-`derive-svc` interceptor in `impl/http.clj` parses them, builds providers
-via `loaders/fhir` + `index/memory` + `in_memory/build-from-fhir-data`,
-and folds them onto the base service via `core/with-overlays`. The
-result replaces `:hades/svc` for the rest of the interceptor chain.
+ValueSet, and ConceptMap resources scoped to a single request. A
+dedicated interceptor in `impl/http.clj` parses them, builds in-memory
+providers, and folds them onto the base service for the lifetime of the
+request only. The composite dispatches to overlay providers first, then
+to base providers, by URL/version.
 
-From a handler's view, the request-scoped overlay is invisible: every
-handler reads `:hades/svc` and calls the operation functions on `core`
-(`hades/lookup`, `hades/expand`, etc.). The composite dispatches to
-overlay providers first, then to base providers, by URL/version.
-
-Operation parameters that affect behaviour across layers
-(`system-version`, `force-system-version`, `check-system-version`,
-`lenient-display-validation`, `display-language`, `value-set-version`)
-flow as flat keys on the `params` map passed to operation functions —
-parsed once into `:hades/flags` by the same interceptor and merged into
-each handler's params via `merge-flags`.
+From a handler's view this is invisible: handlers read the per-request
+service off the context and call operation functions on `core`. The
+cross-layer flags carried by FHIR operation parameters
+(version-resolution flags, lenient-display, display-language, etc.) are
+parsed once at the same interceptor boundary and merged into each
+handler's params; grep `impl/http.clj` for the current names.
 
 ## Code style
 
@@ -310,18 +256,16 @@ each handler's params via `merge-flags`.
 ### Specs
 - Use `clojure.spec.alpha` for all public API boundaries: protocol parameters,
   operation inputs, constructor arguments, **and protocol return values**.
-- The canonical data shapes live in `impl/protocols.clj`: `::protos/validate-result`,
-  `::protos/expansion-result`, `::protos/expansion-concept`,
-  `::protos/lookup-result`, `::protos/issue`. These are the contracts between
-  layers — every protocol impl must return data conforming to these specs.
-- Namespace specs under the relevant module: `::protos/code`,
-  `::compose/expand-params`.
+- The canonical data shapes for protocol parameters and return values live
+  under `impl/protocols/` — read those files; they are the contracts between
+  layers, and every protocol impl must return data conforming to them.
+- Namespace specs under the relevant module.
 - Write `s/fdef` for public functions with non-trivial parameter contracts.
 - Use `clojure.spec.test.alpha/instrument` in test runs to validate data
   at boundaries automatically. Note: `instrument` only checks `:args`.
   Don't add `:ret` specs that aren't actually exercised — either drop
   them, or assert via `(s/assert ::spec result)` at the call site (the
-  composite layer does this for the five main operation contracts).
+  composite layer does this for the main operation contracts).
 
 ## Testing
 
@@ -341,58 +285,30 @@ functions (HTTP bypassed). Use these to bisect the impact of perf
 changes on the hot paths — faster iteration than tx-benchmark's HTTP/k6
 loop.
 
-Benchmarks are declared as data in `test/com/eldrix/hades/operations_bench.clj`.
-The catalogue is a vector `operations` of `{:id :ns/name :fn #(…)}`
-entries. At load time it's reduced into `benchmarks`, a map from `:id` to
-zero-arg fn, for REPL lookup. Bench files live under `test/` and are
-discovered by the `.*-bench$` regex; `clj -M:test` ignores them.
-
-```bash
-clj -M:bench       # run the whole catalogue — one shot, no flags
-```
-
-For a single benchmark, use the REPL:
-
-```clojure
-(require '[com.eldrix.hades.impl.operations-bench :as ob]
-         '[criterium.core :as crit])
-(ob/open-snomed!)                                       ; once per session
-(crit/quick-bench ((ob/benchmarks :subsumes/unrelated)))
-(crit/quick-bench ((ob/benchmarks :compose/refinement)))
-(ob/close-snomed!)                                      ; when done
-```
-
-The fixture opens the canonical pinned Hermes DB (see
-`com.eldrix.hades.fixtures`), wraps it as the SNOMED
-CodeSystem/ValueSet/ConceptMap provider, runs criterium, then closes
-the service. Missing fixtures throw with the install hint (same
-behaviour as the live test suite); under `CI=true` the throw is fatal.
-Provision via the steps in `Conformance / integration test data` above.
-
-To add a benchmark, append an entry to the `operations` vector. No new
-deftest or var required.
+Bench files live under `test/` and are discovered by the `.*-bench$`
+regex; `clj -M:test` ignores them. Open the bench namespace to see how to
+add or invoke benchmarks from the REPL. The fixture opens the canonical
+pinned Hermes DB (see the test fixtures namespace) and closes the service
+afterwards. Missing fixtures throw with the install hint (same behaviour
+as the live test suite); under `CI=true` the throw is fatal. Provision
+via the steps in `Conformance / integration test data` above.
 
 ### Conformance testing
 
-The HL7 FHIR Terminology Ecosystem IG defines 706 conformance tests. We run these
-programmatically via `TxTester` from `org.hl7.fhir.validation` (test-only dep).
+The HL7 FHIR Terminology Ecosystem IG defines a large suite of conformance
+tests. We run these programmatically via the HL7 validator (test-only dep).
 
 ```bash
-clj -M:conformance                       # run conformance tests
+clj -X:conformance                       # run conformance tests
 ```
 
-Key classes (in `org.hl7.fhir.validation.special`):
-- `TxTester` — sends requests to the server, compares responses to expected output
-- `TxTestData` — loads test data from folder or NPM package
-- `ITxTesterLoader` — interface for test data access
-
 Test data lives in a local clone of `HL7/fhir-tx-ecosystem-ig` (gitignored).
-The test harness starts Hades on a random port, runs `TxTester` against it, and
-parses the `TestReport` result into Clojure data.
+The test harness starts Hades on a random port, runs the validator's TX
+tester against it, and parses the `TestReport` result into Clojure data.
 
-After each phase, the conformance pass count must not decrease. New work should
-increase it. The `messages-hades.json` externals file maps expected error message
-keys to Hades-specific strings.
+After each phase, the conformance pass count must not decrease. New work
+should increase it. Hades-specific overrides for expected error messages
+live under `resources/`.
 
 ## Checklists
 
@@ -427,9 +343,9 @@ place and flows data correctly.
    them and what shape do they expect? Draw the path: http → composite → impl
    → composite → http → wire. If data needs to flow backwards (handler reaching
    back into impl metadata), the return value is incomplete.
-4. **Check the spec.** Does a spec exist in `impl/protocols.clj` for the return value
-   this change produces? If not, define it before writing the implementation.
-   The spec is the contract — write the contract first.
+4. **Check the spec.** Does a spec exist under `impl/protocols/` for the
+   return value this change produces? If not, define it before writing the
+   implementation. The spec is the contract — write the contract first.
 5. **Check for secret channels.** Does this change require smuggling data through
    metadata, dynamic vars, or `:ctx`-in-params? If yes, redesign. The data
    should be an explicit parameter or part of a return value spec.
@@ -475,11 +391,12 @@ Run after every task. All items must pass.
 4. **No HAPI imports anywhere in `src/`.** Runtime code is HAPI-free.
 5. **No new atoms or mutable state** without justification.
 6. **No secret channels introduced.** Data flows through explicit params/returns.
-   No compose-in-metadata, no reaching back through `vs-resource`/`cs-resource`
-   to get data that should be in the result, no ad-hoc keys smuggled in `:ctx`.
+   No compose-in-metadata, no reaching back through protocol resource-fetching
+   methods to recover data that should be in the result, no ad-hoc keys
+   smuggled through the request context.
 7. **Protocol impls return complete results.** If you changed a protocol impl,
-   its return value should match the relevant spec (`::validate-result`,
-   `::expansion-result`, `::lookup-result`). No downstream patching needed.
+   its return value must conform to the result spec under `impl/protocols/`.
+   No downstream patching needed.
 8. **Composite is not patching domain results.** If you added logic to the
    composite that modifies a result after the protocol call (adding issues,
    filling in missing fields, fixing expressions), the impl's return is
@@ -491,9 +408,10 @@ Run after every task. All items must pass.
    inspection, code existence checks), push that logic into a lower layer
    or into the result map.
 10. **Keyword keys used internally.** Protocol returns, composite results,
-    and compose output all use keyword keys. String keys appear only in
-    `impl/wire.clj` / `impl/metadata.clj` (wire output) and in parsed input
-    (`tx-resource` bodies, file-backed ingest).
+    and compose output all use keyword keys. String keys appear only at
+    serialisation boundaries (`impl/wire.clj` / `impl/metadata.clj` for FHIR
+    JSON output) and at parse boundaries (inbound `tx-resource` bodies and
+    file-backed ingest).
 
 #### Completeness checks
 11. **New public functions have tests.**
@@ -541,25 +459,22 @@ Run after every task. All items must pass.
    — a new namespace that compiles locally but isn't tracked will pass
    `clj -M:test` here and fail in CI (or, worse, ship a release whose jar
    doesn't include the file).
-7. **`fixtures.clj` install hints stay current.** When CLI surface changes,
-   re-read every `assert-exists!` call site in `test/com/eldrix/hades/fixtures.clj`
-   and confirm the printed `clj -M:run install …` hint actually works
-   against the current parser.
+7. **Test fixture install hints stay current.** When CLI surface changes,
+   re-read every fixture-existence check in the test fixtures namespace and
+   confirm the printed install hint actually works against the current
+   parser.
 
 ### Bumping the tx-ecosystem pin
 
-`conformance_test.clj` pins `tx-ecosystem-pinned-rev` to a specific upstream
-commit so CI and local dev see the same test population. Every conformance
-run shows the pinned rev and whether `upstream main` has moved ahead — that
-banner is the trigger to consider bumping.
+The conformance test namespace pins the upstream tx-ecosystem rev so CI
+and local dev see the same test population. Every conformance run shows
+the pinned rev and whether upstream main has moved ahead — that banner is
+the trigger to consider bumping.
 
-To bump:
-
-1. Update `tx-ecosystem-pinned-rev` to the new upstream SHA.
-2. Run `clj -X:conformance` — `ensure-test-data!` checks the new rev out.
-3. Fix any new failures the updated fixtures surface.
-4. Update `conformance-baseline.json` (pass/fail/total + `tx-ecosystem-rev`).
-5. Update the conformance figure per the release checklist above.
+To bump: update the pinned rev, re-run conformance (the harness checks
+the new rev out), fix any new failures the updated fixtures surface,
+update the conformance baseline file under `test/resources/`, then update
+the conformance figure per the release checklist above.
 
 Bumping is a deliberate act — never let CI pick up new tests implicitly.
 
