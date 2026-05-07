@@ -486,3 +486,98 @@
                                               :filter "alp"})]
           (is (= ["alpha"] (mapv :code concepts))))
         (finally (delete-quietly path))))))
+
+;; ---------------------------------------------------------------------------
+;; CodeSystem.content precedence on duplicate (url, version) — SQLite ingest.
+;;
+;; A second `build!` call against the same DB and the same (url, version) is
+;; the SQLite analogue of the in-memory "two source rows" case. The desired
+;; semantics mirror the in-memory loader:
+;;   * a `not-present` stub must never override a non-stub meta;
+;;   * among same-rank rows, last-wins.
+;; Concept rows continue to merge per-code via INSERT OR REPLACE / OR IGNORE.
+;; ---------------------------------------------------------------------------
+
+(def ^:private dup-cs-url "http://example.org/cs/dup")
+
+(defn- write-cs-rows!
+  "Write a CodeSystem (meta + concepts) into `path` via `build!`. Each call
+  is its own transaction; calling repeatedly on the same path applies the
+  upsert semantics under test."
+  [path content concepts loader-tag]
+  (sqlite-index/build! path
+    (into [{:type :codesystem-meta
+            :url dup-cs-url
+            :version "1.0"
+            :status "active"
+            :content content
+            :case-sensitive true
+            :name "Dup"
+            :title "Dup CS"}]
+          (map (fn [{:keys [code display]}]
+                 {:type :concept
+                  :system dup-cs-url :version "1.0"
+                  :code code :display display})
+               concepts))
+    {:loader-type loader-tag}))
+
+(defn- meta-content-from-sqlite [path]
+  (-> (sqlite-provider/open-providers path)
+      :codesystem
+      protos/cs-metadata
+      first
+      :content))
+
+(deftest sqlite-cs-stub-then-complete-test
+  (testing "stub row written first, complete row second — final meta `complete`,
+            concepts present"
+    (let [path (new-temp-path)]
+      (try
+        (write-cs-rows! path "not-present" [] "stub-first")
+        (write-cs-rows! path "complete" [{:code "A" :display "Alpha"}] "complete-second")
+        (sqlite-index/index! path)
+        (let [{:keys [codesystem]} (sqlite-provider/open-providers path)]
+          (is (= "complete" (meta-content-from-sqlite path)))
+          (is (= "Alpha" (:display (protos/cs-lookup codesystem
+                                     {:system dup-cs-url :code "A"})))))
+        (finally (delete-quietly path))))))
+
+(deftest sqlite-cs-complete-then-stub-test
+  (testing "complete row written first, stub row second — stub must NOT
+            overwrite the complete meta. Concepts inserted by the first
+            call survive (concept rows are not deleted on a later meta-only
+            write)."
+    (let [path (new-temp-path)]
+      (try
+        (write-cs-rows! path "complete" [{:code "A" :display "Alpha"}] "complete-first")
+        (write-cs-rows! path "not-present" [] "stub-second")
+        (sqlite-index/index! path)
+        (let [{:keys [codesystem]} (sqlite-provider/open-providers path)]
+          (is (= "complete" (meta-content-from-sqlite path))
+              "non-stub meta must survive a later stub upsert")
+          (is (= "Alpha" (:display (protos/cs-lookup codesystem
+                                     {:system dup-cs-url :code "A"})))))
+        (finally (delete-quietly path))))))
+
+(deftest sqlite-cs-both-complete-last-wins-test
+  (testing "two `complete` writes for same (url, version) — meta replaced
+            in place; concept rows merge by (url, version, code) with
+            per-code last-wins"
+    (let [path (new-temp-path)]
+      (try
+        (write-cs-rows! path "complete" [{:code "A" :display "Alpha-1"}
+                                         {:code "B" :display "Beta"}]
+                        "complete-first")
+        (write-cs-rows! path "complete" [{:code "A" :display "Alpha-2"}
+                                         {:code "C" :display "Charlie"}]
+                        "complete-second")
+        (sqlite-index/index! path)
+        (let [{:keys [codesystem]} (sqlite-provider/open-providers path)]
+          (is (= "complete" (meta-content-from-sqlite path)))
+          (is (= "Alpha-2" (:display (protos/cs-lookup codesystem
+                                       {:system dup-cs-url :code "A"}))))
+          (is (= "Beta"    (:display (protos/cs-lookup codesystem
+                                       {:system dup-cs-url :code "B"}))))
+          (is (= "Charlie" (:display (protos/cs-lookup codesystem
+                                       {:system dup-cs-url :code "C"})))))
+        (finally (delete-quietly path))))))

@@ -23,6 +23,7 @@
   inherited from the base only (overlays don't own them)."
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
+            [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.impl.canonical :as canonical]
             [com.eldrix.hades.impl.issues :as issues]
             [com.eldrix.hades.impl.protocols :as protos]
@@ -684,14 +685,18 @@
         m (protos/cm-metadata p)]
     {:provider p :description m}))
 
-(defn- detect-duplicates [entries resource-type]
+(defn- detect-duplicates
+  "Diagnostic: report `(url, version)` groups that come from more than one
+  provider. Returned by registration so the caller can warn-log; never
+  fatal — duplicate resolution is the collapse functions' job."
+  [entries resource-type]
   (->> entries
        (filter #(not (:supplement? %)))
        ;; Wildcard entries are per-provider routing hints saying "I'll
        ;; answer any version under this URL", not catalogue rows that
        ;; compete with another provider. Two providers each claiming a
        ;; wildcard for the same URL is genuine ambiguity, but it surfaces
-       ;; through the bare-URL contest below, not as `:duplicate-resource`.
+       ;; through the bare-URL contest below, not as a duplicate.
        (remove #(= canonical/wildcard-version (:version %)))
        (group-by (juxt :url :version))
        (keep (fn [[[url ver] es]]
@@ -700,6 +705,42 @@
                    {:resource-type resource-type
                     :url url :version ver
                     :count (count providers)}))))))
+
+(defn- prefer-non-stub-cs
+  "Pick the keeper between two CodeSystem entries for the same
+  (url, version). A `content: \"not-present\"` row is a stub: a package
+  may ship one purely so the URL is registerable for downstream VS
+  expansion / validation, intending the actual concepts to come from a
+  real terminology service. A stub must never override a non-stub,
+  regardless of registration order. Among same-rank entries, the
+  later-registered wins."
+  [a b]
+  (let [a-stub? (= "not-present" (:content a))
+        b-stub? (= "not-present" (:content b))]
+    (cond
+      (and a-stub? (not b-stub?)) b
+      (and b-stub? (not a-stub?)) a
+      :else b)))
+
+(defn- collapse-duplicates
+  "Collapse duplicate `(url, version)` entries into a single entry per
+  group via `pick-fn`. Wildcard entries pass through unchanged — they're
+  per-provider routing hints, not catalogue rows. Preserves the order
+  of first-seen `(url, version)` keys; later entries either overwrite
+  or are discarded by `pick-fn`."
+  [entries pick-fn]
+  (let [wildcard? #(= canonical/wildcard-version (:version %))
+        wild     (filterv wildcard? entries)
+        non-wild (remove wildcard? entries)
+        picks (reduce
+                (fn [acc e]
+                  (let [k [(:url e) (:version e)]]
+                    (if-let [prev (get acc k)]
+                      (assoc acc k (pick-fn prev e))
+                      (assoc acc k e))))
+                {}
+                non-wild)]
+    (into wild (vals picks))))
 
 (defn- pick-latest-semver
   "Of a vector of `entries` (each `{:version ...}`), return the entry
@@ -823,13 +864,20 @@
    (let [defaults   (or defaults {})
          cs-entries (collect-cs-entries providers)
          vs-entries (collect-vs-entries providers)
-         cm-entries (collect-cm-entries providers)]
-     (when-let [dups (seq (detect-duplicates cs-entries :CodeSystem))]
-       (throw (ex-info (str "Duplicate CodeSystem registrations: " (count dups))
-                       {:reason :duplicate-resource :duplicates dups})))
-     (when-let [dups (seq (detect-duplicates vs-entries :ValueSet))]
-       (throw (ex-info (str "Duplicate ValueSet registrations: " (count dups))
-                       {:reason :duplicate-resource :duplicates dups})))
+         cm-entries (collect-cm-entries providers)
+         cs-dups    (seq (detect-duplicates cs-entries :CodeSystem))
+         vs-dups    (seq (detect-duplicates vs-entries :ValueSet))
+         ;; Duplicate `(url, version)` from distinct providers is the
+         ;; reality of layered package loading: e.g. `fhir.tx.support.r4`
+         ;; and `us.nlm.vsac` both ship `HSLOC|2022`. Resolve to a single
+         ;; entry per group rather than refusing to boot — non-stub beats
+         ;; stub regardless of order, then last-wins by registration.
+         cs-entries (collapse-duplicates cs-entries prefer-non-stub-cs)
+         vs-entries (collapse-duplicates vs-entries (fn [_ b] b))]
+     (doseq [d cs-dups]
+       (log/warn "duplicate CodeSystem registration resolved" d))
+     (doseq [d vs-dups]
+       (log/warn "duplicate ValueSet registration resolved" d))
      (let [;; A CodeSystem provider that *also* satisfies the ValueSet
            ;; protocol serves its implicit ValueSet (the FHIR convention
            ;; that every CodeSystem URL is also a ValueSet selecting all

@@ -496,9 +496,10 @@
 (deftype SqliteCodeSystemCatalogue [ds cache]
   protos/CodeSystem
   (cs-metadata [_]
-    (mapv (fn [[[url version] _]]
+    (mapv (fn [[[url version] entry]]
             (cond-> {:url url}
-              (not (str/blank? version)) (assoc :version version)))
+              (not (str/blank? version)) (assoc :version version)
+              (:content entry)           (assoc :content (:content entry))))
           cache))
 
   (cs-resource [_ params]

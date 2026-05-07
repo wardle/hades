@@ -166,6 +166,18 @@
   [overlay url version provider]
   (assoc overlay (versioned-key url version) provider))
 
+(defn- pick-cs-meta
+  "Of the `:codesystem-meta` rows that share a `(url, version)`, return
+  the single meta to register. A `content: \"not-present\"` row is a
+  stub — a package may ship one purely so the URL is registerable for
+  downstream VS expansion / validation, intending the actual concepts
+  to come from a real terminology service. A stub must never override
+  a non-stub row, regardless of load order. Among same-rank rows,
+  last-wins."
+  [metas]
+  (let [non-stub (filterv #(not= "not-present" (:content %)) metas)]
+    (or (last non-stub) (last metas))))
+
 (defn- index-codesystems
   "Group concepts by their parent CS meta entry. Build a provider for
   every CodeSystem (regular AND supplement) and register them all in
@@ -187,12 +199,19 @@
                            c))
                        (filter #(= :concept (:type %)) fhir-data))
         by-parent (group-by (fn [c] [(:system c) (:version c)]) concepts)
+        ;; Collapse duplicate `(url, version)` metas via content-precedence
+        ;; before building providers — concept rows already merge under the
+        ;; shared parent key.
+        collapsed-metas (->> metas
+                             (group-by group-key)
+                             vals
+                             (mapv pick-cs-meta))
         cs-overlay (reduce
                      (fn [acc meta]
                        (let [k (group-key meta)
                              provider (build-codesystem-provider meta (get by-parent k []))]
                          (assoc-versioned acc (:url meta) (:version meta) provider)))
-                     {} metas)
+                     {} collapsed-metas)
         supplements (->> metas
                          (filter #(= "supplement" (:content %)))
                          (mapv (fn [meta]

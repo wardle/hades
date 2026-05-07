@@ -294,20 +294,48 @@
 ;; SQL
 ;; ---------------------------------------------------------------------------
 
-;; All inserts use OR REPLACE so a row whose composite primary key (or
-;; equivalent UNIQUE INDEX) collides with an existing one overwrites in
-;; place. This is the layered/last-wins semantics: when two source
-;; files publish the same canonical resource at the same version, the
-;; later-loaded copy wins per row. The whole-CS delete-then-insert
-;; approach was dropped — it gave full-replace, not merge, and made
-;; cross-package overlap (e.g. an OID-based CodeSystem shipped in both
-;; r4.core and tx.support.r4) wipe the earlier package's rows.
+;; Data-row inserts (concept, valueset, conceptmap, designations,
+;; properties, parents, conceptmap_element) use INSERT OR REPLACE / OR
+;; IGNORE so a row whose composite primary key collides with an existing
+;; one overwrites in place. Layered/last-wins semantics per row.
+;;
+;; codesystem_meta is the exception: it uses an UPSERT with a content-
+;; precedence guard. A `content: 'not-present'` row is a stub — a
+;; package may ship one purely so the URL is registerable for
+;; downstream VS expansion / validation, intending the concepts to come
+;; from a real terminology service. A stub must never overwrite a
+;; non-stub meta, regardless of write order. Among same-rank rows the
+;; unconditional column copy below gives last-wins.
+;;
+;; WHERE: skip the UPDATE only when the incoming row is a stub AND the
+;; existing row is a non-stub. Every other combination (incoming non-
+;; stub, existing stub OR non-stub; incoming stub, existing stub or
+;; null) falls through to last-wins.
 (def ^:private codesystem-meta-sql
-  "INSERT OR REPLACE INTO codesystem_meta
+  "INSERT INTO codesystem_meta
      (url, version, case_sensitive, hierarchy_meaning, content, supplements,
       status, experimental, name, title, description, publisher, jurisdiction,
       standards_status, property_defs, filter_defs, metadata)
-   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+   ON CONFLICT(url, version) DO UPDATE SET
+     case_sensitive    = excluded.case_sensitive,
+     hierarchy_meaning = excluded.hierarchy_meaning,
+     content           = excluded.content,
+     supplements       = excluded.supplements,
+     status            = excluded.status,
+     experimental      = excluded.experimental,
+     name              = excluded.name,
+     title             = excluded.title,
+     description       = excluded.description,
+     publisher         = excluded.publisher,
+     jurisdiction      = excluded.jurisdiction,
+     standards_status  = excluded.standards_status,
+     property_defs     = excluded.property_defs,
+     filter_defs       = excluded.filter_defs,
+     metadata          = excluded.metadata
+   WHERE excluded.content != 'not-present'
+      OR codesystem_meta.content IS NULL
+      OR codesystem_meta.content = 'not-present'")
 
 (def ^:private concept-sql
   "INSERT OR REPLACE INTO concept

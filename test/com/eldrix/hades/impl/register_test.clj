@@ -352,3 +352,170 @@
     (testing "resolve-canonical returns nil on blank/nil"
       (is (nil? (composite/resolve-canonical [resolver] nil)))
       (is (nil? (composite/resolve-canonical [resolver] ""))))))
+
+;; ---------------------------------------------------------------------------
+;; CodeSystem.content precedence on duplicate (url, version)
+;;
+;; A `content: "not-present"` CodeSystem is a stub: a package may ship one
+;; purely so the URL is registerable for downstream VS expansion / validation,
+;; intending the actual concepts to come from a real terminology service. A
+;; stub must never override a non-stub provider for the same (url, version),
+;; regardless of registration / load order. Among non-stub entries, last-wins.
+;; ---------------------------------------------------------------------------
+
+(defn- cs-row
+  "Build a string-keyed CodeSystem JSON map for the loader."
+  [{:keys [url version content concepts]}]
+  (cond-> {"resourceType" "CodeSystem"
+           "url"          url
+           "version"      version
+           "status"       "active"
+           "content"      content
+           "caseSensitive" true}
+    (seq concepts) (assoc "concept" concepts)))
+
+(defn- cs-content-of
+  "Return the resolved (single) :content value for a CodeSystem registered
+  under `url|version` in `svc`."
+  [svc url|version]
+  (-> (composite/find-codesystem svc url|version)
+      protos/cs-metadata
+      first
+      :content))
+
+(deftest single-provider-cs-stub-then-complete-test
+  (testing "in-memory: stub row first, complete row second — final meta is `complete`"
+    (let [svc (svc-of [(cs-row {:url "http://example.com/r/cs" :version "1.0"
+                                :content "not-present"})
+                       (cs-row {:url "http://example.com/r/cs" :version "1.0"
+                                :content "complete"
+                                :concepts [{"code" "A" "display" "Alpha"}]})])
+          cs  (composite/find-codesystem svc "http://example.com/r/cs|1.0")]
+      (is (= "complete" (cs-content-of svc "http://example.com/r/cs|1.0")))
+      (is (= "Alpha" (:display (protos/cs-lookup cs {:code "A"})))))))
+
+(deftest single-provider-cs-complete-then-stub-test
+  (testing "in-memory: complete row first, stub row second — stub must NOT
+            override the complete meta"
+    (let [svc (svc-of [(cs-row {:url "http://example.com/r/cs" :version "1.0"
+                                :content "complete"
+                                :concepts [{"code" "A" "display" "Alpha"}]})
+                       (cs-row {:url "http://example.com/r/cs" :version "1.0"
+                                :content "not-present"})])
+          cs  (composite/find-codesystem svc "http://example.com/r/cs|1.0")]
+      (is (= "complete" (cs-content-of svc "http://example.com/r/cs|1.0"))
+          "non-stub meta must survive a later stub registration")
+      (is (= "Alpha" (:display (protos/cs-lookup cs {:code "A"})))
+          "concepts from the non-stub row remain reachable"))))
+
+(deftest single-provider-cs-both-complete-last-wins-test
+  (testing "in-memory: two complete rows for same (url, version) — per-code
+            last-wins (as today). Confirms the precedence rule doesn't
+            disturb the existing same-content-rank behaviour."
+    (let [svc (svc-of [(cs-row {:url "http://example.com/r/cs" :version "1.0"
+                                :content "complete"
+                                :concepts [{"code" "A" "display" "Alpha-1"}
+                                           {"code" "B" "display" "Beta"}]})
+                       (cs-row {:url "http://example.com/r/cs" :version "1.0"
+                                :content "complete"
+                                :concepts [{"code" "A" "display" "Alpha-2"}
+                                           {"code" "C" "display" "Charlie"}]})])
+          cs  (composite/find-codesystem svc "http://example.com/r/cs|1.0")]
+      (is (= "complete" (cs-content-of svc "http://example.com/r/cs|1.0")))
+      (is (= "Alpha-2" (:display (protos/cs-lookup cs {:code "A"}))))
+      (is (= "Beta"    (:display (protos/cs-lookup cs {:code "B"}))))
+      (is (= "Charlie" (:display (protos/cs-lookup cs {:code "C"})))))))
+
+;; ---------------------------------------------------------------------------
+;; Cross-provider (url, version) duplicates — composite-level resolution.
+;;
+;; Two distinct providers (different storage, different package directory,
+;; or one in-memory + one Hermes/SQLite-backed stub) may register the same
+;; canonical (url, version). Today this throws `:duplicate-resource` at
+;; `from-providers`. The desired behaviour mirrors the within-provider rule:
+;; non-stub wins over stub regardless of order; among same-rank entries,
+;; last-registered wins. ValueSets / ConceptMaps have no content gradient
+;; so the rule reduces to last-wins by registration order.
+;; ---------------------------------------------------------------------------
+
+(defn- stub-cs-provider
+  "Reified CodeSystem provider with one (url, version, content) entry and a
+  single concept lookup result keyed by `:display`. Used to build
+  cross-provider duplicate scenarios that bypass `build-from-fhir-data`."
+  [{:keys [url version content display]}]
+  (reify protos/CodeSystem
+    (cs-metadata [_]
+      [{:url url :version version :content content}])
+    (cs-resource     [_ _]      {:url url :version version :content content})
+    (cs-lookup       [_ _]      {:system url :code (keyword "X") :display display})
+    (cs-validate-code [_ _]     {:result true :system url :code (keyword "X") :display display})
+    (cs-subsumes     [_ _]      {:outcome "not-subsumed"})
+    (cs-find-matches [_ _]      {:concepts []})))
+
+(defn- stub-vs-provider
+  "Reified ValueSet provider with one (url, version) entry. Used for
+  cross-provider VS duplicate scenarios."
+  [{:keys [url version label]}]
+  (reify protos/ValueSet
+    (vs-metadata      [_]       [{:url url :version version}])
+    (vs-resource      [_ _]     {:url url :version version})
+    (vs-expand        [_ _ _]   {:concepts [{:code "X" :display label}]})
+    (vs-validate-code [_ _ _]   {:result true})))
+
+(deftest cross-provider-cs-non-stub-after-stub-wins-test
+  (testing "stub registered first, non-stub second — non-stub wins (last-wins
+            among non-stubs collapses to the single non-stub entry)"
+    (let [stub     (stub-cs-provider {:url "http://x/cs" :version "1.0"
+                                      :content "not-present" :display "stub"})
+          complete (stub-cs-provider {:url "http://x/cs" :version "1.0"
+                                      :content "complete"   :display "complete-data"})
+          svc (composite/from-providers [stub complete])
+          cs  (composite/find-codesystem svc "http://x/cs|1.0")]
+      (is (= "complete-data" (:display (protos/cs-lookup cs {:code "X"})))))))
+
+(deftest cross-provider-cs-stub-after-non-stub-loses-test
+  (testing "non-stub registered first, stub second — stub must NOT override.
+            Order-irrelevance is the key invariant: a package shipping a
+            registry stub for a canonical it doesn't actually provide must
+            not displace a real provider, even if listed last on the CLI."
+    (let [complete (stub-cs-provider {:url "http://x/cs" :version "1.0"
+                                      :content "complete"   :display "complete-data"})
+          stub     (stub-cs-provider {:url "http://x/cs" :version "1.0"
+                                      :content "not-present" :display "stub"})
+          svc (composite/from-providers [complete stub])
+          cs  (composite/find-codesystem svc "http://x/cs|1.0")]
+      (is (= "complete-data" (:display (protos/cs-lookup cs {:code "X"})))))))
+
+(deftest cross-provider-cs-both-complete-last-wins-test
+  (testing "two `complete` providers for the same (url, version) — last-
+            registered wins. The composite has no basis to prefer one
+            over the other, so registration order (CLI path order) is
+            the operator's lever."
+    (let [a (stub-cs-provider {:url "http://x/cs" :version "1.0"
+                               :content "complete" :display "first"})
+          b (stub-cs-provider {:url "http://x/cs" :version "1.0"
+                               :content "complete" :display "second"})
+          svc (composite/from-providers [a b])
+          cs  (composite/find-codesystem svc "http://x/cs|1.0")]
+      (is (= "second" (:display (protos/cs-lookup cs {:code "X"})))))))
+
+(deftest cross-provider-cs-both-stub-last-wins-test
+  (testing "two `not-present` stubs — keep one (last-wins). No real provider
+            either way; the registry should still bind a single entry rather
+            than throw."
+    (let [a (stub-cs-provider {:url "http://x/cs" :version "1.0"
+                               :content "not-present" :display "first-stub"})
+          b (stub-cs-provider {:url "http://x/cs" :version "1.0"
+                               :content "not-present" :display "second-stub"})
+          svc (composite/from-providers [a b])]
+      (is (some? (composite/find-codesystem svc "http://x/cs|1.0"))))))
+
+(deftest cross-provider-vs-last-wins-test
+  (testing "ValueSet has no content gradient; cross-provider duplicate
+            (url, version) resolves to last-registered."
+    (let [a (stub-vs-provider {:url "http://x/vs" :version "1.0" :label "first"})
+          b (stub-vs-provider {:url "http://x/vs" :version "1.0" :label "second"})
+          svc (composite/from-providers [a b])
+          vs  (composite/find-valueset svc "http://x/vs|1.0")
+          r   (protos/vs-expand vs svc {:url "http://x/vs"})]
+      (is (= "second" (-> r :concepts first :display))))))
