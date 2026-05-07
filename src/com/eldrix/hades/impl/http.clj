@@ -356,9 +356,11 @@
 
 (def tx-overlay
   "Parse query/post params onto `::params` + `::flags`, and — when the
-  request carries `tx-resource` Parameters — derive a per-request service
-  via `core/with-overlays` and replace `::svc`. Mounted globally; runs
-  on every operation."
+  request carries `tx-resource` Parameters — derive a per-request
+  service via `core/with-overlays` and replace `::svc`. Mounted
+  per-route on every operation route; not on `_search` routes (which
+  carry form-encoded bodies that this interceptor would try to parse
+  as JSON Parameters)."
   {:name  ::tx-overlay
    :enter (fn [{:keys [request] :as context}]
             (let [params   (params-for-request request)
@@ -370,6 +372,28 @@
                 ;; if we have any overlay providers, create a new hades service with them
                 (seq providers)
                 (update-in [:request ::svc] #(hades/with-overlays % providers {:supplements supplements})))))})
+
+;; ---------------------------------------------------------------------------
+;; Search input — parse query string + form-urlencoded body into a
+;; uniform multimap. Used by `/fhir/<Type>` GET and `/fhir/<Type>/_search`
+;; POST. Form body uses the same `key=value&...` syntax as a query
+;; string, so `parse-query` handles both shapes.
+;; ---------------------------------------------------------------------------
+
+(defn- form-encoded? [request]
+  (when-let [ct (get-in request [:headers "content-type"])]
+    (str/starts-with? (str/lower-case ct) "application/x-www-form-urlencoded")))
+
+(def parse-search-input
+  {:name  ::parse-search-input
+   :enter (fn [{:keys [request] :as context}]
+            (let [qmap (parse-query (:query-string request))
+                  fmap (when (and (= :post (:request-method request))
+                                  (form-encoded? request))
+                         (when-let [body (read-body request)]
+                           (parse-query (String. ^bytes body StandardCharsets/UTF_8))))
+                  merged (merge-with into qmap (or fmap {}))]
+              (assoc-in context [:request ::search-input] merged)))})
 
 (defn merge-flags
   "Merge request flags into operation params (flat). Used by every
@@ -662,6 +686,132 @@
                              "' could not be found")}])})))
 
 ;; ---------------------------------------------------------------------------
+;; Search — FHIR REST search on CodeSystem and ValueSet
+;; ---------------------------------------------------------------------------
+
+(def ^:private search-string-fields #{"name" "title" "description"})
+(def ^:private search-token-fields  #{"url" "version" "status"})
+(def ^:private string-modes         {""         :starts-with
+                                     "exact"    :exact
+                                     "contains" :contains})
+
+;; Result-control defaults applied per server policy. An unfiltered
+;; `GET /ValueSet` against the smoke catalogues returns a 121 MB
+;; Bundle without any limits and 3.2 MB with `_summary=true`. Hence:
+;;   `_count` default 10 (FHIR convention), capped at 1000.
+;;   ValueSet search defaults `_summary=true` so unfiltered browse
+;;   ships the lighter shape; clients send `_summary=false` to opt
+;;   back into compose. CodeSystem search has no comparable shape
+;;   pressure (957 KB unfiltered) so we leave its default unchanged.
+(def ^:private default-count 10)
+(def ^:private max-count     1000)
+
+(defn- resolve-count
+  [requested]
+  (-> (or requested default-count) (max 0) (min max-count)))
+
+(defn- split-modifier [^String k]
+  (let [idx (.indexOf k ":")]
+    (if (neg? idx) [k ""] [(subs k 0 idx) (subs k (inc idx))])))
+
+(defn- modifier-error [field mod]
+  {:severity "error" :type "invalid"
+   :details-code "MSG_PARAM_MODIFIER_INVALID"
+   :text (str "Modifier ':" mod "' is not supported on parameter '" field "'")})
+
+(defn- parse-nat-int [s]
+  (try (let [n (Integer/parseInt s)] (when-not (neg? n) n))
+       (catch Exception _ nil)))
+
+(defn- parse-search-entry [acc k v]
+  (let [[field mod] (split-modifier k)]
+    (cond
+      (search-string-fields field)
+      (if-let [parsed-mode (string-modes mod)]
+        (-> acc
+            (assoc-in [:params (keyword field)] v)
+            (assoc-in [:params (keyword (str field "-mode"))] parsed-mode))
+        (update acc :errors conj (modifier-error field mod)))
+
+      (search-token-fields field)
+      (if (= "" mod)
+        (assoc-in acc [:params (keyword field)] v)
+        (update acc :errors conj (modifier-error field mod)))
+
+      (and (= "" mod) (#{"_count" "_offset"} field))
+      (if-let [n (parse-nat-int v)]
+        (assoc-in acc [:params (keyword field)] n)
+        acc)
+
+      (and (= "" mod) (= "_summary" field))
+      (assoc-in acc [:params :_summary] v)
+
+      :else (update acc :unknown conj k))))
+
+(defn- parse-search-params [multimap]
+  (reduce-kv
+    (fn [acc k vals] (parse-search-entry acc k (first vals)))
+    {:params {} :unknown [] :errors []}
+    multimap))
+
+(defn- prefer-strict? [request]
+  (when-let [hdr (get-in request [:headers "prefer"])]
+    (boolean (re-find #"(?i)handling\s*=\s*strict" hdr))))
+
+(defn- request-self-link [request]
+  (let [scheme (name (:scheme request :http))
+        host   (or (get-in request [:headers "host"]) "localhost")
+        uri    (:uri request)
+        qs     (:query-string request)]
+    (cond-> (str scheme "://" host uri)
+      (not (str/blank? qs)) (str "?" qs))))
+
+(defn- apply-defaults
+  "Apply HTTP-layer defaults to parsed search params: clamp `_count`
+  on every search; default `_summary=true` for ValueSet so unfiltered
+  browse ships the lighter shape (3.2 MB vs 121 MB on the smoke
+  catalogue)."
+  [params resource-type]
+  (cond-> (update params :_count resolve-count)
+    (and (= "ValueSet" resource-type) (nil? (:_summary params)))
+    (assoc :_summary "true")))
+
+(defn- search-response
+  [request resource-type search-fn resource->map]
+  (let [{:keys [params unknown errors]} (parse-search-params (::search-input request))
+        svc (::svc request)]
+    (cond
+      (seq errors)
+      {:status 400 :body (wire/operation-outcome errors)}
+
+      (and (seq unknown) (prefer-strict? request))
+      {:status 400
+       :body   (wire/operation-outcome
+                 (mapv (fn [k]
+                         {:severity "error" :type "not-supported"
+                          :details-code "MSG_PARAM_UNKNOWN"
+                          :text (str "Unknown search parameter '" k "'")})
+                       unknown))}
+
+      :else
+      {:status 200
+       :body   (wire/search-bundle
+                 (search-fn svc (apply-defaults params resource-type))
+                 {:type          resource-type
+                  :self-link     (request-self-link request)
+                  :resource->map resource->map})})))
+
+(defn- cs-search [request]
+  (search-response request "CodeSystem"
+                   hades/search-code-systems
+                   wire/cs-resource->map))
+
+(defn- vs-search [request]
+  (search-response request "ValueSet"
+                   hades/search-value-sets
+                   wire/vs-resource->map))
+
+;; ---------------------------------------------------------------------------
 ;; Metadata endpoints
 ;; ---------------------------------------------------------------------------
 
@@ -696,25 +846,30 @@
 
 (defn routes [{:keys [max-expansion-size]}]
   (let [max-inj (with-max-expansion max-expansion-size)]
-    #{["/fhir/metadata"                   :get  metadata                                                   :route-name ::metadata]
+    #{["/fhir/metadata"                   :get  metadata                                              :route-name ::metadata]
 
-      ["/fhir/CodeSystem/$lookup"         :get  cs-lookup                                                  :route-name ::cs-lookup-get]
-      ["/fhir/CodeSystem/$lookup"         :post cs-lookup                                                  :route-name ::cs-lookup-post]
+      ["/fhir/CodeSystem/$lookup"         :get  [tx-overlay cs-lookup]                                :route-name ::cs-lookup-get]
+      ["/fhir/CodeSystem/$lookup"         :post [tx-overlay cs-lookup]                                :route-name ::cs-lookup-post]
 
-      ["/fhir/CodeSystem/$validate-code"  :get  cs-validate-code                                             :route-name ::cs-validate-get]
-      ["/fhir/CodeSystem/$validate-code"  :post cs-validate-code                                             :route-name ::cs-validate-post]
+      ["/fhir/CodeSystem/$validate-code"  :get  [tx-overlay cs-validate-code]                         :route-name ::cs-validate-get]
+      ["/fhir/CodeSystem/$validate-code"  :post [tx-overlay cs-validate-code]                         :route-name ::cs-validate-post]
 
-      ["/fhir/CodeSystem/$subsumes"       :get  cs-subsumes                                                 :route-name ::cs-subsumes-get]
-      ["/fhir/CodeSystem/$subsumes"       :post cs-subsumes                                                 :route-name ::cs-subsumes-post]
+      ["/fhir/CodeSystem/$subsumes"       :get  [tx-overlay cs-subsumes]                              :route-name ::cs-subsumes-get]
+      ["/fhir/CodeSystem/$subsumes"       :post [tx-overlay cs-subsumes]                              :route-name ::cs-subsumes-post]
 
-      ["/fhir/ValueSet/$validate-code"    :get  vs-validate-code                                            :route-name ::vs-validate-get]
-      ["/fhir/ValueSet/$validate-code"    :post vs-validate-code                                            :route-name ::vs-validate-post]
+      ["/fhir/ValueSet/$validate-code"    :get  [tx-overlay vs-validate-code]                         :route-name ::vs-validate-get]
+      ["/fhir/ValueSet/$validate-code"    :post [tx-overlay vs-validate-code]                         :route-name ::vs-validate-post]
 
-      ["/fhir/ValueSet/$expand"           :get  [max-inj vs-expand]                                         :route-name ::vs-expand-get]
-      ["/fhir/ValueSet/$expand"           :post [max-inj vs-expand]                                         :route-name ::vs-expand-post]
+      ["/fhir/ValueSet/$expand"           :get  [tx-overlay max-inj vs-expand]                        :route-name ::vs-expand-get]
+      ["/fhir/ValueSet/$expand"           :post [tx-overlay max-inj vs-expand]                        :route-name ::vs-expand-post]
 
-      ["/fhir/ConceptMap/$translate"      :get  cm-translate                                                :route-name ::cm-translate-get]
-      ["/fhir/ConceptMap/$translate"      :post cm-translate                                                :route-name ::cm-translate-post]}))
+      ["/fhir/ConceptMap/$translate"      :get  [tx-overlay cm-translate]                             :route-name ::cm-translate-get]
+      ["/fhir/ConceptMap/$translate"      :post [tx-overlay cm-translate]                             :route-name ::cm-translate-post]
+
+      ["/fhir/CodeSystem"                 :get  [parse-search-input cs-search]                        :route-name ::cs-search-get]
+      ["/fhir/CodeSystem/_search"         :post [parse-search-input cs-search]                        :route-name ::cs-search-post]
+      ["/fhir/ValueSet"                   :get  [parse-search-input vs-search]                        :route-name ::vs-search-get]
+      ["/fhir/ValueSet/_search"           :post [parse-search-input vs-search]                        :route-name ::vs-search-post]}))
 
 (def fhir-not-found
   {:name  ::fhir-not-found
@@ -749,7 +904,7 @@
                                  log-request
                                  content-negotiation catch-all-error
                                  (with-max-body (:max-body-bytes opts))
-                                 (inject-svc svc) tx-overlay fhir-not-found])
+                                 (inject-svc svc) fhir-not-found])
         (conn/with-routes (routes opts))
         (jetty/create-connector {:join? false}))))
 

@@ -711,13 +711,14 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- vs-resource-from-entry [{:keys [url version metadata compose]}]
-  {:url     url
-   :version version
-   :name    (get metadata "name")
-   :title   (get metadata "title")
-   :status  (get metadata "status")
-   :experimental (get metadata "experimental")
-   :compose compose})
+  (let [experimental (get metadata "experimental")]
+    (cond-> {:url url}
+      version              (assoc :version version)
+      (get metadata "name")        (assoc :name (get metadata "name"))
+      (get metadata "title")       (assoc :title (get metadata "title"))
+      (get metadata "status")      (assoc :status (get metadata "status"))
+      (some? experimental)         (assoc :experimental (boolean experimental))
+      (map? compose)               (assoc :compose compose))))
 
 (deftype SqliteValueSetCatalogue [_ds cache]
   protos/ValueSet

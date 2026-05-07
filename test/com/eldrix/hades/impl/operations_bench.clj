@@ -266,7 +266,30 @@
    {:id :find-matches/loinc-text-small-no-lang
     :fn (fn [svc]
           (hades/find-matches svc
-            {:system loinc-uri :text "glucose" :max-hits 10}))}])
+            {:system loinc-uri :text "glucose" :max-hits 10}))}
+
+   ;; --- FHIR REST search (FS01) -----------------------------------------
+   ;;
+   ;; The four shapes the FS01 pool exercises:
+   ;;   *-by-url   — `?url=<canonical>` (1400/1800 of the pool).
+   ;;                Pre-filter on metadata tuples collapses each
+   ;;                provider to ≤1 surviving entry; one *-resource
+   ;;                call per provider thereafter.
+   ;;   *-browse   — unfiltered. Bounded by the per-provider walk;
+   ;;                SQLite VS catalogue (~2.5k entries in smoke)
+   ;;                drives the worst case.
+   {:id :fs01/cs-by-url
+    :fn (fn [svc]
+          (hades/search-code-systems svc
+            {:url "http://hl7.org/fhir/sid/icd-10"}))}
+   {:id :fs01/vs-by-url
+    :fn (fn [svc]
+          (hades/search-value-sets svc
+            {:url "http://hl7.org/fhir/ValueSet/administrative-gender"}))}
+   {:id :fs01/cs-browse
+    :fn (fn [svc] (hades/search-code-systems svc {}))}
+   {:id :fs01/vs-browse
+    :fn (fn [svc] (hades/search-value-sets svc {}))}])
 
 ;; ─── Test entry point (clj -M:bench) ──────────────────────────────────────
 ;;
@@ -297,7 +320,9 @@
     :smoke (crit/quick-benchmark* (fn [] (f svc)) (apply hash-map smoke-opts))))
 
 (deftest operations-bench
-  (let [svc  (hades/open [fixtures/snomed-db-path fixtures/loinc-db-path])
+  (let [svc  (hades/open [fixtures/snomed-db-path
+                          fixtures/loinc-db-path
+                          fixtures/fhir-smoke-db-path])
         mode (bench-mode)]
     (try
       (doseq [{:keys [id fn]} operations]

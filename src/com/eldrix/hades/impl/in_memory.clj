@@ -179,16 +179,17 @@
 
 (defn- cs-resource-from-meta
   [meta]
-  {:url              (:url meta)
-   :version          (:version meta)
-   :name             (:name meta)
-   :title            (:title meta)
-   :status           (:status meta)
-   :experimental    (:experimental meta)
-   :description      (:description meta)
-   :content          (:content meta)
-   :language         (meta-language meta)
-   :standards-status (:standards-status meta)})
+  (let [language (meta-language meta)]
+    (cond-> {:url (:url meta)}
+      (:version meta)              (assoc :version (:version meta))
+      (:name meta)                 (assoc :name (:name meta))
+      (:title meta)                (assoc :title (:title meta))
+      (:status meta)               (assoc :status (:status meta))
+      (some? (:experimental meta)) (assoc :experimental (boolean (:experimental meta)))
+      (:description meta)          (assoc :description (:description meta))
+      (:content meta)              (assoc :content (:content meta))
+      language                     (assoc :language language)
+      (:standards-status meta)     (assoc :standards-status (:standards-status meta)))))
 
 (deftype MemoryCodeSystem [meta code-index hierarchy property-uri-map case-sensitive? ci-index]
   protos/CodeSystem
@@ -385,12 +386,12 @@
   (vs-metadata [_] [])
 
   (vs-resource [_ _params]
-    {:url              (:url meta)
-     :version          (:version meta)
-     :name             (:name meta)
-     :title            (:title meta)
-     :status           (:status meta)
-     :standards-status (:standards-status meta)})
+    (cond-> {:url (:url meta)}
+      (:version meta)          (assoc :version (:version meta))
+      (:name meta)             (assoc :name (:name meta))
+      (:title meta)            (assoc :title (:title meta))
+      (:status meta)           (assoc :status (:status meta))
+      (:standards-status meta) (assoc :standards-status (:standards-status meta))))
 
   (vs-expand [_ _ctx {:keys [filter offset count displayLanguage]}]
     (let [url     (:url meta)
@@ -510,16 +511,20 @@
        (:version vs-data) (assoc :version (:version vs-data)))])
 
   (vs-resource [_ _params]
-    (let [{:keys [url version metadata]} vs-data]
-      {:url              url
-       :version          version
-       :name             (get metadata "name")
-       :title            (get metadata "title")
-       :status           (get metadata "status")
-       :experimental     (get metadata "experimental")
-       :standards-status (fhir-extract/extract-standards-status metadata)
-       :supplements      (fhir-extract/extract-vs-supplements metadata)
-       :compose          (get metadata "compose")}))
+    (let [{:keys [url version metadata]} vs-data
+          experimental (get metadata "experimental")
+          standards    (fhir-extract/extract-standards-status metadata)
+          supplements  (fhir-extract/extract-vs-supplements metadata)
+          compose      (get metadata "compose")]
+      (cond-> {:url url}
+        version             (assoc :version version)
+        (get metadata "name")   (assoc :name (get metadata "name"))
+        (get metadata "title")  (assoc :title (get metadata "title"))
+        (get metadata "status") (assoc :status (get metadata "status"))
+        (some? experimental)    (assoc :experimental (boolean experimental))
+        standards               (assoc :standards-status standards)
+        (seq supplements)       (assoc :supplements supplements)
+        (map? compose)          (assoc :compose compose))))
 
   (vs-expand [_ svc params]
     (let [{:keys [url compose]} vs-data

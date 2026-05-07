@@ -35,6 +35,17 @@
   [{"name"       "translate"
     "definition" "http://hl7.org/fhir/OperationDefinition/ConceptMap-translate"}])
 
+(def ^:private search-interaction
+  [{"code" "search-type"}])
+
+(def ^:private search-params
+  [{"name" "url"         "type" "uri"}
+   {"name" "version"     "type" "token"}
+   {"name" "status"      "type" "token"}
+   {"name" "name"        "type" "string"}
+   {"name" "title"       "type" "string"}
+   {"name" "description" "type" "string"}])
+
 (defn capability-statement
   "Build a FHIR CapabilityStatement map describing this server."
   [{:keys [url]}]
@@ -50,12 +61,16 @@
            "format"       ["application/fhir+json" "json"]
            "rest"         [{"mode" "server"
                             "resource"
-                            [{"type"      "CodeSystem"
-                              "profile"   "http://hl7.org/fhir/StructureDefinition/CodeSystem"
-                              "operation" cs-operations}
-                             {"type"      "ValueSet"
-                              "profile"   "http://hl7.org/fhir/StructureDefinition/ValueSet"
-                              "operation" vs-operations}
+                            [{"type"        "CodeSystem"
+                              "profile"     "http://hl7.org/fhir/StructureDefinition/CodeSystem"
+                              "interaction" search-interaction
+                              "searchParam" search-params
+                              "operation"   cs-operations}
+                             {"type"        "ValueSet"
+                              "profile"     "http://hl7.org/fhir/StructureDefinition/ValueSet"
+                              "interaction" search-interaction
+                              "searchParam" search-params
+                              "operation"   vs-operations}
                              {"type"      "ConceptMap"
                               "profile"   "http://hl7.org/fhir/StructureDefinition/ConceptMap"
                               "operation" cm-operations}]}]}

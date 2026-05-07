@@ -240,7 +240,7 @@
                           ["issue.code = not-found" (issue-code-equals? "not-found")]]}}
 
    {:name "unrouted path returns FHIR-shaped 404"
-    :request {:path "/ValueSet?url=http://example.com"
+    :request {:path "/Observation?url=http://example.com"
               :headers {}}
     :expect {:status 404
              :content-type #"application/fhir\+json"

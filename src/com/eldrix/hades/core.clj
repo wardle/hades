@@ -53,6 +53,7 @@
 (s/def ::expansion-result   ::result/expansion)
 (s/def ::translate-result   ::result/translate)
 (s/def ::match-result       ::result/match)
+(s/def ::search-result      ::result/search-result)
 (s/def ::issue              ::result/issue)
 (s/def ::expansion-concept  ::result/expansion-concept)
 
@@ -196,3 +197,28 @@
   carries `:url` and optional `:valueSetVersion :displayLanguage`."
   [svc codings base-params]
   (composite/validate-codeable-concept svc codings base-params))
+
+(s/fdef search-code-systems
+  :args (s/cat :svc some? :params map?)
+  :ret  ::search-result)
+
+(defn search-code-systems
+  "FHIR REST search across registered CodeSystems. `params` is a flat
+  map of filters (`:url :version :status :name :title :description`),
+  string modifiers (`:name-mode :title-mode :description-mode` —
+  `:starts-with`, `:exact`, or `:contains`), and result-control fields
+  (`:_count :_offset :_summary`). Returns `{:total :resources}`."
+  [svc params]
+  (composite/search-code-systems svc params))
+
+(s/fdef search-value-sets
+  :args (s/cat :svc some? :params map?)
+  :ret  ::search-result)
+
+(defn search-value-sets
+  "FHIR REST search across registered ValueSets. Same params and
+  return shape as `search-code-systems`. Implicit ValueSets (e.g. the
+  Hermes 'all of SNOMED' VS) are excluded automatically — their
+  `vs-resource` returns nil."
+  [svc params]
+  (composite/search-value-sets svc params))

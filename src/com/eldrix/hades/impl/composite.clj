@@ -21,10 +21,12 @@
   `with-overlays` returns a derived composite layered on top of a base.
   Overlay catalogues take precedence; closers and the load report are
   inherited from the base only (overlays don't own them)."
-  (:require [clojure.string :as str]
+  (:require [clojure.spec.alpha :as s]
+            [clojure.string :as str]
             [com.eldrix.hades.impl.canonical :as canonical]
             [com.eldrix.hades.impl.issues :as issues]
             [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.impl.protocols.result :as result]
             [com.eldrix.hades.impl.supplement :as supplement]))
 
 (set! *warn-on-reflection* true)
@@ -398,6 +400,180 @@
                      :type         "invalid"
                      :details-code "ambiguous-target"
                      :text         msg}]})))))
+
+;; ---------------------------------------------------------------------------
+;; Search — FHIR REST search for CodeSystem / ValueSet
+;;
+;; Composes existing per-provider primitives (`*-metadata` +
+;; `*-resource`). The metadata walk gives a cheap `(url, version)`
+;; projection; we pre-filter on those keys so the URL hot path
+;; (1400/1800 FS01 requests) collapses each provider to ≤1 surviving
+;; tuple before any `*-resource` materialisation.
+;;
+;; Routing-only entries — Hermes' "all of SNOMED" implicit ValueSet
+;; and the wildcard CodeSystem version — are flagged `:implicit?` on
+;; their metadata tuples and filtered out at tuple level so catalogue
+;; listings never need a `*-resource` round-trip to know they don't
+;; produce a published resource.
+;; ---------------------------------------------------------------------------
+
+(defn- string-match
+  "FHIR string search semantics. `mode` is `:starts-with`,
+  `:exact`, or `:contains`. nil candidate never matches."
+  [candidate query mode]
+  (when candidate
+    (case mode
+      :exact       (= candidate query)
+      :starts-with (str/starts-with? (str/lower-case candidate) (str/lower-case query))
+      :contains    (str/includes? (str/lower-case candidate) (str/lower-case query)))))
+
+(defn- key-matches?
+  "Cheap pre-filter on a metadata tuple before calling `*-resource`."
+  [{:keys [url version]} {url-q :url version-q :version}]
+  (and (or (nil? url-q)     (= url-q url))
+       (or (nil? version-q) (= version-q version))))
+
+(defn- matches-filters?
+  "Apply the full filter set to a materialised resource-meta map.
+  Tokens (`:url :version :status`) must match exactly; strings
+  (`:name :title :description`) honour their companion `*-mode`."
+  [m {:keys [url version status name title description
+             name-mode title-mode description-mode]}]
+  (and (or (nil? url)         (= url (:url m)))
+       (or (nil? version)     (= version (:version m)))
+       (or (nil? status)      (= status (:status m)))
+       (or (nil? name)        (string-match (:name m) name (or name-mode :starts-with)))
+       (or (nil? title)       (string-match (:title m) title (or title-mode :starts-with)))
+       (or (nil? description) (string-match (:description m) description
+                                            (or description-mode :starts-with)))))
+
+(defn- key->params
+  "Map a metadata tuple to the `*-resource` params map. Multi-resource
+  providers dispatch on `:url`/`:system`; single-resource impls ignore
+  the keys and return their bound resource."
+  [{:keys [url version]}]
+  (cond-> {:url url :system url}
+    version (assoc :version version)))
+
+(defn- compare-by-url-version
+  "Sort comparator: alphabetic on URL, then `semver-compare` on version."
+  [a b]
+  (let [c (compare (:url a) (:url b))]
+    (if (zero? c)
+      (canonical/semver-compare (:version a) (:version b))
+      c)))
+
+(defn- compare-pair-by-url-version
+  "Sort comparator over `[provider tuple]` pairs."
+  [[_ a] [_ b]]
+  (compare-by-url-version a b))
+
+(defn- summarise-resource
+  "Apply `_summary` projection. `_summary=true` drops `:compose` from
+  ValueSet resources (the only large field `vs-resource` impls
+  return). Other values pass through."
+  [{:keys [_summary]} m]
+  (if (= "true" _summary)
+    (dissoc m :compose)
+    m))
+
+(def ^:private resource-meta-filter-keys [:status :name :title :description])
+
+(defn- needs-materialisation?
+  "Whether the supplied filters reference fields only available on the
+  materialised resource map (not on the cheap metadata tuple)."
+  [filters]
+  (boolean (some #(contains? filters %) resource-meta-filter-keys)))
+
+(defn- pair-seq
+  "Lazy seq of `[provider tuple]` pairs surviving the cheap (url/version)
+  pre-filter. Routing-only entries (`:implicit?`) are dropped here so
+  catalogue listings ignore them without a `*-resource` call."
+  [providers metadata-fn filters]
+  (for [p providers
+        t (metadata-fn p)
+        :when (and (not (:implicit? t))
+                   (key-matches? t filters))]
+    [p t]))
+
+(defn- materialise-and-filter
+  "Resolve each pair to `(resource-fn p tuple)`, drop nils (implicit-VS
+  entries), and apply the resource-meta filters. Returns a lazy seq."
+  [resource-fn filters pairs]
+  (keep (fn [[p t]]
+          (let [m (resource-fn p (key->params t))]
+            (when (and m (matches-filters? m filters))
+              m)))
+        pairs))
+
+(defn- materialise-pair
+  "Resolve a `[provider tuple]` pair to its full resource-meta. Returns
+  nil for implicit entries whose `*-resource` declines to produce one."
+  [resource-fn [p t]]
+  (resource-fn p (key->params t)))
+
+(defn- page-of
+  "Lazy page slice: drop `offset`, then take `_count` if specified."
+  [_count offset xs]
+  (cond->> (drop offset xs)
+    _count (take _count)))
+
+(defn- search*
+  "Two paths, picked from `filters`:
+
+    * Cheap path — only `:url`/`:version` filters or none. The
+      pre-filter sees everything it needs on the metadata tuple, so
+      we sort tuples (no `*-resource` calls), page, and materialise
+      ONLY the page. For a 10k-VS browse with `_count=10` this is
+      ~10 `*-resource` calls instead of 10k.
+
+    * Filtered path — at least one of `:status :name :title
+      :description` is supplied. We can't filter without the
+      materialised resource map; realise everything that survived the
+      pre-filter, then sort/page over the result.
+
+  `:_summary=count` short-circuits the page projection in both paths
+  (return `total` only).
+
+  Defaults and caps for `:_count` belong at the HTTP boundary; this
+  fn takes whatever is supplied."
+  [providers metadata-fn resource-fn {:keys [_count _offset _summary] :as params}]
+  (let [filters (dissoc params :_count :_offset :_summary)
+        offset  (or _offset 0)
+        pairs   (pair-seq (distinct providers) metadata-fn filters)
+        count?  (= "count" _summary)]
+    (if (needs-materialisation? filters)
+      (let [matched   (vec (materialise-and-filter resource-fn filters pairs))
+            sorted    (sort compare-by-url-version matched)
+            resources (if count?
+                        []
+                        (into [] (map #(summarise-resource params %))
+                              (page-of _count offset sorted)))]
+        (s/assert ::result/search-result {:total (count matched) :resources resources}))
+      (let [sorted-pairs (sort compare-pair-by-url-version pairs)
+            resources    (if count?
+                           []
+                           (into [] (comp (keep #(materialise-pair resource-fn %))
+                                          (map #(summarise-resource params %)))
+                                 (page-of _count offset sorted-pairs)))]
+        (s/assert ::result/search-result
+                  {:total (count sorted-pairs) :resources resources})))))
+
+(defn search-code-systems
+  "Search registered CodeSystem resources. `params` is a
+  `::input/search-params`; returns a `::result/search-result`."
+  [{:keys [codesystems]} params]
+  (search* (vals codesystems) protos/cs-metadata protos/cs-resource params))
+
+(defn search-value-sets
+  "Search registered ValueSet resources. `params` is a
+  `::input/search-params`; returns a `::result/search-result`.
+
+  Implicit ValueSets — those advertised in `vs-metadata` for routing
+  only — carry `:implicit? true` on the metadata tuple and are
+  filtered out before sort/page."
+  [{:keys [valuesets]} params]
+  (search* (vals valuesets) protos/vs-metadata protos/vs-resource params))
 
 ;; ---------------------------------------------------------------------------
 ;; CodeableConcept aggregation — uses vs-validate-code per coding then

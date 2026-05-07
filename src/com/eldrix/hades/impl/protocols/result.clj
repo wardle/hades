@@ -187,9 +187,20 @@
 ;; Resource metadata — returned by cs-resource and vs-resource
 ;; ---------------------------------------------------------------------------
 
+(s/def ::compose (s/nilable map?))
+
 (s/def ::resource-meta
   (s/keys :opt-un [::url ::version ::name ::title ::status
-                   ::description ::experimental]))
+                   ::description ::experimental
+                   ::compose ::standards-status]))
+
+;; ---------------------------------------------------------------------------
+;; Search result — returned by core/search-code-systems / search-value-sets
+;; ---------------------------------------------------------------------------
+
+(s/def ::resources (s/coll-of ::resource-meta))
+(s/def ::search-result
+  (s/keys :req-un [::total ::resources]))
 
 ;; ---------------------------------------------------------------------------
 ;; Provider self-description — registry-key tuples each provider
@@ -201,19 +212,26 @@
 
 (s/def ::content (s/nilable string?))
 
+;; `:implicit?` flags a routing-only entry that the provider advertises
+;; so dispatch finds it (e.g. Hermes' "all of SNOMED" implicit
+;; ValueSet) but where `*-resource` does not produce a published
+;; resource. Search and other catalogue listings filter these out at
+;; the tuple level.
+(s/def ::implicit? boolean?)
+
 ;; CodeSystem metadata — `:content` distinguishes regular vs supplement
 ;; CodeSystems; `:supplements` is the canonical of the base when
 ;; `:content` is "supplement".
 (s/def ::cs-metadata
   (s/keys :req-un [::url]
-          :opt-un [::version ::content ::supplements]))
+          :opt-un [::version ::content ::supplements ::implicit?]))
 
 ;; ValueSet metadata — only `:url`/`:version` for now; future fields
 ;; (binding strength, jurisdiction) can land here without changing the
 ;; registration contract.
 (s/def ::vs-metadata
   (s/keys :req-un [::url]
-          :opt-un [::version]))
+          :opt-un [::version ::implicit?]))
 
 ;; ConceptMap metadata — providers may expose multiple ConceptMaps
 ;; (e.g. forward + reverse of a SNOMED map refset); each tuple gets

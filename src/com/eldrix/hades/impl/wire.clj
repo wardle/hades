@@ -387,6 +387,57 @@
 
 ;; --- ValueSet assembly ---
 
+;; ---------------------------------------------------------------------------
+;; Search bundle — FHIR REST search response
+;; ---------------------------------------------------------------------------
+
+(defn cs-resource->map
+  "Build a string-keyed FHIR CodeSystem JSON map from a `::resource-meta`."
+  [{:keys [url version name title status description experimental]}]
+  (cond-> {"resourceType" "CodeSystem"}
+    url            (assoc "url" url)
+    version        (assoc "version" version)
+    name           (assoc "name" name)
+    title          (assoc "title" title)
+    status         (assoc "status" status)
+    description    (assoc "description" description)
+    (some? experimental) (assoc "experimental" (boolean experimental))))
+
+(defn vs-resource->map
+  "Build a string-keyed FHIR ValueSet JSON map from a `::resource-meta`.
+  When `:compose` is present (and not dropped by `_summary=true` in the
+  composite), it's included as the FHIR `compose` element."
+  [{:keys [url version name title status description experimental compose]}]
+  (cond-> {"resourceType" "ValueSet"}
+    url            (assoc "url" url)
+    version        (assoc "version" version)
+    name           (assoc "name" name)
+    title          (assoc "title" title)
+    status         (assoc "status" status)
+    description    (assoc "description" description)
+    (some? experimental) (assoc "experimental" (boolean experimental))
+    (map? compose) (assoc "compose" compose)))
+
+(defn search-bundle
+  "Build a FHIR searchset Bundle from a `::result/search-result`.
+  `opts` carries `:type` (`\"CodeSystem\"` or `\"ValueSet\"`),
+  `:self-link` (the request URL to echo on `link[self]`), and
+  `:resource->map` (a fn producing the per-entry FHIR resource map)."
+  [{:keys [total resources]} {:keys [type self-link resource->map]}]
+  (let [base-url (str "http://hl7.org/fhir/" type "/")]
+    (cond-> {"resourceType" "Bundle"
+             "type"         "searchset"
+             "total"        (int total)
+             "entry"        (mapv (fn [r]
+                                    (let [m (resource->map r)
+                                          full-url (str base-url
+                                                        (or (get m "url") ""))]
+                                      (cond-> {"resource" m
+                                               "search"  {"mode" "match"}}
+                                        (seq full-url) (assoc "fullUrl" full-url))))
+                                  resources)}
+      self-link (assoc "link" [{"relation" "self" "url" self-link}]))))
+
 (defn expansion->valueset
   "Build a full FHIR ValueSet map with an expansion component.
   Inputs:

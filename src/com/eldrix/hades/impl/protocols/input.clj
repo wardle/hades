@@ -73,3 +73,38 @@
   (s/keys :req-un [::system]
           :opt-un [::version ::displayLanguage ::properties
                    ::filters ::text ::max-hits ::active-only]))
+
+;; ---------------------------------------------------------------------------
+;; Search params — flat map of FHIR search filter values + parsed
+;; string modifiers + result-control fields. Consumed by composite
+;; `search-code-systems` / `search-value-sets`.
+;;
+;; Token fields (`:url`, `:version`, `:status`) match exactly. String
+;; fields (`:name`, `:title`, `:description`) match according to their
+;; companion `*-mode` key (`:starts-with`, `:exact`, `:contains`).
+;;
+;; `_count` / `_offset` paginate the merged result. Justification: an
+;; unfiltered `GET /ValueSet` against the smoke catalogues (1,962 CSs +
+;; 10,477 VSs) returns a 121 MB Bundle without a `_count` cap and 3.2
+;; MB with `_summary=true`. Honouring `_count` is the difference
+;; between a polite KB-sized response and saturating a workstation at
+;; modest RPS. Defaults are applied at the HTTP layer, not here.
+;; ---------------------------------------------------------------------------
+
+(s/def ::title (s/nilable string?))
+(s/def ::status string?)
+(s/def ::name (s/nilable string?))
+(s/def ::description (s/nilable string?))
+(s/def ::string-mode #{:starts-with :exact :contains})
+(s/def ::name-mode ::string-mode)
+(s/def ::title-mode ::string-mode)
+(s/def ::description-mode ::string-mode)
+(s/def ::_count nat-int?)
+(s/def ::_offset nat-int?)
+(s/def ::_summary string?)
+
+(s/def ::search-params
+  (s/keys :opt-un [::url ::version ::status
+                   ::name ::title ::description
+                   ::name-mode ::title-mode ::description-mode
+                   ::_count ::_offset ::_summary]))

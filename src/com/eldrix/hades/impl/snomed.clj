@@ -526,8 +526,9 @@
   (cs-metadata [_]
     ;; Hermes serves the composite of every installed SNOMED module
     ;; under one URL. The wildcard catches lookups pinning to any
-    ;; module-version URI.
-    [{:url snomed-system-uri :version "*"}
+    ;; module-version URI; mark it `:implicit?` so catalogue listings
+    ;; suppress it.
+    [{:url snomed-system-uri :version "*" :implicit? true}
      {:url snomed-system-uri :version (version-uri svc)}])
 
   (cs-resource [_ _params]
@@ -676,10 +677,14 @@
             (some? total) (assoc :total total))))))
   protos/ValueSet
   (vs-metadata [_]
-    ;; Implicit ValueSet of every installed SNOMED module.
+    ;; Implicit ValueSet of every installed SNOMED module — advertised
+    ;; for routing (`vs-expand` URL → provider) but `vs-resource`
+    ;; declines to produce a published ValueSet, so flag every entry
+    ;; `:implicit?`.
     (mapv (fn [ri]
             {:url snomed-system-uri
-             :version (module-version-uri ri)})
+             :version (module-version-uri ri)
+             :implicit? true})
           (hermes/release-information svc)))
 
   (vs-resource [_ _params])
