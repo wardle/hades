@@ -1,12 +1,5 @@
 (ns com.eldrix.hades.impl.http
-  "Pedestal HTTP layer for the Hades FHIR terminology server.
-
-  Each handler reads `svc` (a `TerminologyService`) from the Pedestal
-  context, parses operation parameters from the request, calls the
-  matching `core/*` operation, and lets the per-operation `:leave`
-  interceptor shape the response. tx-resource / inline ValueSet
-  parameters are folded into a derived service via
-  `core/with-overlays` for the lifetime of the request."
+  "Pedestal HTTP layer for the Hades FHIR terminology server."
   (:require [charred.api :as charred]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -21,9 +14,9 @@
             [com.eldrix.hades.impl.wire :as wire]
             [io.pedestal.connector :as conn]
             [io.pedestal.http.jetty :as jetty]
+            [io.pedestal.http.ring-middlewares :as ring]
             [io.pedestal.http.tracing :as tracing])
-  (:import (java.net URLDecoder)
-           (java.nio.charset StandardCharsets)
+  (:import (java.nio.charset StandardCharsets)
            (java.sql SQLTransientConnectionException)))
 
 (set! *warn-on-reflection* true)
@@ -42,22 +35,42 @@
     (write-json-fn sw data)
     (.toString sw)))
 
-(defn- decode [^String s]
-  (when s (URLDecoder/decode s StandardCharsets/UTF_8)))
+(defn- payload-too-large [size limit]
+  (ex-info (str "Request body exceeds the configured limit of " limit " bytes (got " size ")")
+           {:type         :payload-too-large
+            :details-code "too-costly"}))
 
-(defn parse-query
-  "Parse a URL query string into a multimap {name [value ...]}."
-  [^String qs]
-  (if (str/blank? qs)
-    {}
-    (reduce (fn [acc pair]
-              (let [[k v] (str/split pair #"=" 2)
-                    nm    (decode k)]
-                (if (and nm v)
-                  (update acc nm (fnil conj []) (decode v))
-                  acc)))
-            {}
-            (str/split qs #"&"))))
+(defn- enforce-limit!
+  "Throw `:payload-too-large` when `bs` exceeds `limit`; return `bs` otherwise."
+  ^bytes [^bytes bs ^long limit]
+  (when (> (alength bs) limit)
+    (throw (payload-too-large (alength bs) limit)))
+  bs)
+
+(defn- read-bounded
+  "Read up to `limit` bytes from `in` and return them; throw
+  `:payload-too-large` if the stream has more. Asks for `limit + 1`
+  bytes so a full result reveals the overflow. The JDK handles
+  buffering internally; no intermediate copy."
+  [^java.io.InputStream in ^long limit]
+  (-> (.readNBytes in (if (< limit Integer/MAX_VALUE)
+                        (unchecked-int (inc limit))
+                        Integer/MAX_VALUE))
+      (enforce-limit! limit)))
+
+(defn- read-body
+  [{:keys [body] :as request}]
+  (let [limit (or (::max-body-bytes request) Long/MAX_VALUE)]
+    (cond
+      (nil? body)    nil
+      (bytes? body)  (enforce-limit! body limit)
+      (string? body) (enforce-limit! (.getBytes ^String body StandardCharsets/UTF_8) limit)
+      :else          (with-open [in (io/input-stream body)]
+                       (read-bounded in limit)))))
+
+;; ---------------------------------------------------------------------------
+;; FHIR Parameter accessors
+;; ---------------------------------------------------------------------------
 
 (def ^:private value-keys
   ["valueString" "valueUri" "valueUrl" "valueCanonical" "valueCode" "valueId"
@@ -71,6 +84,9 @@
             nil value-keys)))
 
 (defn- param-value-str
+  "String-coerce the typed value of a single Parameter map. Returns nil
+  for nested types (Coding / CodeableConcept / resource) — those have
+  dedicated readers (`fhir-param-coding`, etc.)."
   [p]
   (let [v (param-value p)]
     (cond
@@ -84,158 +100,54 @@
   [parameters nm]
   (filter #(= nm (get % "name")) parameters))
 
-(defn- parse-post-body
-  [body]
-  (when body
-    (let [s (cond (string? body) body
-                  (bytes? body)  (String. ^bytes body StandardCharsets/UTF_8)
-                  :else          (slurp body))
-          parsed (try
-                   (when (seq s) (charred/read-json s))
-                   (catch Exception e
-                     (throw (ex-info (str "Malformed Parameters body: " (.getMessage e))
-                                     {:type         :bad-request
-                                      :details-code "invalid"}
-                                     e))))]
-      (get parsed "parameter"))))
+(defn fhir-param
+  "First entry named `nm`, stringified."
+  [fhir-params nm]
+  (when (seq fhir-params)
+    (some param-value-str (entries fhir-params nm))))
 
-(defn- get-first
-  [{:keys [query-params post-params] :as _params} nm]
-  (or (first (get query-params nm))
-      (when (seq post-params)
-        (first (keep param-value-str (entries post-params nm))))))
+(defn fhir-param-all
+  "All entries named `nm`, stringified. Repeats are preserved as a vector."
+  [fhir-params nm]
+  (when (seq fhir-params)
+    (into [] (keep param-value-str) (entries fhir-params nm))))
 
-(defn- get-bool [params nm]
-  (let [v (get-first params nm)]
-    (cond
-      (nil? v)                              nil
-      (boolean? v)                          v
-      (= "true" (str/lower-case (str v)))   true
-      (= "false" (str/lower-case (str v)))  false
-      :else                                 nil)))
+(defn fhir-param-coding
+  "First entry named `nm`, returning its `valueCoding` map or nil."
+  [fhir-params nm]
+  (when (seq fhir-params)
+    (some #(get % "valueCoding") (entries fhir-params nm))))
 
-(defn- get-int [params nm]
-  (when-let [v (get-first params nm)]
-    (cond
-      (number? v) (int v)
-      :else       (try (Integer/parseInt (str v)) (catch Exception _ nil)))))
+(defn fhir-param-codeable-concept
+  "First entry named `nm`, returning its `valueCodeableConcept` map or nil."
+  [fhir-params nm]
+  (when (seq fhir-params)
+    (some #(get % "valueCodeableConcept") (entries fhir-params nm))))
 
-(defn- get-all
-  [{:keys [query-params post-params]} nm]
-  (let [from-query (vec (get query-params nm []))]
-    (if (seq post-params)
-      (into from-query (keep param-value-str (entries post-params nm)))
-      from-query)))
-
-(defn- post-coding
-  [params nm]
-  (let [ps (:post-params params)]
-    (when (seq ps)
-      (when-let [p (first (entries ps nm))]
-        (or (get p "valueCoding") nil)))))
-
-(defn- post-codeable-concept
-  [params nm]
-  (let [ps (:post-params params)]
-    (when (seq ps)
-      (when-let [p (first (entries ps nm))]
-        (get p "valueCodeableConcept")))))
-
-(defn- post-resources
-  [params nm]
-  (let [ps (:post-params params)]
-    (when (seq ps)
-      (keep #(get % "resource") (entries ps nm)))))
-
-(def ^:private max-body-bytes-key ::max-body-bytes)
-
-(defn- payload-too-large [size limit]
-  (ex-info (str "Request body exceeds the configured limit of " limit " bytes (got " size ")")
-           {:type         :payload-too-large
-            :details-code "too-costly"}))
-
-(defn- read-bounded
-  "Read up to `limit` bytes from `in`. If the stream has more data
-  available, throw `:type :payload-too-large` rather than allocate the
-  rest. Returns a byte array."
-  [^java.io.InputStream in ^long limit]
-  (let [out (java.io.ByteArrayOutputStream.)
-        buf (byte-array 8192)]
-    (loop [total 0]
-      (let [n (.read in buf)]
-        (cond
-          (neg? n) (.toByteArray out)
-          (> (+ total n) limit) (throw (payload-too-large (+ total n) limit))
-          :else (do (.write out buf 0 n) (recur (+ total n))))))))
-
-(defn- read-body
-  [{:keys [body] :as request}]
-  (let [limit (or (get request max-body-bytes-key) Long/MAX_VALUE)]
-    (cond
-      (nil? body)    nil
-      (bytes? body)  (if (> (alength ^bytes body) limit)
-                       (throw (payload-too-large (alength ^bytes body) limit))
-                       body)
-      (string? body) (let [bs (.getBytes ^String body StandardCharsets/UTF_8)]
-                       (if (> (alength bs) limit)
-                         (throw (payload-too-large (alength bs) limit))
-                         bs))
-      :else          (with-open [in (io/input-stream body)]
-                       (read-bounded in limit)))))
-
-(defn- params-for-request
-  [request]
-  (let [qmap (parse-query (:query-string request))
-        post (when (= :post (:request-method request))
-               (parse-post-body (read-body request)))]
-    {:query-params qmap
-     :post-params  (or post [])}))
-
-(defn- collect-version-param [params key]
-  (let [values (get-all params key)]
-    (when (seq values)
-      (canonical/parse-version-param values))))
-
-(defn- request-flags
-  "Extract request-scoped flags into a flat map. These flow as keys in
-  the operation `params` map alongside `:system :code` etc."
-  [params]
-  (let [supps (into (vec (get-all params "useSupplement"))
-                    (get-all params "useSupplements"))
-        props (get-all params "property")
-        lenient (get-bool params "lenient-display-validation")]
-    (cond-> {:lenient-display-validation (boolean lenient)}
-      (seq (get-all params "system-version"))
-      (assoc :system-version (collect-version-param params "system-version"))
-
-      (seq (get-all params "force-system-version"))
-      (assoc :force-system-version (collect-version-param params "force-system-version"))
-
-      (seq (get-all params "check-system-version"))
-      (assoc :check-system-version (collect-version-param params "check-system-version"))
-
-      (seq supps) (assoc :use-supplements supps)
-      (seq props) (assoc :properties props)
-
-      (get-first params "valueSetVersion")
-      (assoc :value-set-version (get-first params "valueSetVersion"))
-
-      (get-first params "displayLanguage")
-      (assoc :display-language (get-first params "displayLanguage")))))
-
-(defn- accept-language [request]
-  (get-in request [:headers "accept-language"]))
-
-(defn- pick-display-language [params request flags]
-  (or (get-first params "displayLanguage")
-      (accept-language request)
-      (:display-language flags)))
+(defn fhir-param-resources
+  "All entries named `nm`, returning a seq of their `resource` maps."
+  [fhir-params nm]
+  (when (seq fhir-params)
+    (keep #(get % "resource") (entries fhir-params nm))))
 
 ;; ---------------------------------------------------------------------------
-;; tx-resource overlay — parse inbound FHIR Parameters that include
-;; transient CodeSystem/ValueSet/ConceptMap resources, build providers
-;; from them, and attach as a derived service for the request.
+;; Type coercions for stringified values.
 ;; ---------------------------------------------------------------------------
+
+(defn- parse-bool [s]
+  (cond
+    (nil? s)     nil
+    (boolean? s) s
+    :else        (case (str/lower-case (str s))
+                   "true"  true
+                   "false" false
+                   nil)))
+
+(defn- parse-int [s]
+  (cond
+    (nil? s)    nil
+    (number? s) (int s)
+    :else       (try (Integer/parseInt (str s)) (catch Exception _ nil))))
 
 (defn- build-overlay-providers
   "Build provider impls and supplement entries from a seq of FHIR JSON
@@ -243,7 +155,7 @@
   [resource-maps]
   (when (seq resource-maps)
     (let [fhir-data (loaders/resources->fhir-data resource-maps :tx-resource)
-          {:keys [providers supplements] :as _result}
+          {:keys [providers supplements]}
           (load-fhir/build-from-fhir-data fhir-data)]
       {:providers   providers
        :supplements supplements})))
@@ -258,10 +170,12 @@
               (or issues [{:severity "error" :type "not-found" :text message}]))}))
 
 ;; ---------------------------------------------------------------------------
-;; Shared interceptors
+;; Cross-cutting interceptors
 ;; ---------------------------------------------------------------------------
 
 (def log-request
+  "Time each request and log a single line on the way out: method, uri,
+  remote ip, status, elapsed ms."
   {:name  ::log-request
    :enter (fn [ctx] (assoc ctx ::start (System/nanoTime)))
    :leave (fn [{:keys [request response] ::keys [start] :as ctx}]
@@ -273,8 +187,11 @@
                         :ms     (long (/ (- (System/nanoTime) start) 1e6))})
             ctx)})
 
-(def content-negotiation
-  {:name  ::content-negotiation
+(def render-json
+  "Serialise map response bodies to FHIR JSON via the cached charred
+  writer and set the FHIR content-type header. Non-map bodies pass
+  through untouched."
+  {:name  ::render-json
    :leave (fn [context]
             (let [body (get-in context [:response :body])]
               (if (map? body)
@@ -302,7 +219,7 @@
 
 (defn- exception-response
   [^Throwable ex]
-  (let [data   (when (instance? clojure.lang.ExceptionInfo ex) (ex-data ex))
+  (let [data   (ex-data ex)
         t      (:type data)
         status (case t
                  :not-found     404
@@ -343,6 +260,9 @@
                :text     "The server is temporarily out of database connection capacity. Please retry."}])})
 
 (def catch-all-error
+  "Map any thrown exception to a FHIR OperationOutcome response: typed
+  ex-info `:type` keys steer the HTTP status, HikariCP saturation maps
+  to 503 + `Retry-After: 1`, and unknown exceptions log + 500."
   {:name  ::catch-all-error
    :error (fn [context ex]
             (if-let [cause (saturation-cause ex)]
@@ -351,8 +271,7 @@
               ;; the cause's message.
               (do (log/warn "connection pool saturated:" (.getMessage cause))
                   (assoc context :response (saturation-response)))
-              (let [data  (when (instance? clojure.lang.ExceptionInfo ex) (ex-data ex))
-                    t     (:type data)
+              (let [t     (:type (ex-data ex))
                     cause (or (.getCause ^Throwable ex) ex)
                     msg   (or (ex-message cause) (ex-message ex))]
                 (if t
@@ -361,54 +280,137 @@
                 (assoc context :response (exception-response ex)))))})
 
 (defn inject-svc
-  "Inject the configured service onto each request as ::svc. The
-  base service is shared across requests; per-request overlays derive
-  from it via `with-overlays`."
+  "Inject the configured service onto each request as `::svc`."
   [svc]
   {:name ::inject-svc
    :enter (fn [context]
             (assoc-in context [:request ::svc] svc))})
 
+(defn- fhir-json? [request]
+  (when-let [ct (get-in request [:headers "content-type"])]
+    (str/includes? (str/lower-case ct) "application/fhir+json")))
+
+(defn- read-fhir-parameters
+  "Bounded slurp + charred parse of a FHIR `Parameters` body. Returns the
+  vector under `parameter`, or nil for an empty body."
+  [request]
+  (when-let [bs (read-body request)]
+    (let [s      (String. ^bytes bs StandardCharsets/UTF_8)
+          parsed (try
+                   (when (seq s) (charred/read-json s))
+                   (catch Exception e
+                     (throw (ex-info (str "Malformed Parameters body: " (.getMessage e))
+                                     {:type         :bad-request
+                                      :details-code "invalid"}
+                                     e))))]
+      (get parsed "parameter"))))
+
+(defn- query->fhir-entries
+  "Coerce the parsed `:query-params` map into FHIR Parameter entries.
+  Single string values become one entry; repeated values become one
+  entry per value (preserving order)."
+  [query-params]
+  (reduce-kv
+   (fn [acc k v]
+     (let [vs (if (sequential? v) v [v])]
+       (into acc (map (fn [x] {"name" k "valueString" x})) vs)))
+   [] (or query-params {})))
+
+(def parse-fhir-params
+  "Normalise the request's operation parameters into a single
+  `::fhir-params` vector of FHIR Parameter entries:
+    - GET query string → synthesised `valueString` entries (first)
+    - POST `application/fhir+json` body → parsed entries (after)
+  Honours `::max-body-bytes` for body reads."
+  {:name  ::parse-fhir-params
+   :enter (fn [{:keys [request] :as context}]
+            (let [from-query (query->fhir-entries (:query-params request))
+                  from-body  (when (and (= :post (:request-method request))
+                                        (fhir-json? request))
+                               (read-fhir-parameters request))
+                  combined   (into from-query (or from-body []))]
+              (assoc-in context [:request ::fhir-params] combined)))})
+
+(defn- inline-valueset-overlay
+  "When the request carries an inline `valueSet` parameter and no
+  caller-supplied `url`, build a single-provider overlay for it. Returns
+  `{:providers [...] :overlay-url ...}` or nil."
+  [fhir-params]
+  (when (nil? (fhir-param fhir-params "url"))
+    (when-let [inline-vs (first (fhir-param-resources fhir-params "valueSet"))]
+      (let [synth-url (or (get inline-vs "url")
+                          (str "urn:hades:inline:" (java.util.UUID/randomUUID)))
+            vs-map    (cond-> inline-vs
+                        (nil? (get inline-vs "url")) (assoc "url" synth-url))
+            provider  (load-fhir/from-fhir vs-map)]
+        {:providers [provider] :overlay-url synth-url}))))
+
 (def tx-overlay
-  "Parse query/post params onto `::params` + `::flags`, and — when the
-  request carries `tx-resource` Parameters — derive a per-request
-  service via `core/with-overlays` and replace `::svc`. Mounted
-  per-route on every operation route; not on `_search` routes (which
-  carry form-encoded bodies that this interceptor would try to parse
-  as JSON Parameters)."
+  "Overlay any request-scoped CodeSystem / ValueSet / ConceptMap
+  resources onto `::svc`:
+    - `tx-resource` Parameters entries → providers + supplement entries
+    - inline `valueSet` (POST `$expand` only) → single provider with a
+      synthetic URL exposed as `::overlay-url`
+
+  Reads `::fhir-params`."
   {:name  ::tx-overlay
    :enter (fn [{:keys [request] :as context}]
-            (let [params   (params-for-request request)
-                  tx-res   (post-resources params "tx-resource")
-                  {:keys [providers supplements]} (build-overlay-providers tx-res)]
-              (cond-> (-> context
-                          (assoc-in [:request ::params] params)
-                          (assoc-in [:request ::flags]  (request-flags params)))
-                ;; if we have any overlay providers, create a new hades service with them
+            (let [fhir-params  (::fhir-params request)
+                  tx-built     (build-overlay-providers
+                                (fhir-param-resources fhir-params "tx-resource"))
+                  inline       (inline-valueset-overlay fhir-params)
+                  providers    (into (vec (:providers tx-built))
+                                     (:providers inline))
+                  supplements  (:supplements tx-built)]
+              (cond-> context
                 (seq providers)
-                (update-in [:request ::svc] #(hades/with-overlays % providers {:supplements supplements})))))})
+                (update-in [:request ::svc]
+                           #(hades/with-overlays % providers
+                              (cond-> {} supplements (assoc :supplements supplements))))
 
-;; ---------------------------------------------------------------------------
-;; Search input — parse query string + form-urlencoded body into a
-;; uniform multimap. Used by `/fhir/<Type>` GET and `/fhir/<Type>/_search`
-;; POST. Form body uses the same `key=value&...` syntax as a query
-;; string, so `parse-query` handles both shapes.
-;; ---------------------------------------------------------------------------
+                (:overlay-url inline)
+                (assoc-in [:request ::overlay-url] (:overlay-url inline)))))})
 
-(defn- form-encoded? [request]
-  (when-let [ct (get-in request [:headers "content-type"])]
-    (str/starts-with? (str/lower-case ct) "application/x-www-form-urlencoded")))
+(defn- collect-version-param [fhir-params nm]
+  (let [values (fhir-param-all fhir-params nm)]
+    (when (seq values)
+      (canonical/parse-version-param values))))
 
-(def parse-search-input
-  {:name  ::parse-search-input
+(def request-flags
+  "Extract request-scoped operation flags (`system-version`,
+  `force-system-version`, `check-system-version`, `useSupplement`,
+  `property`, `valueSetVersion`, `displayLanguage`,
+  `lenient-display-validation`) from `::fhir-params` into `::flags`.
+  Handlers pass these to `core/*` ops via `merge-flags`."
+  {:name  ::request-flags
    :enter (fn [{:keys [request] :as context}]
-            (let [qmap (parse-query (:query-string request))
-                  fmap (when (and (= :post (:request-method request))
-                                  (form-encoded? request))
-                         (when-let [body (read-body request)]
-                           (parse-query (String. ^bytes body StandardCharsets/UTF_8))))
-                  merged (merge-with into qmap (or fmap {}))]
-              (assoc-in context [:request ::search-input] merged)))})
+            (let [fhir-params (::fhir-params request)
+                  supps       (into (fhir-param-all fhir-params "useSupplement")
+                                    (fhir-param-all fhir-params "useSupplements"))
+                  props       (fhir-param-all fhir-params "property")
+                  lenient     (parse-bool (fhir-param fhir-params "lenient-display-validation"))
+                  sys-ver     (collect-version-param fhir-params "system-version")
+                  force-ver   (collect-version-param fhir-params "force-system-version")
+                  check-ver   (collect-version-param fhir-params "check-system-version")
+                  vs-version  (fhir-param fhir-params "valueSetVersion")
+                  display-lang (fhir-param fhir-params "displayLanguage")
+                  flags       (cond-> {:lenient-display-validation (boolean lenient)}
+                                sys-ver       (assoc :system-version sys-ver)
+                                force-ver     (assoc :force-system-version force-ver)
+                                check-ver     (assoc :check-system-version check-ver)
+                                (seq supps)   (assoc :use-supplements supps)
+                                (seq props)   (assoc :properties props)
+                                vs-version    (assoc :value-set-version vs-version)
+                                display-lang  (assoc :display-language display-lang))]
+              (assoc-in context [:request ::flags] flags)))})
+
+(defn- pick-display-language
+  "Effective display language: the `:display-language` flag if set
+  (parsed from the `displayLanguage` operation parameter), else the
+  request's `Accept-Language` header."
+  [request flags]
+  (or (:display-language flags)
+      (get-in request [:headers "accept-language"])))
 
 (defn merge-flags
   "Merge request flags into operation params (flat). Used by every
@@ -428,12 +430,12 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- cs-lookup
-  [{::keys [svc params flags] :as request}]
-  (let [coding   (post-coding params "coding")
-        system   (or (get-first params "system") (get coding "system"))
-        code     (or (get-first params "code") (get coding "code"))
-        version  (get-first params "version")
-        display-lang (pick-display-language params request flags)]
+  [{::keys [svc flags fhir-params] :as request}]
+  (let [coding   (fhir-param-coding fhir-params "coding")
+        system   (or (fhir-param fhir-params "system") (get coding "system"))
+        code     (or (fhir-param fhir-params "code")   (get coding "code"))
+        version  (fhir-param fhir-params "version")
+        display-lang (pick-display-language request flags)]
     (or (supplements-missing-response svc nil flags)
         (let [lookup-params (-> (cond-> {:system system :code code}
                                   version      (assoc :version version)
@@ -449,19 +451,19 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- cs-validate-code
-  [{::keys [svc params flags] :as request}]
+  [{::keys [svc flags fhir-params] :as request}]
   (or (supplements-missing-response svc nil flags)
-      (let [coding   (post-coding params "coding")
+      (let [coding   (fhir-param-coding fhir-params "coding")
             coding?  (and coding (get coding "code"))
-            system   (or (get-first params "url")
-                         (get-first params "system")
+            system   (or (fhir-param fhir-params "url")
+                         (fhir-param fhir-params "system")
                          (when coding? (get coding "system")))
-            code     (or (get-first params "code")
+            code     (or (fhir-param fhir-params "code")
                          (when coding? (get coding "code")))
-            display  (or (get-first params "display")
+            display  (or (fhir-param fhir-params "display")
                          (when coding? (get coding "display")))
-            version  (get-first params "version")
-            display-lang (pick-display-language params request flags)
+            version  (fhir-param fhir-params "version")
+            display-lang (pick-display-language request flags)
             vp       (-> (cond-> {:system system :code code}
                            display      (assoc :display display)
                            version      (assoc :version version)
@@ -479,12 +481,12 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- cs-subsumes
-  [{::keys [svc params]}]
-  (let [codingA (post-coding params "codingA")
-        codingB (post-coding params "codingB")
-        codeA   (get-first params "codeA")
-        codeB   (get-first params "codeB")
-        system  (get-first params "system")
+  [{::keys [svc fhir-params]}]
+  (let [codingA (fhir-param-coding fhir-params "codingA")
+        codingB (fhir-param-coding fhir-params "codingB")
+        codeA   (fhir-param fhir-params "codeA")
+        codeB   (fhir-param fhir-params "codeB")
+        system  (fhir-param fhir-params "system")
         subs-params (cond
                       (and codeA codeB system)
                       {:systemA system :codeA codeA :systemB system :codeB codeB}
@@ -511,34 +513,34 @@
         (get cc "coding" [])))
 
 (defn- vs-validate-code
-  [{::keys [svc params flags] :as request}]
-  (let [url (get-first params "url")]
+  [{::keys [svc flags fhir-params] :as request}]
+  (let [url (fhir-param fhir-params "url")]
     (or (supplements-missing-response svc url flags)
-        (let [cc      (post-codeable-concept params "codeableConcept")
+        (let [cc      (fhir-param-codeable-concept fhir-params "codeableConcept")
               codings (seq (get cc "coding"))
-              coding  (post-coding params "coding")
+              coding  (fhir-param-coding fhir-params "coding")
               coding? (and coding (get coding "code"))
               value-set-version (:value-set-version flags)
-              display-lang (pick-display-language params request flags)
+              display-lang (pick-display-language request flags)
               base    (-> (cond-> {:url url}
                             value-set-version (assoc :valueSetVersion value-set-version)
                             display-lang      (assoc :displayLanguage display-lang))
                           (merge-flags flags))
               result  (cond
                         codings
-                        (let [r (hades/validate-codeable-concept svc
-                                                                 (cc-codings cc (get-first params "systemVersion"))
-                                                                 base)]
-                          (assoc r :codeableConcept cc))
+                        (-> (hades/validate-codeable-concept svc
+                                                             (cc-codings cc (fhir-param fhir-params "systemVersion"))
+                                                             base)
+                            (assoc :codeableConcept cc))
 
                         :else
-                        (let [system  (or (get-first params "system")
+                        (let [system  (or (fhir-param fhir-params "system")
                                           (when coding? (get coding "system")))
-                              code    (or (get-first params "code")
+                              code    (or (fhir-param fhir-params "code")
                                           (when coding? (get coding "code")))
-                              display (or (get-first params "display")
+                              display (or (fhir-param fhir-params "display")
                                           (when coding? (get coding "display")))
-                              version (or (get-first params "systemVersion")
+                              version (or (fhir-param fhir-params "systemVersion")
                                           (when coding? (get coding "version")))]
                           (hades/validate-code svc
                                                (cond-> (assoc base :system system :code code)
@@ -556,49 +558,31 @@
 ;; ValueSet $expand
 ;; ---------------------------------------------------------------------------
 
-(defn- inline-valueset-svc
-  "When a POST `$expand` request carries an inline `valueSet` parameter
-  and no `url`, layer it onto the service via `with-overlays`. Returns
-  `[svc url]` (unchanged when no inline applies)."
-  [svc params url-param]
-  (if url-param
-    [svc nil]
-    (if-let [inline-vs (first (post-resources params "valueSet"))]
-      (let [synth-url (or (get inline-vs "url")
-                          (str "urn:hades:inline:" (java.util.UUID/randomUUID)))
-            vs-map    (cond-> inline-vs
-                        (nil? (get inline-vs "url")) (assoc "url" synth-url))
-            provider  (load-fhir/from-fhir vs-map)]
-        [(hades/with-overlays svc [provider]) synth-url])
-      [svc nil])))
-
 (defn- vs-expand
-  [{::keys [params flags] base-svc ::svc :as request}]
-  (let [url-param      (get-first params "url")
-        [svc synth-url] (inline-valueset-svc base-svc params url-param)
-        url            (or url-param synth-url)]
+  [{::keys [svc flags fhir-params overlay-url max-expansion-size] :as request}]
+  (let [url            (or (fhir-param fhir-params "url") overlay-url)]
     (or (supplements-missing-response svc url flags)
-        (let [active-only? (get-bool params "activeOnly")
-              filter-value (get-first params "filter")
-              display-lang (pick-display-language params request flags)
-              include-desig? (get-bool params "includeDesignations")
-              count-value    (get-int params "count")
-              offset-value   (get-int params "offset")
-              exclude-nested-present? (some? (get-first params "excludeNested"))
-              exclude-nested? (let [v (get-bool params "excludeNested")]
+        (let [active-only?    (parse-bool (fhir-param fhir-params "activeOnly"))
+              filter-value    (fhir-param fhir-params "filter")
+              display-lang    (pick-display-language request flags)
+              include-desig?  (parse-bool (fhir-param fhir-params "includeDesignations"))
+              count-value     (parse-int  (fhir-param fhir-params "count"))
+              offset-value    (parse-int  (fhir-param fhir-params "offset"))
+              exclude-nested-input    (fhir-param fhir-params "excludeNested")
+              exclude-nested-present? (some? exclude-nested-input)
+              exclude-nested? (let [v (parse-bool exclude-nested-input)]
                                 (if (nil? v) true v))
-              req-properties (:properties flags)
-              expand-params  (-> (cond-> {:url             url
-                                          :activeOnly      active-only?
-                                          :filter          filter-value
-                                          :displayLanguage display-lang
-                                          :count           count-value
-                                          :offset          offset-value}
-                                   (seq req-properties) (assoc :properties req-properties))
-                                 (merge-flags flags))
-              result   (hades/expand svc expand-params)
-              max-size (::max-expansion-size request)
-              error-issue (first (filter #(= "error" (:severity %)) (:issues result)))]
+              req-properties  (:properties flags)
+              expand-params   (-> (cond-> {:url             url
+                                           :activeOnly      active-only?
+                                           :filter          filter-value
+                                           :displayLanguage display-lang
+                                           :count           count-value
+                                           :offset          offset-value}
+                                    (seq req-properties) (assoc :properties req-properties))
+                                  (merge-flags flags))
+              result          (hades/expand svc expand-params)
+              error-issue     (first (filter #(= "error" (:severity %)) (:issues result)))]
           (cond
             (nil? result)
             {:status 404
@@ -609,12 +593,12 @@
             error-issue
             {:status (issue->status error-issue) :body (wire/operation-outcome (:issues result))}
 
-            (and max-size (nil? count-value) (> (or (:total result) 0) max-size))
+            (and max-expansion-size (nil? count-value) (> (or (:total result) 0) max-expansion-size))
             {:status 422
              :body   (wire/operation-outcome
                       [{:severity "error" :type "too-costly"
                         :text (str "The value set '" url "' expansion has too many codes to display (>"
-                                   max-size ")")}])}
+                                   max-expansion-size ")")}])}
 
             :else
             (let [{:keys [check-system-version force-system-version system-version]} flags
@@ -672,14 +656,14 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- cm-translate
-  [{::keys [svc params flags]}]
-  (let [coding  (post-coding params "coding")
-        url     (get-first params "url")
-        system  (or (get-first params "system") (get coding "system"))
-        code    (or (get-first params "code")   (get coding "code"))
-        version (or (get-first params "version") (get coding "version"))
-        target  (or (get-first params "target")
-                    (get-first params "targetsystem"))
+  [{::keys [svc flags fhir-params]}]
+  (let [coding  (fhir-param-coding fhir-params "coding")
+        url     (fhir-param fhir-params "url")
+        system  (or (fhir-param fhir-params "system")  (get coding "system"))
+        code    (or (fhir-param fhir-params "code")    (get coding "code"))
+        version (or (fhir-param fhir-params "version") (get coding "version"))
+        target  (or (fhir-param fhir-params "target")
+                    (fhir-param fhir-params "targetsystem"))
         tparams (-> (cond-> {}
                       url     (assoc :url url)
                       system  (assoc :system system)
@@ -689,11 +673,8 @@
                     (merge-flags flags))
         result  (when (and code (or url system))
                   (hades/translate svc tparams))]
-    (cond
-      (map? result)
+    (if (map? result)
       {:status 200 :body (wire/translate->parameters result)}
-
-      :else
       {:status 404
        :body   (wire/operation-outcome
                 [{:severity "error" :type "not-found"
@@ -710,14 +691,6 @@
                                      "exact"    :exact
                                      "contains" :contains})
 
-;; Result-control defaults applied per server policy. An unfiltered
-;; `GET /ValueSet` against the smoke catalogues returns a 121 MB
-;; Bundle without any limits and 3.2 MB with `_summary=true`. Hence:
-;;   `_count` default 10 (FHIR convention), capped at 1000.
-;;   ValueSet search defaults `_summary=true` so unfiltered browse
-;;   ships the lighter shape; clients send `_summary=false` to opt
-;;   back into compose. CodeSystem search has no comparable shape
-;;   pressure (957 KB unfiltered) so we leave its default unchanged.
 (def ^:private default-count 10)
 (def ^:private max-count     1000)
 
@@ -763,11 +736,46 @@
 
       :else (update acc :unknown conj k))))
 
-(defn- parse-search-params [multimap]
+(defn- ->multimap
+  "Coerce a parsed-params map (single string or vector of strings as
+  values) into a uniform `{string → [strings]}` shape so
+  `reduce-search-entries` always sees vectors."
+  [m]
+  (reduce-kv (fn [acc k v] (assoc acc k (if (sequential? v) (vec v) [v])))
+             {} (or m {})))
+
+(defn- reduce-search-entries [multimap]
   (reduce-kv
    (fn [acc k vals] (parse-search-entry acc k (first vals)))
    {:params {} :unknown [] :errors []}
    multimap))
+
+(defn- apply-defaults
+  "Apply HTTP-layer defaults to parsed search params: clamp `_count`
+  (FHIR convention default 10, hard cap 1000); default `_summary=true`
+  for ValueSet so unfiltered browse ships the lighter shape (3.2 MB
+  with summary vs 121 MB without, on the smoke catalogue). CodeSystem
+  has no comparable shape pressure (957 KB unfiltered) so its default
+  is unchanged."
+  [params resource-type]
+  (cond-> (update params :_count resolve-count)
+    (and (= "ValueSet" resource-type) (nil? (:_summary params)))
+    (assoc :_summary "true")))
+
+(defn parse-search-params
+  "Per-resource-type search parameter interceptor: parses FHIR REST
+  search modifiers from the request's `:query-params` + `:form-params`
+  and applies server-policy defaults. Stores the parsed shape on the
+  request as `::search-params`."
+  [resource-type]
+  {:name  ::parse-search-params
+   :enter (fn [{:keys [request] :as context}]
+            (let [merged (merge-with into
+                                     (->multimap (:query-params request))
+                                     (->multimap (:form-params request)))
+                  parsed (reduce-search-entries merged)
+                  parsed (update parsed :params apply-defaults resource-type)]
+              (assoc-in context [:request ::search-params] parsed)))})
 
 (defn- prefer-strict? [request]
   (when-let [hdr (get-in request [:headers "prefer"])]
@@ -781,19 +789,9 @@
     (cond-> (str scheme "://" host uri)
       (not (str/blank? qs)) (str "?" qs))))
 
-(defn- apply-defaults
-  "Apply HTTP-layer defaults to parsed search params: clamp `_count`
-  on every search; default `_summary=true` for ValueSet so unfiltered
-  browse ships the lighter shape (3.2 MB vs 121 MB on the smoke
-  catalogue)."
-  [params resource-type]
-  (cond-> (update params :_count resolve-count)
-    (and (= "ValueSet" resource-type) (nil? (:_summary params)))
-    (assoc :_summary "true")))
-
 (defn- search-response
   [request resource-type search-fn resource->map]
-  (let [{:keys [params unknown errors]} (parse-search-params (::search-input request))
+  (let [{:keys [params unknown errors]} (::search-params request)
         svc (::svc request)]
     (cond
       (seq errors)
@@ -811,7 +809,7 @@
       :else
       {:status 200
        :body   (wire/search-bundle
-                (search-fn svc (apply-defaults params resource-type))
+                (search-fn svc params)
                 {:type          resource-type
                  :self-link     (request-self-link request)
                  :resource->map resource->map})})))
@@ -835,10 +833,17 @@
         host   (or (get-in request [:headers "host"]) "localhost")]
     (str scheme "://" host "/fhir")))
 
+(defn- query-param
+  "First value of a query-string parameter. Handles both shapes
+  Pedestal hands back: a single string (one occurrence) or a vector
+  of strings (repeated)."
+  [request nm]
+  (let [v (get-in request [:query-params nm])]
+    (if (sequential? v) (first v) v)))
+
 (defn- metadata
   [{::keys [svc] :as request}]
-  (let [mode (first (get (parse-query (:query-string request)) "mode"))
-        body (if (= "terminology" mode)
+  (let [body (if (= "terminology" (query-param request "mode"))
                (metadata/terminology-capabilities svc)
                (metadata/capability-statement {:url (server-url-for request)}))]
     {:status 200 :body body}))
@@ -847,46 +852,57 @@
 ;; Routes
 ;; ---------------------------------------------------------------------------
 
-(defn- with-max-expansion
+(defn- max-expansion
+  "Soft cap on `$expand` result size: oversize unconstrained expansions
+  return 422 `too-costly`. The cap is exposed to the handler as
+  `::max-expansion-size`."
   [max-size]
-  {:name ::with-max-expansion
+  {:name ::max-expansion
    :enter (fn [context]
             (assoc-in context [:request ::max-expansion-size] max-size))})
 
-(defn- with-max-body
+(defn- max-body
+  "Hard cap on POST body size: requests over `max-bytes` return 413
+  `too-costly`. The cap is exposed to body readers as `::max-body-bytes`."
   [max-bytes]
-  {:name ::with-max-body
+  {:name ::max-body
    :enter (fn [context]
-            (assoc-in context [:request max-body-bytes-key] max-bytes))})
+            (assoc-in context [:request ::max-body-bytes] max-bytes))})
 
 (defn routes [{:keys [max-expansion-size]}]
-  (let [max-inj (with-max-expansion max-expansion-size)]
-    #{["/fhir/metadata"                   :get  metadata                                              :route-name ::metadata]
+  (let [parse-params (ring/params)
+        op-base     [parse-params parse-fhir-params tx-overlay request-flags]
+        cs-search-i [parse-params (parse-search-params "CodeSystem")]
+        vs-search-i [parse-params (parse-search-params "ValueSet")]
+        max-expand  (max-expansion max-expansion-size)]
+    #{["/fhir/metadata"                   :get  [parse-params metadata]                              :route-name ::metadata]
 
-      ["/fhir/CodeSystem/$lookup"         :get  [tx-overlay cs-lookup]                                :route-name ::cs-lookup-get]
-      ["/fhir/CodeSystem/$lookup"         :post [tx-overlay cs-lookup]                                :route-name ::cs-lookup-post]
+      ["/fhir/CodeSystem/$lookup"         :get  (conj op-base cs-lookup)                            :route-name ::cs-lookup-get]
+      ["/fhir/CodeSystem/$lookup"         :post (conj op-base cs-lookup)                            :route-name ::cs-lookup-post]
 
-      ["/fhir/CodeSystem/$validate-code"  :get  [tx-overlay cs-validate-code]                         :route-name ::cs-validate-get]
-      ["/fhir/CodeSystem/$validate-code"  :post [tx-overlay cs-validate-code]                         :route-name ::cs-validate-post]
+      ["/fhir/CodeSystem/$validate-code"  :get  (conj op-base cs-validate-code)                     :route-name ::cs-validate-get]
+      ["/fhir/CodeSystem/$validate-code"  :post (conj op-base cs-validate-code)                     :route-name ::cs-validate-post]
 
-      ["/fhir/CodeSystem/$subsumes"       :get  [tx-overlay cs-subsumes]                              :route-name ::cs-subsumes-get]
-      ["/fhir/CodeSystem/$subsumes"       :post [tx-overlay cs-subsumes]                              :route-name ::cs-subsumes-post]
+      ["/fhir/CodeSystem/$subsumes"       :get  (conj op-base cs-subsumes)                          :route-name ::cs-subsumes-get]
+      ["/fhir/CodeSystem/$subsumes"       :post (conj op-base cs-subsumes)                          :route-name ::cs-subsumes-post]
 
-      ["/fhir/ValueSet/$validate-code"    :get  [tx-overlay vs-validate-code]                         :route-name ::vs-validate-get]
-      ["/fhir/ValueSet/$validate-code"    :post [tx-overlay vs-validate-code]                         :route-name ::vs-validate-post]
+      ["/fhir/ValueSet/$validate-code"    :get  (conj op-base vs-validate-code)                     :route-name ::vs-validate-get]
+      ["/fhir/ValueSet/$validate-code"    :post (conj op-base vs-validate-code)                     :route-name ::vs-validate-post]
 
-      ["/fhir/ValueSet/$expand"           :get  [tx-overlay max-inj vs-expand]                        :route-name ::vs-expand-get]
-      ["/fhir/ValueSet/$expand"           :post [tx-overlay max-inj vs-expand]                        :route-name ::vs-expand-post]
+      ["/fhir/ValueSet/$expand"           :get  (conj op-base max-expand vs-expand)                 :route-name ::vs-expand-get]
+      ["/fhir/ValueSet/$expand"           :post (conj op-base max-expand vs-expand)                 :route-name ::vs-expand-post]
 
-      ["/fhir/ConceptMap/$translate"      :get  [tx-overlay cm-translate]                             :route-name ::cm-translate-get]
-      ["/fhir/ConceptMap/$translate"      :post [tx-overlay cm-translate]                             :route-name ::cm-translate-post]
+      ["/fhir/ConceptMap/$translate"      :get  (conj op-base cm-translate)                         :route-name ::cm-translate-get]
+      ["/fhir/ConceptMap/$translate"      :post (conj op-base cm-translate)                         :route-name ::cm-translate-post]
 
-      ["/fhir/CodeSystem"                 :get  [parse-search-input cs-search]                        :route-name ::cs-search-get]
-      ["/fhir/CodeSystem/_search"         :post [parse-search-input cs-search]                        :route-name ::cs-search-post]
-      ["/fhir/ValueSet"                   :get  [parse-search-input vs-search]                        :route-name ::vs-search-get]
-      ["/fhir/ValueSet/_search"           :post [parse-search-input vs-search]                        :route-name ::vs-search-post]}))
+      ["/fhir/CodeSystem"                 :get  (conj cs-search-i cs-search)                        :route-name ::cs-search-get]
+      ["/fhir/CodeSystem/_search"         :post (conj cs-search-i cs-search)                        :route-name ::cs-search-post]
+      ["/fhir/ValueSet"                   :get  (conj vs-search-i vs-search)                        :route-name ::vs-search-get]
+      ["/fhir/ValueSet/_search"           :post (conj vs-search-i vs-search)                        :route-name ::vs-search-post]}))
 
 (def fhir-not-found
+  "Catch unmatched routes on the way out and return a FHIR JSON 404
+  OperationOutcome instead of Pedestal's plain-text default."
   {:name  ::fhir-not-found
    :leave (fn [context]
             (if (nil? (get-in context [:response :body]))
@@ -917,9 +933,11 @@
     (-> (conn/default-connector-map (:host opts) (:port opts))
         (conn/with-interceptors [(tracing/request-tracing-interceptor)
                                  log-request
-                                 content-negotiation catch-all-error
-                                 (with-max-body (:max-body-bytes opts))
-                                 (inject-svc svc) fhir-not-found])
+                                 render-json
+                                 catch-all-error
+                                 (max-body (:max-body-bytes opts))
+                                 (inject-svc svc)
+                                 fhir-not-found])
         (conn/with-routes (routes opts))
         (jetty/create-connector {:join? false}))))
 
