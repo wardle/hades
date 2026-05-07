@@ -30,7 +30,7 @@
            (com.eldrix.hermes.snomed Result)
            (java.util ArrayList Arrays)
            (org.apache.lucene.document LongPoint)
-           (org.apache.lucene.index LeafReaderContext NumericDocValues)
+           (org.apache.lucene.index LeafReaderContext NumericDocValues StoredFields)
            (org.apache.lucene.internal.hppc LongHashSet)
            (org.apache.lucene.search CollectionTerminatedException Collector CollectorManager
                                      IndexSearcher LeafCollector Query Scorable ScoreMode)))
@@ -203,22 +203,40 @@
       (throw (CollectionTerminatedException.)))
     (let [^LeafReaderContext c ctx
           leaf (.reader c)
-          ndv  (.getNumericDocValues leaf "concept-id")
+          ^NumericDocValues ndv  (.getNumericDocValues leaf "concept-id")
           base (.-docBase c)
-          sf   (.storedFields searcher)]
-      (reify LeafCollector
-        (^void setScorer [_ ^Scorable _])
-        (^void collect [_ ^int doc-id]
-          (.advance ^NumericDocValues ndv doc-id)
-          (let [cid (.longValue ^NumericDocValues ndv)]
-            (when (.add seen cid)
-              (when (> (.size seen) offset)
-                (if (< (.size rows) limit)
-                  (let [abs-doc (+ base doc-id)
-                        doc (.document sf abs-doc)
-                        display (hermes.search/doc->preferred-term doc lang-ids)]
-                    (.add rows {:conceptId cid :display display}))
-                  (throw (CollectionTerminatedException.))))))))))
+          ^StoredFields sf   (.storedFields searcher)]
+      (if ndv
+        (reify LeafCollector
+          (^void setScorer [_ ^Scorable _])
+          (^void collect [_ ^int doc-id]
+            (.advance ndv doc-id)
+            (let [cid (.longValue ndv)]
+              (when (.add seen cid)
+                (when (> (.size seen) offset)
+                  (if (< (.size rows) limit)
+                    (let [abs-doc (+ base doc-id)
+                          doc (.document sf abs-doc)
+                          display (hermes.search/doc->preferred-term doc lang-ids)]
+                      (.add rows {:conceptId cid :display display}))
+                    (throw (CollectionTerminatedException.))))))))
+        ;; Older Hermes indexes don't write a NumericDocValues column for
+        ;; `concept-id` — read it from StoredFields instead. Mirrors the
+        ;; fallback in `hermes.impl.lucene/IntoLongSetCollector`.
+        (let [^StoredFields leaf-sf (.storedFields leaf)
+              ^java.util.Set cid-only #{"concept-id"}]
+          (reify LeafCollector
+            (^void setScorer [_ ^Scorable _])
+            (^void collect [_ ^int doc-id]
+              (let [cid (long (.numericValue (.getField (.document leaf-sf doc-id cid-only) "concept-id")))]
+                (when (.add seen cid)
+                  (when (> (.size seen) offset)
+                    (if (< (.size rows) limit)
+                      (let [abs-doc (+ base doc-id)
+                            doc (.document sf abs-doc)
+                            display (hermes.search/doc->preferred-term doc lang-ids)]
+                        (.add rows {:conceptId cid :display display}))
+                      (throw (CollectionTerminatedException.))))))))))))
   (scoreMode [_] ScoreMode/COMPLETE_NO_SCORES))
 
 ;; Manager-wrapping avoids the deprecated `.search(Query, Collector)` overload.
