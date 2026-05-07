@@ -109,5 +109,9 @@
                (:not-found-reason
                  (hades/lookup *svc* {:system "http://example.org/cs/extras" :code "x"}))))))))
 
-(deftest metadata-empty-on-open
-  (is (= {} (hades/metadata *svc*))))
+(deftest metadata-composes-from-providers
+  (let [m (hades/metadata *svc*)]
+    (is (every? #(contains? m %) [:codesystems :valuesets :conceptmaps :totals]))
+    (is (some #(= "http://example.org/cs/colours" (:url %)) (:codesystems m)))
+    (is (some #(= "http://example.org/vs/colours" (:url %)) (:valuesets m)))
+    (is (= (count (:codesystems m)) (-> m :totals :codesystems)))))

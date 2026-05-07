@@ -79,6 +79,7 @@ Hades requires Java 21 or above.
 * It provides an open specification of a generic SQLite-based container of FHIR terminology data: [FTRM](doc/ftrm.md)
 * It can install LOINC and HL7 FHIR terminologies (usually distributed as JSON via npm packages) into those containers
 * It can serve multiple SNOMED databases, multiple FTRM databases and on-disk JSON directly with high conformance to the FHIR terminology conformance suite
+* It provides an [MCP server](doc/mcp.md) exposing the full canonical FHIR terminology operation surface ($lookup/$validate-code/$expand/$translate/$subsumes) shaped as MCP tools across multiple terminologies such as SNOMED CT, LOINC and arbitrary FHIR packages
 
 # Quickstart
 

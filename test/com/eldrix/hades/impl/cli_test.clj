@@ -251,7 +251,7 @@
 (deftest test-known-commands
   (testing "All documented commands are dispatchable"
     (is (= #{"list" "import" "available" "install"
-             "index" "compact" "status" "serve"}
+             "index" "compact" "status" "serve" "mcp"}
            cli/all-commands))))
 
 (deftest test-id-shape-helpers

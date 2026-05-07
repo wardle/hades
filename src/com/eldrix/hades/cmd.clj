@@ -10,6 +10,7 @@
             [com.eldrix.hades.impl.cli :as cli]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.impl.http :as http]
+            [com.eldrix.hades.impl.mcp.server :as mcp-server]
             [com.eldrix.hades.impl.fhir-package :as fhir-package]
             [com.eldrix.hades.impl.index.sqlite :as sqlite-index]
             [com.eldrix.hades.impl.loaders.fhir :as fhir-loader]
@@ -438,6 +439,14 @@
     (log/info "starting Hades FHIR terminology server" server-opts)
     (http/start! (http/make-server svc server-opts))))
 
+(defn- mcp [opts args]
+  (set-default-uncaught-exception-handler)
+  (let [svc (build-svc opts args)]
+    (try
+      (mcp-server/start! svc)
+      (finally
+        (hades/close svc)))))
+
 (def ^:private commands
   {"import"    {:fn import-from}
    "list"      {:fn list-from}
@@ -446,7 +455,8 @@
    "index"     {:fn build-index}
    "compact"   {:fn compact}
    "serve"     {:fn serve}
-   "status"    {:fn status}})
+   "status"    {:fn status}
+   "mcp"       {:fn mcp}})
 
 (defn- usage
   ([options-summary]

@@ -93,11 +93,22 @@
   (when svc (.close ^java.io.Closeable svc)))
 
 (defn metadata
-  "Return the load report describing what `svc` knows about: the
-  resources loaded by URL/version, any skipped entries, default
-  bindings applied, and totals."
+  "Describe what `svc` knows about: every CodeSystem, ValueSet, and
+  ConceptMap registered, composed live from each provider's
+  `*-metadata`, plus totals. Any `:metadata` map passed at open time
+  (e.g. a loader's skipped-entry report) is merged in beneath the
+  composed catalogue — live keys win on conflict."
   [svc]
-  (:metadata svc))
+  (let [css (sort-by (juxt :url :version) (protos/cs-metadata svc))
+        vss (sort-by (juxt :url :version) (protos/vs-metadata svc))
+        cms (protos/cm-metadata svc)]
+    (merge (:metadata svc)
+           {:codesystems css
+            :valuesets   vss
+            :conceptmaps cms
+            :totals      {:codesystems (count css)
+                          :valuesets   (count vss)
+                          :conceptmaps (count cms)}})))
 
 (defn with-overlays
   "Return a derived service layering the given providers on top of
