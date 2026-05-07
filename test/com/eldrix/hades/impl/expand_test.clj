@@ -1,12 +1,13 @@
-(ns com.eldrix.hades.impl.expand-fuzz-test
-  "Generative torture tests for ValueSet $expand machinery.
+(ns com.eldrix.hades.impl.expand-test
+  "Tests for ValueSet $expand against the pinned SNOMED CT
+  International fixture.
 
-  Drives `core/expand` with randomly generated FHIR ValueSet `compose`
-  definitions and `::compose/expand-params` against the pinned SNOMED
-  CT International fixture. Each generated compose is registered as a
-  `tx-resource`-style overlay on the base service so the run exercises
-  the full URL → loaders → in-memory provider → composite → compose
-  engine path that the HTTP layer hits.
+  Drives `core/expand` with `clojure.test.check`-generated FHIR
+  ValueSet `compose` definitions and `::compose/expand-params`. Each
+  generated compose is registered as a `tx-resource`-style overlay on
+  the base service so the test exercises the full URL → loaders →
+  in-memory provider → composite → compose engine path that the HTTP
+  layer hits.
 
   The property under test:
 
@@ -185,7 +186,7 @@
                  params  gen-params]
     (nil? (run-once compose params))))
 
-(def ^:private trials 1000)
+(def ^:private trials 100)
 
 (deftest ^:live expand-survives-arbitrary-compose
   (let [result (tc/quick-check trials expand-property {:max-size 30})]

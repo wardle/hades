@@ -182,13 +182,6 @@
 
 
 ;; -- Live tests ---------------------------------------------------------------
-;;
-;; Exercises filter shapes that depend on the Hermes store at query-build
-;; time — `parent =` (proximal parents) and `concept generalizes`
-;; (ancestor closure). End-to-end: build the Query via
-;; `compose-filters->query`, expand it through `expansion/expand`, and
-;; assert real concepts come back. Catches regressions where the store
-;; field accessor breaks (e.g. nil-store ⇒ NPE only at query time).
 
 (def ^:dynamic *svc* nil)
 
