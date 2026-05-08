@@ -970,13 +970,18 @@
   Hermes' `expected-manifest` is private, but we share the author —
   reaching in via the var means schema drift (a renamed `:store`,
   a new `:reasoner` key, a bumped `lmdb/N`) is picked up automatically
-  by re-resolving against the upstream definition."
+  by re-resolving against the upstream definition.
+
+  May throw on I/O errors reading `manifest.edn` or on a malformed
+  manifest. The walker in `impl/sources` catches and logs at the
+  recogniser boundary so a transient read failure surfaces as a
+  warning rather than a silent skip."
   [^File f _probe?]
   (when (and (.isFile f) (= "manifest.edn" (.getName f)))
-    (when-let [manifest (try (edn/read-string (slurp f)) (catch Exception _ nil))]
-      (let [expected @#'com.eldrix.hermes.core/expected-manifest]
-        (when (= (:version manifest) (:version expected))
-          {:dir (.getParentFile f) :version (:version manifest)})))))
+    (let [manifest (edn/read-string (slurp f))
+          expected @#'com.eldrix.hermes.core/expected-manifest]
+      (when (= (:version manifest) (:version expected))
+        {:dir (.getParentFile f) :version (:version manifest)}))))
 
 (def hermes-db-recogniser
   {:id          :hermes-db

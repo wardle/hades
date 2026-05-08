@@ -273,6 +273,42 @@
 ;; is absent (CI provisions it; local dev provisions per the Quickstart).
 ;; ---------------------------------------------------------------------------
 
+;; ---------------------------------------------------------------------------
+;; I/O error during walk surfaces, doesn't silently shrink the result.
+;;
+;; Regression: `list-children`'s previous `(or (.listFiles f) [])` masked
+;; both 'empty directory' and 'I/O error' as []. At full SNOMED scale the
+;; post-import walk could hit a transient I/O error and downstream
+;; (`files-or-throw`) would raise a misleading 'Couldn't find any
+;; terminology sources'. We now throw on a real directory whose listing
+;; fails so the cause is visible.
+;; ---------------------------------------------------------------------------
+
+(deftest unreadable-directory-throws-not-empty
+  (testing "a directory whose .listFiles returns null surfaces as IOException"
+    (let [root (mk-tmp-dir "unreadable")]
+      (try
+        ;; Strip read+execute for the *current process*. On POSIX this
+        ;; makes `.listFiles` return null even though `.isDirectory`
+        ;; still reports true (parent metadata is intact). Skipped when
+        ;; running as root (e.g. some CI containers) — root reads
+        ;; through stripped permissions.
+        (when (and (.setReadable root false false)
+                   (.setExecutable root false false))
+          (try
+            (is (thrown-with-msg? java.io.IOException
+                                  #"Failed to list directory"
+                                  (sources/tx-file-seq (.getPath root))))
+            (finally
+              (.setReadable root true true)
+              (.setExecutable root true true))))
+        (finally (delete-tree! root))))))
+
+;; ---------------------------------------------------------------------------
+;; Live: real publisher-shipped Hermes DB. Skipped when the pinned DB
+;; is absent (CI provisions it; local dev provisions per the Quickstart).
+;; ---------------------------------------------------------------------------
+
 (deftest ^:live recognises-real-hermes-db
   (let [files   (sources/tx-file-seq fixtures/snomed-db-path)
         entries (entries-by-kind files :hermes-db)]

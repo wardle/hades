@@ -3,8 +3,10 @@
   orchestration that drives `serve` and `status`."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
+            [com.eldrix.hades.cmd :as cmd]
             [com.eldrix.hades.impl.cli :as cli]
             [com.eldrix.hades.impl.paths :as paths]
+            [com.eldrix.hades.impl.sources :as sources]
             [com.eldrix.hades.impl.sqlite.db :as db])
   (:import (clojure.lang ExceptionInfo)
            (java.io File)
@@ -208,4 +210,49 @@
               "walker found the hermes-db, did not return empty")
           (is (not= :com.eldrix.hades.impl.paths/release-source-not-served reason)
               "the hermes-db wasn't classified as a release source"))
+        (finally (delete-tree! root))))))
+
+;; ---------------------------------------------------------------------------
+;; import → in-process detection round-trip
+;;
+;; Exercises the `hades import <dest> <src>` happy path end-to-end: import an
+;; RF2 skeleton, then assert the just-written hermes-db is detectable by
+;; `tx-file-seq` in the SAME JVM. This is what the cmd's `import-from`
+;; relies on internally to run its post-import auto-index step.
+;;
+;; A regression here surfaces in tx-benchmark's hades server build as
+;; `ERROR: Couldn't find any terminology sources under <dest>` — visible as
+;; a build failure with the SNOMED tree in place but no search.db / members.db.
+;; ---------------------------------------------------------------------------
+
+(def ^:private rf2-skeleton-path
+  "test/resources/sources/rf2-skeleton")
+
+(deftest import-then-detect-roundtrip
+  (testing "after import, the just-written hermes-db is detectable in-process"
+    (let [root (mk-tmp-dir "hermes-roundtrip")
+          dest (.getPath (io/file root "snomed.db"))]
+      (try
+        (#'cmd/import-from {} [dest rf2-skeleton-path])
+        (let [files   (sources/tx-file-seq dest)
+              hermes  (filter #(= :hermes-db (:kind %)) files)]
+          (is (= 1 (count hermes))
+              "post-import, tx-file-seq must find exactly one hermes-db")
+          (let [{:keys [^File dir version]} (first hermes)]
+            (is (= dest (.getPath dir)))
+            (is (string? version))))
+        (finally (delete-tree! root))))))
+
+(deftest import-without-auto-index-leaves-importable-db
+  (testing "with --no-index, import skips the post-step but writes a manifest"
+    (let [root (mk-tmp-dir "hermes-no-index")
+          dest (.getPath (io/file root "snomed.db"))]
+      (try
+        (#'cmd/import-from {:no-index true} [dest rf2-skeleton-path])
+        (is (.isFile (io/file dest "manifest.edn"))
+            "import (even without auto-index) must persist a manifest")
+        (let [hermes (filter #(= :hermes-db (:kind %)) (sources/tx-file-seq dest))]
+          (is (= 1 (count hermes))
+              "the partial DB must still register as a hermes-db so a separate
+               `index` invocation can complete it"))
         (finally (delete-tree! root))))))

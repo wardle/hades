@@ -104,3 +104,54 @@
         (is (some? ds))
         (is (vector? (db/list-resources ds))))
       (finally (delete-quietly path)))))
+
+;; ---------------------------------------------------------------------------
+;; `fhir-tx-db?` short-circuits via SQLite magic-header pre-check before
+;; opening JDBC. Regression guard: the directory-walker can visit
+;; multi-GB sparse LMDB blobs (Hermes' core.db / refsets.db) with names
+;; that would otherwise be opened by sqlite-jdbc. The header check has
+;; to reject them in microseconds without throwing.
+;; ---------------------------------------------------------------------------
+
+(deftest fhir-tx-db?-rejects-non-sqlite-without-jdbc
+  (testing "a file whose first 16 bytes aren't SQLite magic returns false fast"
+    (let [^File f (File/createTempFile "not-sqlite" ".db")]
+      (try
+        (spit f "this is plain text, definitely not a SQLite database header")
+        (is (false? (db/fhir-tx-db? f))
+            "non-SQLite content rejects without throwing")
+        (finally (.delete f))))))
+
+(deftest fhir-tx-db?-rejects-empty-file
+  (let [^File f (File/createTempFile "empty-sqlite" ".db")]
+    (try
+      ;; .createTempFile leaves the file zero-length; .read returns -1
+      ;; on the first call so the magic comparison must short-circuit.
+      (is (false? (db/fhir-tx-db? f)))
+      (finally (.delete f)))))
+
+(deftest fhir-tx-db?-rejects-tiny-file
+  (let [^File f (File/createTempFile "tiny" ".db")]
+    (try
+      ;; Less than 16 bytes — too short to even match the magic.
+      (spit f "abc")
+      (is (false? (db/fhir-tx-db? f)))
+      (finally (.delete f)))))
+
+(deftest fhir-tx-db?-rejects-plain-sqlite
+  (testing "a plain SQLite file (correct magic, wrong application_id) returns false"
+    (let [path (temp-db-path)]
+      (try
+        (let [ds (jdbc/get-datasource {:dbtype "sqlite" :dbname path})]
+          (with-open [conn (jdbc/get-connection ds)]
+            (jdbc/execute! conn ["CREATE TABLE noise (x INTEGER)"])))
+        (is (false? (db/fhir-tx-db? (io/file path))))
+        (finally (delete-quietly path))))))
+
+(deftest fhir-tx-db?-accepts-stamped-file
+  (let [path (temp-db-path)]
+    (try
+      (let [ds (db/create! path)]
+        (db/close! ds))
+      (is (true? (db/fhir-tx-db? (io/file path))))
+      (finally (delete-quietly path)))))

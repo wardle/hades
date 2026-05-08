@@ -23,11 +23,12 @@
   (:require [clojure.java.io :as io]
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
+            [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.impl.loaders.fhir :as fhir]
             [com.eldrix.hades.impl.loaders.loinc :as loinc]
             [com.eldrix.hades.impl.snomed :as snomed]
             [com.eldrix.hades.impl.sqlite.db :as sqlite-db])
-  (:import (java.io File)))
+  (:import (java.io File IOException)))
 
 (set! *warn-on-reflection* true)
 
@@ -83,18 +84,45 @@
          (or (str/starts-with? n ".")
              (#{"node_modules" "target" "build" "out"} n)))))
 
-(defn- list-children [^File f]
-  (sort-by #(.getName ^File %) (or (.listFiles f) [])))
+(defn- list-children
+  "Return `f`'s children sorted by name. Distinguishes empty dirs from
+  I/O errors: `File.listFiles` returns `null` *both* on a non-directory
+  and on a real I/O error reading the directory. Silently flattening
+  null → `[]` (the previous behaviour) hid genuine I/O errors as
+  'no recognisable files', which surfaced downstream as a misleading
+  `Couldn't find any terminology sources` from `tx-file-seq` callers.
+  We now throw on directories whose listing failed; non-directories
+  return `[]` as before."
+  [^File f]
+  (if-let [children (.listFiles f)]
+    (sort-by #(.getName ^File %) children)
+    (if (.isDirectory f)
+      (throw (IOException. (str "Failed to list directory contents: "
+                                (.getPath f))))
+      [])))
 
 (defn- recognise-file
   "Apply each recogniser to `f` in order; first to claim it wins.
   Returns a complete entry, or nil when no recogniser claims the file.
+
+  Centralises error handling: a recogniser may throw to indicate it
+  *would* have claimed the file but couldn't open it (corrupt header,
+  permission, transient I/O). We log a warning naming the recogniser
+  and file, then fall through to the next recogniser. This replaces
+  per-recogniser silent `(catch Exception _ false/nil)` patterns that
+  made an empty walk indistinguishable from broken files at scale.
+
   The returned entry is asserted against `::entry` so a misbehaving
   recogniser is caught at the boundary (asserts are a no-op when
   `*compile-asserts*` is false)."
   [^File f probe?]
   (reduce (fn [_ {:keys [id importable? database? recognise]}]
-            (when-let [ann (recognise f probe?)]
+            (when-let [ann (try (recognise f probe?)
+                                (catch Exception e
+                                  (log/warn e "recogniser threw"
+                                            {:recogniser id
+                                             :file (.getPath f)})
+                                  nil))]
               (reduced (s/assert ::entry
                                  (assoc ann
                                         :file        f

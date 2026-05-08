@@ -24,7 +24,9 @@
             [clojure.string :as str]
             [next.jdbc :as jdbc])
   (:import (com.zaxxer.hikari HikariConfig HikariDataSource)
-           (java.io Closeable File)))
+           (java.io Closeable File FileInputStream)
+           (java.nio.charset StandardCharsets)
+           (java.util Arrays)))
 
 (set! *warn-on-reflection* true)
 
@@ -121,21 +123,47 @@
 (defn- empty-file? [^File f]
   (or (not (.exists f)) (zero? (.length f))))
 
+(def ^:private ^"[B" sqlite-magic
+  "First 16 bytes of every SQLite 3 file: 'SQLite format 3' + NUL.
+  Reading the header lets us reject non-SQLite files in a microsecond
+  before reaching for JDBC."
+  (.getBytes "SQLite format 3\u0000" StandardCharsets/UTF_8))
+
+(defn- has-sqlite-header?
+  "Cheap pre-filter: is the first 16 bytes of `f` SQLite's magic header?
+  We use this before opening JDBC because the recogniser walk may visit
+  multi-GB sparse LMDB blobs (Hermes' `core.db`/`refsets.db`) and
+  opening every one as SQLite is wasteful even though the eventual
+  PRAGMA check would reject them."
+  [^File f]
+  (with-open [is (FileInputStream. f)]
+    (let [n (alength sqlite-magic)
+          buf (byte-array n)
+          read (.read is buf 0 n)]
+      (and (= read n)
+           (Arrays/equals buf ^"[B" sqlite-magic)))))
+
 (defn fhir-tx-db?
-  "True when `f` is a FHIR terminology SQLite container — i.e. opening
-  it via the SQLite JDBC driver succeeds and the `application_id`
-  PRAGMA matches the FTRM stamp. Uses the proper API rather than
-  peeking at the SQLite file header so any future change to how the
-  stamp is written is honoured automatically. Cost is one un-pooled
-  JDBC connection (~5 ms)."
+  "True when `f` is a FHIR terminology SQLite container — i.e. its
+  SQLite header is intact and the `application_id` PRAGMA matches the
+  FTRM stamp.
+
+  Header check first (cheap — one open + 16-byte read) so we don't
+  open a JDBC connection on every file in a directory walk that
+  happens to contain LMDB / arbitrary binary blobs. PRAGMA check
+  second so any future change to how the stamp is written is honoured
+  automatically.
+
+  Throws on I/O errors (e.g. permission denied opening the file). The
+  walker in `impl/sources` catches and logs at the recogniser
+  boundary; non-walker callers should treat exceptions as 'unknown'."
   [^File f]
   (and (.isFile f)
-       (try
-         (let [ds (jdbc/get-datasource (jdbc-spec (.getPath f)))]
-           (with-open [conn (jdbc/get-connection ds)]
-             (= application-id
-                (long (or (read-pragma conn "application_id") 0)))))
-         (catch Exception _ false))))
+       (has-sqlite-header? f)
+       (let [ds (jdbc/get-datasource (jdbc-spec (.getPath f)))]
+         (with-open [conn (jdbc/get-connection ds)]
+           (= application-id
+              (long (or (read-pragma conn "application_id") 0)))))))
 
 (def fhir-tx-db-recogniser
   "Recognises a FHIR terminology SQLite container (FTRM). Returns no
