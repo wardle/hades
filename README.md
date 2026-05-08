@@ -345,22 +345,9 @@ java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
 | Memory | Whole corpus in heap (~600 MB live for the 6 HL7 packages above) | ~80 MB regardless of package count |
 | Best for | Latency-sensitive use; small-to-medium catalogues; hosts with ample RAM | Memory-constrained hosts; very large corpora |
 
-In-memory is the default recommendation for FHIR packages **when the
-host has comfortable RAM headroom**. With six standard HL7 packages
-loaded, in-memory holds ~600 MB live in heap; on a host without that
-headroom, page-cache pressure on Hermes' Lucene mmap'd indices can
-cost more than the hashmap lookup saves. If RAM is constrained — or
-you're running many other heavy processes on the same machine —
-switch to SQLite with `import <out.db> <pkg-dir>`. See
+In-memory is the default; switch to SQLite with
+`import <out.db> <pkg-dir>` when RAM is constrained. See
 [doc/ftrm.md](doc/ftrm.md) for the container schema.
-
-A single-host comparison run (16 GB laptop, six HL7 packages,
-tx-benchmark vu=50) showed SQLite ahead on `$expand` workloads when
-the host was under memory pressure (~5 GB swap in use); cutting the
-in-memory load to one package brought the in-memory throughput up to
-the SQLite level on the same machine. The shape of "which is faster"
-is workload- *and* host- specific. Measure on your own hardware
-before committing to either.
 
 ## Command reference
 
