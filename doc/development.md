@@ -115,6 +115,18 @@ Each entry point fails fast with a clear hint if a required fixture is
 missing. See [`CLAUDE.md`](../CLAUDE.md) for project conventions and the
 broader architectural map.
 
+### Provider parity tests
+
+`com.eldrix.hades.provider-parity-test` runs under `clj -M:test` and
+asserts the in-memory and SQLite/FTRM providers produce **the same**
+result for the same fhir-data — including human-readable text. Both
+`:message` and issue `:text` are part of the comparison contract:
+divergence means the provider must converge on a shared helper in
+`impl/issues.clj`, not that the test's normaliser should look the
+other way. The synthetic fixture is small (a handful of toy
+CodeSystems / ValueSets / a ConceptMap), so failures are fast to
+triage.
+
 ## REPL workflow
 
 Start an nREPL with conformance deps so you can iterate on the test

@@ -279,10 +279,8 @@
                            {:severity     "information"
                             :type         "business-rule"
                             :details-code "code-rule"
-                            :text         (str "The code '" code "' differs from the correct code '"
-                                               actual-code "' by case. Although the code system '"
-                                               url "|" version "' is case insensitive, implementers "
-                                               "are strongly encouraged to use the correct case anyway")
+                            :text         (issues/format-case-mismatch
+                                           code actual-code url version)
                             :expression   ["Coding.code"]})
               display-issue (when (and display (not (display/display-matches? concept display display-langs)))
                               (let [msg (issues/format-display-mismatch display url code

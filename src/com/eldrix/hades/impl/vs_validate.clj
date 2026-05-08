@@ -216,8 +216,6 @@
   (let [system (:system match)
         case-differs? (:case-differs match)
         actual-code  (:code match)
-        sys-ver      (when system
-                       (str system (when (:version match) (str "|" (:version match)))))
         display-langs (display/parse-display-language (:displayLanguage params))
         lang-display  (when (seq display-langs)
                         (display/find-display-for-language (:designations match) display-langs))
@@ -234,10 +232,8 @@
                      {:severity     "information"
                       :type         "business-rule"
                       :details-code "code-rule"
-                      :text         (str "The code '" code "' differs from the correct code '"
-                                         actual-code "' by case. Although the code system '"
-                                         sys-ver "' is case insensitive, implementers "
-                                         "are strongly encouraged to use the correct case anyway")
+                      :text         (issues/format-case-mismatch
+                                     code actual-code system (:version match))
                       :expression   ["Coding.code"]})
         display-mismatch? (and display (not (str/blank? display))
                                (:display match)

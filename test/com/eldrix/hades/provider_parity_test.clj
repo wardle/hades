@@ -19,13 +19,12 @@
       is FTS5 BM25 — set may match but order diverges. Tested
       independently per-provider; not parity-checked.
 
-  Allowed divergence: text wording in `:message` and issue `:text` is
-  hand-coded per provider. The structural fields (`:result`, `:code`,
-  `:system`, `:display`, issue `:severity`/`:type`/`:details-code`)
-  must match exactly. The normaliser strips text-shaped fields before
-  comparison; if a normaliser allowance grows beyond a few well-known
-  cases, that's a smell — the providers are drifting in shape, not just
-  wording."
+  Comparison contract: both providers must agree on every field of the
+  result — including human-readable text. Issue `:text` and result
+  `:message` are user-facing, surface in conformance assertions, and
+  must come from shared helpers in `impl/issues.clj` rather than being
+  hand-coded per provider. If you're tempted to allow a wording
+  divergence, push the message-building into a shared helper instead."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
@@ -45,6 +44,7 @@
 (def vs-url     "http://example.org/vs/primary-colours")
 (def cm-url     "http://example.org/cm/colours-to-iso")
 (def target-cs  "http://example.org/cs/iso-colours")
+(def ci-cs-url  "http://example.org/cs/shapes")
 
 (def fhir-data
   "Synthetic dataset rich enough to exercise hierarchy, properties,
@@ -86,6 +86,16 @@
    {:type :concept :system target-cs :version "1.0" :code "ISO-R" :display "Red (ISO)"}
    {:type :concept :system target-cs :version "1.0" :code "ISO-G" :display "Green (ISO)"}
    {:type :concept :system target-cs :version "1.0" :code "ISO-B" :display "Blue (ISO)"}
+
+   ;; Case-insensitive CodeSystem — exercises the `case-differs`
+   ;; warning path. Both providers must agree on its wording.
+   {:type :codesystem-meta
+    :url ci-cs-url :version "1.0"
+    :status "active" :content "complete" :case-sensitive false}
+   {:type :concept :system ci-cs-url :version "1.0"
+    :code "Square" :display "Square"}
+   {:type :concept :system ci-cs-url :version "1.0"
+    :code "Circle" :display "Circle"}
 
    ;; Compose-driven ValueSet — the three primary colours, no
    ;; descendents (no filter).
@@ -134,9 +144,11 @@
     (sqlite-index/build! path data {:loader-type "parity-test"})
     (sqlite-index/index! path)
     (let [{:keys [codesystem valueset conceptmap datasource]}
-          (sqlite-provider/open-providers path)]
+          (sqlite-provider/open-providers path)
+          providers (filterv some? [codesystem valueset conceptmap])
+          svc (composite/from-providers providers)]
       {:cs codesystem :vs valueset :cm conceptmap
-       :ds datasource :path path})))
+       :svc svc :ds datasource :path path})))
 
 (defn provider-fixture [f]
   (let [in-mem (build-in-memory-providers fhir-data)
@@ -156,25 +168,29 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- normalise-issue
-  "Drop hand-coded text from an issue; keep the structural fields that
-  every provider must agree on."
+  "Keep the structural and user-facing fields every provider must agree
+  on. `:text` is included — divergent wording is a real bug because
+  conformance checks string equality on it."
   [issue]
   (-> issue
-      (select-keys [:severity :type :details-code :expression])
+      (select-keys [:severity :type :details-code :expression :text])
       (update :expression #(when % (vec (sort %))))))
 
 (defn- sort-by-key [k coll]
   (vec (sort-by (juxt #(name (or (get % k) "")) :value) coll)))
 
 (defn- normalise-result
-  "Strip text wording, sort multi-value collections so order
-  differences don't trigger spurious failures, drop optional fields
-  whose population is genuinely allowed to differ. The remaining map
-  must match exactly."
+  "Sort multi-value collections so order differences don't trigger
+  spurious failures, and normalise empty-vs-missing for spec-optional
+  collections. Every other field — including human-readable
+  `:message` — must match exactly between providers."
   [result]
   (when result
     (cond-> result
-      true             (dissoc :message :name)
+      ;; `:name` echoes the CodeSystem `name` element if present. The
+      ;; in-memory provider plumbs it through cs-lookup; SQLite drops
+      ;; it. Until that gap closes, ignore it for parity.
+      true             (dissoc :name)
       ;; `:matches` and `:issues` are spec-optional; an empty vector
       ;; and absence of the key are equivalent. Normalise to absence.
       (and (contains? result :matches) (empty? (:matches result)))
@@ -225,7 +241,16 @@
                     {:system cs-url :code "crimson"}))
     (testing "lookup with displayLanguage"
       (parity-check "cs-lookup" protos/cs-lookup im sq
-                    {:system cs-url :code "red" :displayLanguage "fr"}))))
+                    {:system cs-url :code "red" :displayLanguage "fr"}))
+    (testing "lookup with displayLanguage that has no designation"
+      (parity-check "cs-lookup" protos/cs-lookup im sq
+                    {:system cs-url :code "red" :displayLanguage "es"}))
+    (testing "lookup with `:properties` filter for designations"
+      (parity-check "cs-lookup" protos/cs-lookup im sq
+                    {:system cs-url :code "red" :properties ["designation"]}))
+    (testing "lookup unknown code"
+      (parity-check "cs-lookup" protos/cs-lookup im sq
+                    {:system cs-url :code "violet"}))))
 
 (deftest parity-cs-validate-code
   (let [{{im :cs} :in-mem {sq :cs} :sqlite} @state]
@@ -240,7 +265,33 @@
                     {:system cs-url :code "blue" :display "Bleu" :displayLanguage "fr"}))
     (testing "valid code with wrong display"
       (parity-check "cs-validate-code" protos/cs-validate-code im sq
-                    {:system cs-url :code "blue" :display "Marine"}))))
+                    {:system cs-url :code "blue" :display "Marine"}))
+    ;; Display-mismatch wording flows through `issues/format-display-mismatch`.
+    ;; Both providers must produce the same trailing
+    ;; `(for the language(s) '<lang>')` whether or not the caller passed a
+    ;; displayLanguage. Mirrors the scenarios in `issues_test.clj`.
+    (testing "wrong display, no displayLanguage — trailing '--'"
+      (parity-check "cs-validate-code" protos/cs-validate-code im sq
+                    {:system cs-url :code "red" :display "Crimson"}))
+    (testing "wrong display, displayLanguage matches a designation"
+      (parity-check "cs-validate-code" protos/cs-validate-code im sq
+                    {:system cs-url :code "red" :display "Marron" :displayLanguage "fr"}))
+    (testing "wrong display, displayLanguage with no designation in that language"
+      (parity-check "cs-validate-code" protos/cs-validate-code im sq
+                    {:system cs-url :code "red" :display "Rojo" :displayLanguage "es"}))
+    (testing "inactive concept"
+      (parity-check "cs-validate-code" protos/cs-validate-code im sq
+                    {:system cs-url :code "crimson"}))
+    (testing "unknown code"
+      (parity-check "cs-validate-code" protos/cs-validate-code im sq
+                    {:system cs-url :code "violet"}))
+    (testing "case-insensitive: code differs by case (composite-dispatched)"
+      (let [im-svc (get-in @state [:in-mem :svc])
+            sq-svc (get-in @state [:sqlite :svc])
+            params {:system ci-cs-url :code "square"}
+            im-r (normalise-result (hades/validate-code im-svc params))
+            sq-r (normalise-result (hades/validate-code sq-svc params))]
+        (is (= im-r sq-r) (diff "cs-validate-code (case)" [params] im-r sq-r))))))
 
 (deftest parity-cs-subsumes
   (let [{{im :cs} :in-mem {sq :cs} :sqlite} @state]
@@ -258,31 +309,34 @@
                     {:system cs-url :codeA "red" :codeB "blue"}))))
 
 (deftest parity-vs-expand
-  (let [{{im :vs im-svc :svc} :in-mem {sq :vs} :sqlite} @state
-        ;; SQLite provider also needs a service for compose callbacks;
-        ;; build a parallel one wrapping its impls.
-        sq-svc (composite/from-providers [(get-in @state [:sqlite :cs])
-                            (get-in @state [:sqlite :vs])
-                            (get-in @state [:sqlite :cm])])]
+  (let [im-svc (get-in @state [:in-mem :svc])
+        sq-svc (get-in @state [:sqlite :svc])
+        check (fn [params]
+                (let [im-r (normalise-result (hades/expand im-svc params))
+                      sq-r (normalise-result (hades/expand sq-svc params))
+                      im-codes (set (map (juxt :system :code) (:concepts im-r)))
+                      sq-codes (set (map (juxt :system :code) (:concepts sq-r)))]
+                  (is (= im-codes sq-codes)
+                      (str "Concept-set drift for " (pr-str params)
+                           "\n  in-mem: " (pr-str im-codes)
+                           "\n  sqlite: " (pr-str sq-codes)))
+                  ;; Per-concept display + designations parity, indexed
+                  ;; by code so order doesn't muddy the diff.
+                  (let [im-by (into {} (map (juxt :code identity)) (:concepts im-r))
+                        sq-by (into {} (map (juxt :code identity)) (:concepts sq-r))]
+                    (doseq [code (sort (keys im-by))]
+                      (is (= (:display (get im-by code))
+                             (:display (get sq-by code)))
+                          (str "Display drift for " code ": "
+                               (:display (get im-by code)) " vs "
+                               (:display (get sq-by code))))))))]
     (testing "expand the primary-colours ValueSet"
-      (let [im-r (protos/vs-expand im im-svc {:url vs-url})
-            sq-r (protos/vs-expand sq sq-svc {:url vs-url})
-            im-n (normalise-result im-r)
-            sq-n (normalise-result sq-r)
-            ;; vs-expand carries used-codesystems / used-valuesets
-            ;; which both providers populate from the compose engine —
-            ;; structure differs trivially. Compare just the concept set
-            ;; to assert both providers expand to the same content.
-            im-codes (set (map (juxt :system :code) (:concepts im-n)))
-            sq-codes (set (map (juxt :system :code) (:concepts sq-n)))]
-        (is (= im-codes sq-codes)
-            (str "Concept-set drift: " (pr-str {:in-mem im-codes :sqlite sq-codes})))))))
+      (check {:url vs-url}))
+    (testing "expand with displayLanguage=fr"
+      (check {:url vs-url :displayLanguage "fr"}))))
 
 (deftest parity-vs-validate-code
-  (let [{{im :vs im-svc :svc} :in-mem {sq :vs} :sqlite} @state
-        sq-svc (composite/from-providers [(get-in @state [:sqlite :cs])
-                            (get-in @state [:sqlite :vs])
-                            (get-in @state [:sqlite :cm])])
+  (let [{{im :vs im-svc :svc} :in-mem {sq :vs sq-svc :svc} :sqlite} @state
         check (fn [params]
                 (let [im-r (protos/vs-validate-code im im-svc (assoc params :url vs-url))
                       sq-r (protos/vs-validate-code sq sq-svc (assoc params :url vs-url))
@@ -301,7 +355,11 @@
     (testing "unknown code in known system"
       (check {:code "lavender" :system cs-url}))
     (testing "code under unknown system"
-      (check {:code "red" :system "http://example.org/unknown"}))))
+      (check {:code "red" :system "http://example.org/unknown"}))
+    (testing "code in VS with displayLanguage and matching designation"
+      (check {:code "red" :system cs-url :display "Rouge" :displayLanguage "fr"}))
+    (testing "code in VS with wrong display under displayLanguage"
+      (check {:code "red" :system cs-url :display "Rojo" :displayLanguage "es"}))))
 
 (deftest parity-cm-translate
   (let [{{im :cm} :in-mem {sq :cm} :sqlite} @state]

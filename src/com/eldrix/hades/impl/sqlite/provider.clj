@@ -583,15 +583,21 @@
               (let [actual-code (:concept/code row)
                     case-differs? (and (false? case-sensitive) (not= code actual-code))
                     primary-display (:concept/display row)
+                    inactive-row?  (= 1 (:concept/inactive row))
+                    status-row     (:concept/status row)
+                    inactive-status (when (#{"retired" "inactive"} status-row) status-row)
+                    inactive?      (or inactive-row? (some? inactive-status))
                     display-langs (display/parse-display-language displayLanguage)
                     ;; Designations are only needed to (a) verify the
                     ;; supplied display, or (b) pick a language-specific
-                    ;; display. Skip the read entirely otherwise. When a
-                    ;; displayLanguage is set, restrict the SQL to that
-                    ;; language so we don't pull every translation just
-                    ;; to find one.
+                    ;; display. Skip the read entirely otherwise. The
+                    ;; SQL language filter is only applied on the (b)
+                    ;; path; when `display` is set, the unhappy path
+                    ;; passes the full designation set to
+                    ;; `format-display-mismatch` so it can enumerate
+                    ;; alternatives across languages.
                     need-designations? (or display (seq display-langs))
-                    designation-langs (when (seq display-langs)
+                    designation-langs (when (and (seq display-langs) (nil? display))
                                         (mapv :lang display-langs))
                     designations (when need-designations?
                                    (fetch-designations conn url version actual-code
@@ -605,25 +611,25 @@
                                   :code (keyword code)
                                   :system url
                                   :version version}
+                           inactive?     (assoc :inactive true
+                                                :inactive-status (or inactive-status "inactive"))
                            case-differs? (assoc :normalized-code (keyword actual-code)))
                     case-issue (when case-differs?
                                  {:severity     "information"
                                   :type         "business-rule"
                                   :details-code "code-rule"
-                                  :text         (str "The code '" code "' differs from the correct code '"
-                                                     actual-code "' by case. Although the code system '"
-                                                     url (when version (str "|" version))
-                                                     "' is case insensitive, implementers are strongly "
-                                                     "encouraged to use the correct case anyway")
+                                  :text         (issues/format-case-mismatch
+                                                 code actual-code url version)
                                   :expression   ["Coding.code"]})
                     display-issue (when (and display (not (display/display-matches? concept display display-langs)))
-                                    (let [msg (str "The display '" display "' is incorrect for code '"
-                                                   code "'; correct display is '" best-display "'")]
-                                      {:severity     "error"
-                                       :type         "invalid"
-                                       :details-code "invalid-display"
-                                       :text         msg
-                                       :expression   ["Coding.display"]}))
+                                    {:severity     "error"
+                                     :type         "invalid"
+                                     :details-code "invalid-display"
+                                     :text         (issues/format-display-mismatch
+                                                    display url code primary-display designations
+                                                    displayLanguage
+                                                    (get-in meta [:metadata "language"]))
+                                     :expression   ["Coding.display"]})
                     issues (filterv some? [case-issue display-issue])]
                 (cond-> base
                   display-issue (assoc :result false :message (:text display-issue))
@@ -787,8 +793,9 @@
                                         :code        (:conceptmap_element/target_code r)}
                                  (:conceptmap_element/target_display r)
                                  (assoc :display (:conceptmap_element/target_display r))))))]
-      {:result (boolean (seq matches))
-       :matches matches})))
+      (if (seq matches)
+        {:result true :matches matches}
+        {:result false :message "No matches found"}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Public constructor

@@ -59,6 +59,19 @@
                              (if existing (str existing "; " combined) combined)))))
     result))
 
+(defn format-case-mismatch
+  "Format the `:text` for an `invalid-display` `code-rule` issue raised
+  when a case-insensitive CodeSystem matched the request but only by
+  folding case. Reused by every CodeSystem provider so the wording
+  (including the `|version` suffix only when versioned) stays
+  consistent."
+  [given-code actual-code system version]
+  (str "The code '" given-code "' differs from the correct code '"
+       actual-code "' by case. Although the code system '"
+       system (when version (str "|" version))
+       "' is case insensitive, implementers are strongly "
+       "encouraged to use the correct case anyway"))
+
 (defn format-display-mismatch
   "Format the `:message` text for an invalid-display issue.
 
@@ -103,8 +116,8 @@
              (str/join " or " formatted) " (for the language(s) '" lang "')"))
 
       (and (= 1 (count unique-choices)) (:lang (first unique-choices)))
-      (let [{:keys [display lang]} (first unique-choices)]
-        (str prefix "Valid display is '" display "' (" lang ") (for the language(s) '" lang "')"))
+      (let [{display :display, choice-lang :lang} (first unique-choices)]
+        (str prefix "Valid display is '" display "' (" choice-lang ") (for the language(s) '" lang "')"))
 
       :else
       (str prefix "Valid display is '" primary-display "' (for the language(s) '" lang "')"))))
