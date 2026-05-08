@@ -495,12 +495,19 @@
 
 (deftype SqliteCodeSystemCatalogue [ds cache]
   protos/CodeSystem
-  (cs-metadata [_]
-    (mapv (fn [[[url version] entry]]
-            (cond-> {:url url}
-              (not (str/blank? version)) (assoc :version version)
-              (:content entry)           (assoc :content (:content entry))))
-          cache))
+  (cs-metadata [_ {:keys [url version]}]
+    ;; Cache is keyed by `[url version]`, so we filter the raw key
+    ;; before allocating a tuple map. URL hot-path: walks the cache
+    ;; doing key compares, allocates a tuple only for the survivor.
+    (eduction
+     (filter (fn [[[k-url k-ver] _]]
+               (and (or (nil? url)     (= url k-url))
+                    (or (nil? version) (= version k-ver)))))
+     (map (fn [[[k-url k-ver] entry]]
+            (cond-> {:url k-url}
+              (not (str/blank? k-ver)) (assoc :version k-ver)
+              (:content entry)         (assoc :content (:content entry)))))
+     cache))
 
   (cs-resource [_ params]
     (let [meta (lookup-entry cache (:url params) (params-version params))]
@@ -729,11 +736,16 @@
 
 (deftype SqliteValueSetCatalogue [_ds cache]
   protos/ValueSet
-  (vs-metadata [_]
-    (mapv (fn [[[url version] _]]
-            (cond-> {:url url}
-              (not (str/blank? version)) (assoc :version version)))
-          cache))
+  (vs-metadata [_ {:keys [url version]}]
+    ;; Same key-filter trick as `cs-metadata` above.
+    (eduction
+     (filter (fn [[[k-url k-ver] _]]
+               (and (or (nil? url)     (= url k-url))
+                    (or (nil? version) (= version k-ver)))))
+     (map (fn [[[k-url k-ver] _]]
+            (cond-> {:url k-url}
+              (not (str/blank? k-ver)) (assoc :version k-ver))))
+     cache))
 
   (vs-resource [_ params]
     (some-> (lookup-entry cache (:url params) (params-version params))
@@ -755,13 +767,17 @@
 
 (deftype SqliteConceptMapCatalogue [ds cache]
   protos/ConceptMap
-  (cm-metadata [_]
-    (mapv (fn [[[url version] entry]]
-            (cond-> {:url url
+  (cm-metadata [_ {:keys [url version]}]
+    (eduction
+     (filter (fn [[[k-url k-ver] _]]
+               (and (or (nil? url)     (= url k-url))
+                    (or (nil? version) (= version k-ver)))))
+     (map (fn [[[k-url k-ver] entry]]
+            (cond-> {:url    k-url
                      :system (:source-uri entry)
                      :target (:target-uri entry)}
-              (not (str/blank? version)) (assoc :version version)))
-          cache))
+              (not (str/blank? k-ver)) (assoc :version k-ver))))
+     cache))
 
   (cm-resource [_ params]
     (let [entry (lookup-entry cache (:url params) (params-version params))]

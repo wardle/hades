@@ -232,7 +232,7 @@
   bare-URL entry, not N."
   [release-versions]
   (reify protos/CodeSystem
-    (cs-metadata [_]
+    (cs-metadata [_ _opts]
       (into [{:url snomed-uri :version "*"}]
             (map (fn [v] {:url snomed-uri :version v}) release-versions)))
     (cs-resource     [_ _]      {:url snomed-uri :version (first release-versions)})
@@ -307,7 +307,7 @@
             not be indexed under :valuesets — otherwise the implicit-VS
             dispatch routes vs-expand into a non-implementing impl"
     (let [cs-only (reify protos/CodeSystem
-                    (cs-metadata [_]
+                    (cs-metadata [_ _opts]
                       [{:url "http://example.com/cs-only" :version "1"}])
                     (cs-resource [_ _] {:url "http://example.com/cs-only" :version "1"})
                     (cs-lookup [_ _] nil)
@@ -379,7 +379,7 @@
   under `url|version` in `svc`."
   [svc url|version]
   (-> (composite/find-codesystem svc url|version)
-      protos/cs-metadata
+      (protos/cs-metadata {})
       first
       :content))
 
@@ -444,7 +444,7 @@
   cross-provider duplicate scenarios that bypass `build-from-fhir-data`."
   [{:keys [url version content display]}]
   (reify protos/CodeSystem
-    (cs-metadata [_]
+    (cs-metadata [_ _opts]
       [{:url url :version version :content content}])
     (cs-resource     [_ _]      {:url url :version version :content content})
     (cs-lookup       [_ _]      {:system url :code (keyword "X") :display display})
@@ -457,7 +457,7 @@
   cross-provider VS duplicate scenarios."
   [{:keys [url version label]}]
   (reify protos/ValueSet
-    (vs-metadata      [_]       [{:url url :version version}])
+    (vs-metadata      [_ _opts] [{:url url :version version}])
     (vs-resource      [_ _]     {:url url :version version})
     (vs-expand        [_ _ _]   {:concepts [{:code "X" :display label}]})
     (vs-validate-code [_ _ _]   {:result true})))

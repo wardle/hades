@@ -37,14 +37,14 @@
           (is (some? valueset))
           (is (some? conceptmap)))
         (testing "cs-metadata enumerates CodeSystems"
-          (let [meta (protos/cs-metadata codesystem)]
+          (let [meta (vec (protos/cs-metadata codesystem {}))]
             (is (= 1 (count meta)))
             (is (= "http://loinc.org" (:url (first meta))))
             (is (= "2.82" (:version (first meta))))))
         (testing "vs-metadata enumerates ValueSets"
-          (is (= 2 (count (protos/vs-metadata valueset)))))
+          (is (= 2 (count (vec (protos/vs-metadata valueset {}))))))
         (testing "cm-metadata enumerates ConceptMaps"
-          (is (= 1 (count (protos/cm-metadata conceptmap))))))
+          (is (= 1 (count (vec (protos/cm-metadata conceptmap {})))))))
       (finally (delete-quietly path)))))
 
 (deftest cs-lookup-and-validate
@@ -313,7 +313,7 @@
     (try
       (build-fixture-db path)
       (let [{:keys [conceptmap]} (sqlite-provider/open-providers path)
-            cm-url (-> (protos/cm-metadata conceptmap) first :url)
+            cm-url (-> (protos/cm-metadata conceptmap {}) first :url)
             result (protos/cm-translate conceptmap
                      {:url cm-url
                       :code "1009-0"
@@ -524,7 +524,7 @@
 (defn- meta-content-from-sqlite [path]
   (-> (sqlite-provider/open-providers path)
       :codesystem
-      protos/cs-metadata
+      (protos/cs-metadata {})
       first
       :content))
 

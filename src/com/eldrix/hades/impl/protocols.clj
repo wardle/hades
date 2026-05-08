@@ -136,11 +136,18 @@
   describe a code system or code system supplement and its key
   properties, and optionally define a part or all of its content."
   :extend-via-metadata true
-  (cs-metadata [this]
-    "Return a seq of `::result/cs-metadata` maps — one per CodeSystem
-    this provider exposes. Called by the boot driver at registration
-    time to discover the provider's `(url, version)` keyspace; impls
-    should cache any expensive introspection.")
+  (cs-metadata [this opts]
+    "Return a reducible/seq of `::result/cs-metadata` maps — one per
+    CodeSystem this provider exposes that survives `opts`.
+
+    `opts` is a `::input/metadata-opts`: a small DSL the caller uses to
+    push filters down so non-survivors are never realised. Providers
+    MUST honour every opt they receive — callers trust the result is
+    already filtered. `{}` (no opts) means \"everything\".
+
+    Called by the boot driver at registration time (with `{}`) and by
+    `search*` on the request hot path (with the request's URL/version
+    + `:include-implicit? false`).")
   (cs-resource [this params]
     "Get description of codesystem and key properties as per
     https://hl7.org/fhir/codesystem.html")
@@ -168,10 +175,10 @@
 (defprotocol ValueSet
   "A value set is selection of codes for use in a particular context."
   :extend-via-metadata true
-  (vs-metadata [this]
-    "Return a seq of `::result/vs-metadata` maps — one per ValueSet
-    this provider exposes. Called by the boot driver at registration
-    time.")
+  (vs-metadata [this opts]
+    "Return a reducible/seq of `::result/vs-metadata` maps — one per
+    ValueSet this provider exposes that survives `opts`. Same DSL +
+    contract as `cs-metadata`.")
   (vs-resource [this params])
   (vs-expand [this svc params]
     "Expand a ValueSet to its constituent codes. `svc` is the
@@ -187,12 +194,12 @@
   "A ConceptMap resource describes mappings between concepts in
   different CodeSystems or ValueSets."
   :extend-via-metadata true
-  (cm-metadata [this]
-    "Return a seq of `::result/cm-metadata` maps — one per ConceptMap
-    this provider exposes. The composite uses these to build its
-    url-based and (source, target) system-pair indices. A provider
-    handling both directions of a map must emit two entries. Called at
-    registration time; impls should cache any expensive introspection.")
+  (cm-metadata [this opts]
+    "Return a reducible/seq of `::result/cm-metadata` maps — one per
+    ConceptMap this provider exposes that survives `opts`. Same DSL +
+    contract as `cs-metadata`. The composite uses these to build its
+    url-based and (source, target) system-pair indices; a provider
+    handling both directions of a map must emit two entries.")
   (cm-resource [this params])
   (cm-translate [this params]
     "Given a source Coding, return a `::result/translate`. Params carry

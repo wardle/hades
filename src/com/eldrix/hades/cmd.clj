@@ -353,9 +353,9 @@
 
 (defn- log-catalogue-summary [svc]
   (log/info "service catalogue"
-            {:codesystem-count (count (protos/cs-metadata svc))
-             :valueset-count   (count (protos/vs-metadata svc))
-             :conceptmap-count (count (protos/cm-metadata svc))}))
+            {:codesystem-count (count (vec (protos/cs-metadata svc {})))
+             :valueset-count   (count (vec (protos/vs-metadata svc {})))
+             :conceptmap-count (count (vec (protos/cm-metadata svc {})))}))
 
 (defn- build-svc
   "Open CLI positional paths as a Hades service."
@@ -387,9 +387,9 @@
 (defn- status [{fmt :format :as opts} args]
   (let [svc (build-svc opts args)]
     (try
-      (let [st {:codesystems (sort-by (juxt :url :version) (protos/cs-metadata svc))
-                :valuesets   (sort-by (juxt :url :version) (protos/vs-metadata svc))
-                :conceptmaps (protos/cm-metadata svc)}]
+      (let [st {:codesystems (vec (sort-by (juxt :url :version) (protos/cs-metadata svc {})))
+                :valuesets   (vec (sort-by (juxt :url :version) (protos/vs-metadata svc {})))
+                :conceptmaps (vec (protos/cm-metadata svc {}))}]
         (case fmt
           :json (println (json/write-str st :escape-slash false :indent true))
           :edn  (pp/pprint st)

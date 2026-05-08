@@ -558,13 +558,22 @@
 (deftype HermesService
          [svc]
   protos/CodeSystem
-  (cs-metadata [_]
+  (cs-metadata [_ {url-q :url ver-q :version include-implicit? :include-implicit?
+                   :or {include-implicit? true}}]
     ;; Hermes serves the composite of every installed SNOMED module
     ;; under one URL. The wildcard catches lookups pinning to any
     ;; module-version URI; mark it `:implicit?` so catalogue listings
     ;; suppress it.
-    [{:url snomed-system-uri :version "*" :implicit? true}
-     {:url snomed-system-uri :version (version-uri svc)}])
+    (let [real-version (version-uri svc)]
+      (cond-> []
+        (and include-implicit?
+             (or (nil? url-q) (= url-q snomed-system-uri))
+             (or (nil? ver-q) (= ver-q "*")))
+        (conj {:url snomed-system-uri :version "*" :implicit? true})
+
+        (and (or (nil? url-q) (= url-q snomed-system-uri))
+             (or (nil? ver-q) (= ver-q real-version)))
+        (conj {:url snomed-system-uri :version real-version}))))
 
   (cs-resource [_ _params]
     {:url     snomed-system-uri
@@ -711,16 +720,22 @@
           (cond-> {:concepts (expansion->concepts concepts ver)}
             (some? total) (assoc :total total))))))
   protos/ValueSet
-  (vs-metadata [_]
+  (vs-metadata [_ {url-q :url ver-q :version include-implicit? :include-implicit?
+                   :or {include-implicit? true}}]
     ;; Implicit ValueSet of every installed SNOMED module — advertised
     ;; for routing (`vs-expand` URL → provider) but `vs-resource`
-    ;; declines to produce a published ValueSet, so flag every entry
-    ;; `:implicit?`.
-    (mapv (fn [ri]
-            {:url snomed-system-uri
-             :version (module-version-uri ri)
-             :implicit? true})
-          (hermes/release-information svc)))
+    ;; declines to produce a published ValueSet, so every entry is
+    ;; `:implicit?`. When the caller suppresses implicit (e.g. catalogue
+    ;; search), we emit nothing without touching `release-information`.
+    (when (and include-implicit?
+               (or (nil? url-q) (= url-q snomed-system-uri)))
+      (eduction
+       (map (fn [ri]
+              {:url snomed-system-uri
+               :version (module-version-uri ri)
+               :implicit? true}))
+       (filter (fn [t] (or (nil? ver-q) (= ver-q (:version t)))))
+       (hermes/release-information svc))))
 
   (vs-resource [_ _params])
   (vs-expand [_ _svc {:keys [url filter activeOnly] cnt :count ofs :offset}]
@@ -882,27 +897,32 @@
                         :expression   ["url"]}]})))))
   protos/ConceptMap
   (cm-metadata
-    [_]
-    (let [installed (installed-refset-ids svc)]
-      (concat
-       (for [{:keys [refset-id title]} historical-association-maps
-             :when (installed refset-id)]
-         {:url    (implicit-cm-url refset-id)
-          :system snomed-system-uri
-          :target snomed-system-uri
-          :title  title})
-       (mapcat
-        (fn [{:keys [refset-id target title]}]
-          (when (installed refset-id)
-            [{:url    (implicit-cm-url refset-id)
-              :system snomed-system-uri
-              :target target
-              :title  (str title " (SNOMED CT → target)")}
-             {:url    (implicit-cm-url refset-id true)
-              :system target
-              :target snomed-system-uri
-              :title  (str title " (target → SNOMED CT)")}]))
-        external-map-refsets))))
+    [_ {url-q :url ver-q :version}]
+    (let [installed (installed-refset-ids svc)
+          matches?  (fn [t]
+                      (and (or (nil? url-q) (= url-q (:url t)))
+                           (or (nil? ver-q) (= ver-q (:version t)))))]
+      (eduction
+       (filter matches?)
+       (concat
+        (for [{:keys [refset-id title]} historical-association-maps
+              :when (installed refset-id)]
+          {:url    (implicit-cm-url refset-id)
+           :system snomed-system-uri
+           :target snomed-system-uri
+           :title  title})
+        (mapcat
+         (fn [{:keys [refset-id target title]}]
+           (when (installed refset-id)
+             [{:url    (implicit-cm-url refset-id)
+               :system snomed-system-uri
+               :target target
+               :title  (str title " (SNOMED CT → target)")}
+              {:url    (implicit-cm-url refset-id true)
+               :system target
+               :target snomed-system-uri
+               :title  (str title " (target → SNOMED CT)")}]))
+         external-map-refsets)))))
   (cm-resource [_ _params])
   (cm-translate
     [_ {:keys [code] :as params}]

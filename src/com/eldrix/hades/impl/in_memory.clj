@@ -193,11 +193,17 @@
 
 (deftype MemoryCodeSystem [meta code-index hierarchy property-uri-map case-sensitive? ci-index]
   protos/CodeSystem
-  (cs-metadata [_]
-    [(cond-> {:url (:url meta)}
-       (:version meta)            (assoc :version (:version meta))
-       (:content meta)            (assoc :content (:content meta))
-       (:supplements-target meta) (assoc :supplements (:supplements-target meta)))])
+  (cs-metadata [_ {url-q :url ver-q :version}]
+    ;; Single-resource provider: skip allocation entirely when the
+    ;; caller's URL/version filter doesn't match.
+    (let [my-url (:url meta)
+          my-ver (:version meta)]
+      (when (and (or (nil? url-q) (= url-q my-url))
+                 (or (nil? ver-q) (= ver-q my-ver)))
+        [(cond-> {:url my-url}
+           my-ver                     (assoc :version my-ver)
+           (:content meta)            (assoc :content (:content meta))
+           (:supplements-target meta) (assoc :supplements (:supplements-target meta)))])))
 
   (cs-resource [_ _params]
     (cs-resource-from-meta meta))
@@ -381,7 +387,7 @@
   ;; it's a virtual reference target keyed off the CS URL. The composite
   ;; routes `?url=<cs>` to this provider via the URL-keyed valuesets map,
   ;; so resolution still works without advertising in the VS catalogue.
-  (vs-metadata [_] [])
+  (vs-metadata [_ _opts] [])
 
   (vs-resource [_ _params]
     (cond-> {:url (:url meta)}
@@ -504,9 +510,13 @@
 
 (deftype MemoryValueSet [vs-data]
   protos/ValueSet
-  (vs-metadata [_]
-    [(cond-> {:url (:url vs-data)}
-       (:version vs-data) (assoc :version (:version vs-data)))])
+  (vs-metadata [_ {url-q :url ver-q :version}]
+    (let [my-url (:url vs-data)
+          my-ver (:version vs-data)]
+      (when (and (or (nil? url-q) (= url-q my-url))
+                 (or (nil? ver-q) (= ver-q my-ver)))
+        [(cond-> {:url my-url}
+           my-ver (assoc :version my-ver))])))
 
   (vs-resource [_ _params]
     (let [{:keys [url version metadata compose]} vs-data
@@ -609,12 +619,14 @@
 
 (deftype MemoryConceptMap [cm-data fwd-idx rev-idx]
   protos/ConceptMap
-  (cm-metadata [_]
+  (cm-metadata [_ {url-q :url ver-q :version}]
     (let [{:keys [url source-uri target-uri version]} cm-data]
-      [(cond-> {:url    url
-                :system (or source-uri "")
-                :target (or target-uri "")}
-         version (assoc :version version))]))
+      (when (and (or (nil? url-q) (= url-q url))
+                 (or (nil? ver-q) (= ver-q version)))
+        [(cond-> {:url    url
+                  :system (or source-uri "")
+                  :target (or target-uri "")}
+           version (assoc :version version))])))
 
   (cm-resource [_ _params]
     (:metadata cm-data))

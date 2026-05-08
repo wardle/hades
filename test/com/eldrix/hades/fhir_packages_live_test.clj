@@ -76,8 +76,8 @@
 
 (deftest ^:live cs-metadata-parity
   (testing "in-memory and SQLite engines list the same CodeSystems"
-    (let [mem-cs (url-version-set (protos/cs-metadata *mem-svc*))
-          sql-cs (url-version-set (protos/cs-metadata *sql-svc*))]
+    (let [mem-cs (url-version-set (protos/cs-metadata *mem-svc* {}))
+          sql-cs (url-version-set (protos/cs-metadata *sql-svc* {}))]
       (is (pos? (count mem-cs)) "expected non-empty CodeSystem catalogue")
       (is (= mem-cs sql-cs)
           (str "Engines disagree on CodeSystem catalogue. "
@@ -86,8 +86,8 @@
 
 (deftest ^:live vs-metadata-parity
   (testing "in-memory and SQLite engines list the same ValueSets"
-    (let [mem-vs (url-version-set (protos/vs-metadata *mem-svc*))
-          sql-vs (url-version-set (protos/vs-metadata *sql-svc*))]
+    (let [mem-vs (url-version-set (protos/vs-metadata *mem-svc* {}))
+          sql-vs (url-version-set (protos/vs-metadata *sql-svc* {}))]
       (is (pos? (count mem-vs)) "expected non-empty ValueSet catalogue")
       (is (= mem-vs sql-vs)
           (str "Engines disagree on ValueSet catalogue. "
@@ -96,8 +96,8 @@
 
 (deftest ^:live cm-metadata-parity
   (testing "in-memory and SQLite engines list the same ConceptMaps"
-    (is (= (url-version-set (protos/cm-metadata *mem-svc*))
-           (url-version-set (protos/cm-metadata *sql-svc*))))))
+    (is (= (url-version-set (protos/cm-metadata *mem-svc* {}))
+           (url-version-set (protos/cm-metadata *sql-svc* {}))))))
 
 (deftest ^:live cs-lookup-parity-sampled
   (testing "$lookup agrees on the first concept of a sample of CodeSystems"
@@ -105,7 +105,7 @@
     ;; Skip empty / not-present CSes — there's nothing to lookup. We rely
     ;; on metadata-parity above to prove the catalogue itself matches;
     ;; here we exercise the read path.
-    (let [samples (->> (protos/cs-metadata *mem-svc*)
+    (let [samples (->> (protos/cs-metadata *mem-svc* {})
                        (keep (fn [{:keys [url version]}]
                                (when-let [code (first-code-from-cs *mem-svc* url)]
                                  [url version code])))
@@ -124,7 +124,7 @@
 
 (deftest ^:live cs-validate-code-parity-sampled
   (testing "$validate-code agrees on a sample of known-good codes"
-    (let [samples (->> (protos/cs-metadata *mem-svc*)
+    (let [samples (->> (protos/cs-metadata *mem-svc* {})
                        (keep (fn [{:keys [url version]}]
                                (when-let [code (first-code-from-cs *mem-svc* url)]
                                  [url version code])))

@@ -52,8 +52,8 @@
 
 (deftype SupplementedCodeSystem [base supplement-lookup]
   protos/CodeSystem
-  (cs-metadata [_]
-    (protos/cs-metadata base))
+  (cs-metadata [_ opts]
+    (protos/cs-metadata base opts))
 
   (cs-resource [_ params]
     (protos/cs-resource base params))
@@ -94,9 +94,9 @@
     (protos/cs-find-matches base query))
 
   protos/ValueSet
-  (vs-metadata [_]
+  (vs-metadata [_ opts]
     (when (satisfies? protos/ValueSet base)
-      (protos/vs-metadata base)))
+      (protos/vs-metadata base opts)))
 
   (vs-resource [_ params]
     (protos/vs-resource base params))

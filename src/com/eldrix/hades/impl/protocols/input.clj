@@ -108,3 +108,23 @@
                    ::name ::title ::description
                    ::name-mode ::title-mode ::description-mode
                    ::_count ::_offset ::_summary]))
+
+;; ---------------------------------------------------------------------------
+;; Metadata-opts — small DSL passed to `cs-metadata` / `vs-metadata` /
+;; `cm-metadata`. Lets callers push token filters down to providers so
+;; non-survivors are never realised (e.g. SQLite catalogue with 2.5k
+;; ValueSets returns 1 tuple under `?url=…`, not 2.5k).
+;;
+;; Providers MUST honour every opt they receive — callers trust the
+;; result and don't re-filter. `{}` (or no keys) means "everything".
+;;
+;;   :url                — exact-match canonical URL
+;;   :version            — exact-match version (alongside or without :url)
+;;   :include-implicit?  — when false, drop entries flagged `:implicit?`;
+;;                          default true so boot/status/cmd see them
+;; ---------------------------------------------------------------------------
+
+(s/def ::include-implicit? boolean?)
+
+(s/def ::metadata-opts
+  (s/keys :opt-un [::url ::version ::include-implicit?]))

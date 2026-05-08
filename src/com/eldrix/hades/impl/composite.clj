@@ -299,8 +299,8 @@
   (close [_] (run-closers closers))
 
   protos/CodeSystem
-  (cs-metadata [_]
-    (into [] (mapcat protos/cs-metadata) (distinct (vals codesystems))))
+  (cs-metadata [_ opts]
+    (eduction (mapcat #(protos/cs-metadata % opts)) (distinct (vals codesystems))))
 
   (cs-resource [this {:keys [system version] :as params}]
     (let [canonical (resolve-canonical naming-systems system)
@@ -344,8 +344,8 @@
         (protos/cs-find-matches cs query))))
 
   protos/ValueSet
-  (vs-metadata [_]
-    (into [] (mapcat protos/vs-metadata) (distinct (vals valuesets))))
+  (vs-metadata [_ opts]
+    (eduction (mapcat #(protos/vs-metadata % opts)) (distinct (vals valuesets))))
 
   (vs-resource [this {:keys [url] :as params}]
     (when-let [vs (find-valueset this url)]
@@ -373,8 +373,13 @@
                         :details-code "not-found" :text msg}]}))))
 
   protos/ConceptMap
-  (cm-metadata [_]
-    (mapv :description conceptmaps))
+  (cm-metadata [_ {url-q :url ver-q :version}]
+    (eduction
+     (map :description)
+     (filter (fn [m]
+               (and (or (nil? url-q) (= url-q (:url m)))
+                    (or (nil? ver-q) (= ver-q (:version m))))))
+     conceptmaps))
 
   (cm-resource [_ params]
     (when-let [cm (first (candidate-cm-impls conceptmaps params))]
@@ -428,21 +433,14 @@
       :starts-with (str/starts-with? (str/lower-case candidate) (str/lower-case query))
       :contains    (str/includes? (str/lower-case candidate) (str/lower-case query)))))
 
-(defn- key-matches?
-  "Cheap pre-filter on a metadata tuple before calling `*-resource`."
-  [{:keys [url version]} {url-q :url version-q :version}]
-  (and (or (nil? url-q)     (= url-q url))
-       (or (nil? version-q) (= version-q version))))
-
-(defn- matches-filters?
-  "Apply the full filter set to a materialised resource-meta map.
-  Tokens (`:url :version :status`) must match exactly; strings
-  (`:name :title :description`) honour their companion `*-mode`."
-  [m {:keys [url version status name title description
+(defn- matches-resource-filters?
+  "Apply the materialised-resource filter set. Tokens (`:status`) must
+  match exactly; strings (`:name :title :description`) honour their
+  companion `*-mode`. URL/version are not checked here — the metadata
+  DSL already pushed them down to the provider."
+  [m {:keys [status name title description
              name-mode title-mode description-mode]}]
-  (and (or (nil? url)         (= url (:url m)))
-       (or (nil? version)     (= version (:version m)))
-       (or (nil? status)      (= status (:status m)))
+  (and (or (nil? status)      (= status (:status m)))
        (or (nil? name)        (string-match (:name m) name (or name-mode :starts-with)))
        (or (nil? title)       (string-match (:title m) title (or title-mode :starts-with)))
        (or (nil? description) (string-match (:description m) description
@@ -487,31 +485,14 @@
   (boolean (some #(contains? filters %) resource-meta-filter-keys)))
 
 (defn- pair-seq
-  "Lazy seq of `[provider tuple]` pairs surviving the cheap (url/version)
-  pre-filter. Routing-only entries (`:implicit?`) are dropped here so
-  catalogue listings ignore them without a `*-resource` call."
-  [providers metadata-fn filters]
-  (for [p providers
-        t (metadata-fn p)
-        :when (and (not (:implicit? t))
-                   (key-matches? t filters))]
-    [p t]))
-
-(defn- materialise-and-filter
-  "Resolve each pair to `(resource-fn p tuple)`, drop nils (implicit-VS
-  entries), and apply the resource-meta filters. Returns a lazy seq."
-  [resource-fn filters pairs]
-  (keep (fn [[p t]]
-          (let [m (resource-fn p (key->params t))]
-            (when (and m (matches-filters? m filters))
-              m)))
-        pairs))
-
-(defn- materialise-pair
-  "Resolve a `[provider tuple]` pair to its full resource-meta. Returns
-  nil for implicit entries whose `*-resource` declines to produce one."
-  [resource-fn [p t]]
-  (resource-fn p (key->params t)))
+  "Lazy seq of `[provider tuple]` pairs. Token filters (`:url :version`)
+  and implicit-suppression have already been pushed into `metadata-fn`
+  via the metadata-opts DSL — providers honour them, so this layer
+  trusts every emitted tuple."
+  [providers metadata-fn opts]
+  (eduction
+   (mapcat (fn [p] (eduction (map #(vector p %)) (metadata-fn p opts))))
+   (distinct providers)))
 
 (defn- page-of
   "Lazy page slice: drop `offset`, then take `_count` if specified."
@@ -523,15 +504,17 @@
   "Two paths, picked from `filters`:
 
     * Cheap path — only `:url`/`:version` filters or none. The
-      pre-filter sees everything it needs on the metadata tuple, so
-      we sort tuples (no `*-resource` calls), page, and materialise
-      ONLY the page. For a 10k-VS browse with `_count=10` this is
-      ~10 `*-resource` calls instead of 10k.
+      provider applies them via the metadata-opts DSL, so we sort the
+      surviving tuples (no `*-resource` calls), page, and materialise
+      ONLY the page. For a 10k-VS browse with `_count=10` this is ~10
+      `*-resource` calls instead of 10k; for a URL-by-url request
+      against a 2.5k-VS catalogue, the SQLite catalogue's key filter
+      avoids 2,499 tuple allocations.
 
     * Filtered path — at least one of `:status :name :title
       :description` is supplied. We can't filter without the
       materialised resource map; realise everything that survived the
-      pre-filter, then sort/page over the result.
+      tuple stage, then sort/page over the result.
 
   `:_summary=count` short-circuits the page projection in both paths
   (return `total` only).
@@ -540,11 +523,19 @@
   fn takes whatever is supplied."
   [providers metadata-fn resource-fn {:keys [_count _offset _summary] :as params}]
   (let [filters (dissoc params :_count :_offset :_summary)
+        opts    (cond-> {:include-implicit? false}
+                  (:url filters)     (assoc :url (:url filters))
+                  (:version filters) (assoc :version (:version filters)))
         offset  (or _offset 0)
-        pairs   (pair-seq (distinct providers) metadata-fn filters)
-        count?  (= "count" _summary)]
+        count?  (= "count" _summary)
+        pairs   (pair-seq providers metadata-fn opts)]
     (if (needs-materialisation? filters)
-      (let [matched   (vec (materialise-and-filter resource-fn filters pairs))
+      (let [matched   (into []
+                            (keep (fn [[p t]]
+                                    (let [m (resource-fn p (key->params t))]
+                                      (when (and m (matches-resource-filters? m filters))
+                                        m))))
+                            pairs)
             sorted    (sort compare-by-url-version matched)
             resources (if count?
                         []
@@ -554,7 +545,7 @@
       (let [sorted-pairs (sort compare-pair-by-url-version pairs)
             resources    (if count?
                            []
-                           (into [] (comp (keep #(materialise-pair resource-fn %))
+                           (into [] (comp (keep (fn [[p t]] (resource-fn p (key->params t))))
                                           (map #(summarise-resource params %)))
                                  (page-of _count offset sorted-pairs)))]
         (s/assert ::result/search-result
@@ -571,8 +562,8 @@
   `::input/search-params`; returns a `::result/search-result`.
 
   Implicit ValueSets — those advertised in `vs-metadata` for routing
-  only — carry `:implicit? true` on the metadata tuple and are
-  filtered out before sort/page."
+  only — are dropped at the provider via `:include-implicit? false` in
+  the metadata-opts the composite hands down."
   [{:keys [valuesets]} params]
   (search* (vals valuesets) protos/vs-metadata protos/vs-resource params))
 
@@ -669,20 +660,20 @@
 (defn- collect-cs-entries [providers]
   (for [p providers
         :when (satisfies? protos/CodeSystem p)
-        m (protos/cs-metadata p)]
+        m (protos/cs-metadata p {})]
     {:provider p :url (:url m) :version (:version m)
      :content (:content m) :supplements (:supplements m)}))
 
 (defn- collect-vs-entries [providers]
   (for [p providers
         :when (satisfies? protos/ValueSet p)
-        m (protos/vs-metadata p)]
+        m (protos/vs-metadata p {})]
     {:provider p :url (:url m) :version (:version m)}))
 
 (defn- collect-cm-entries [providers]
   (for [p providers
         :when (satisfies? protos/ConceptMap p)
-        m (protos/cm-metadata p)]
+        m (protos/cm-metadata p {})]
     {:provider p :description m}))
 
 (defn- detect-duplicates

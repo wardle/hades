@@ -257,7 +257,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- conceptmap-descriptions []
-  (protos/cm-metadata *svc*))
+  (protos/cm-metadata *svc* {}))
 
 (defn- conceptmap-registered-for? [source target]
   (some (fn [d] (and (= source (:system d)) (= target (:target d))))

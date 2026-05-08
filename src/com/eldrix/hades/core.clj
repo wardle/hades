@@ -99,9 +99,9 @@
   (e.g. a loader's skipped-entry report) is merged in beneath the
   composed catalogue — live keys win on conflict."
   [svc]
-  (let [css (sort-by (juxt :url :version) (protos/cs-metadata svc))
-        vss (sort-by (juxt :url :version) (protos/vs-metadata svc))
-        cms (protos/cm-metadata svc)]
+  (let [css (vec (sort-by (juxt :url :version) (protos/cs-metadata svc {})))
+        vss (vec (sort-by (juxt :url :version) (protos/vs-metadata svc {})))
+        cms (vec (protos/cm-metadata svc {}))]
     (merge (:metadata svc)
            {:codesystems css
             :valuesets   vss

@@ -111,11 +111,15 @@
   [entries]
   (let [by-url (into {} (map (juxt :url identity)) entries)]
     (reify protos/CodeSystem
-      (cs-metadata [_]
-        (mapv (fn [{:keys [url version]}]
+      (cs-metadata [_ {url-q :url ver-q :version}]
+        (eduction
+         (filter (fn [{:keys [url version]}]
+                   (and (or (nil? url-q) (= url-q url))
+                        (or (nil? ver-q) (= ver-q version)))))
+         (map (fn [{:keys [url version]}]
                 (cond-> {:url url}
-                  (some? version) (assoc :version version)))
-              entries))
+                  (some? version) (assoc :version version))))
+         entries))
       (cs-resource [_ {:keys [url]}]
         (when-let [m (get by-url url)]
           (select-keys m [:url :version :name :title :status :description]))))))
@@ -126,11 +130,15 @@
   [entries]
   (let [by-url (into {} (map (juxt :url identity)) entries)]
     (reify protos/ValueSet
-      (vs-metadata [_]
-        (mapv (fn [{:keys [url version]}]
+      (vs-metadata [_ {url-q :url ver-q :version}]
+        (eduction
+         (filter (fn [{:keys [url version]}]
+                   (and (or (nil? url-q) (= url-q url))
+                        (or (nil? ver-q) (= ver-q version)))))
+         (map (fn [{:keys [url version]}]
                 (cond-> {:url url}
-                  (some? version) (assoc :version version)))
-              entries))
+                  (some? version) (assoc :version version))))
+         entries))
       (vs-resource [_ {:keys [url]}]
         (when-let [m (get by-url url)]
           (select-keys m [:url :version :name :title :status :description]))))))
@@ -205,7 +213,7 @@
         closeable-provider (reify
                              java.io.Closeable (close [_] nil)
                              protos/CodeSystem
-                             (cs-metadata [_] [{:url "http://example.com/r/closeable"}])
+                             (cs-metadata [_ _opts] [{:url "http://example.com/r/closeable"}])
                              (cs-resource [_ _] nil)
                              (cs-lookup [_ _] nil)
                              (cs-validate-code [_ _] nil)

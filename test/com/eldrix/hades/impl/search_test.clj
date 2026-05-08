@@ -169,10 +169,12 @@
       (let [implicit-url "urn:test:implicit"
             implicit-vs (reify
                           protos/CodeSystem
-                          (cs-metadata [_] [])
+                          (cs-metadata [_ _opts] [])
                           protos/ValueSet
-                          (vs-metadata [_] [{:url implicit-url :version "x"
-                                             :implicit? true}])
+                          (vs-metadata [_ {:keys [include-implicit?]
+                                           :or   {include-implicit? true}}]
+                            (when include-implicit?
+                              [{:url implicit-url :version "x" :implicit? true}]))
                           (vs-resource [_ _] nil))
             base (svc-of [vs-alpha])
             svc  (composite/with-overlays base [implicit-vs])

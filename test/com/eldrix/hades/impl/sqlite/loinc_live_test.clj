@@ -44,8 +44,8 @@
     (is (some? *codesystem*))
     (is (some? *valueset*))
     (is (some? *conceptmap*))
-    (is (= loinc-url (-> *codesystem* protos/cs-metadata first :url)))
-    (is (= fixtures/loinc-version (-> *codesystem* protos/cs-metadata first :version)))))
+    (is (= loinc-url (-> (protos/cs-metadata *codesystem* {}) first :url)))
+    (is (= fixtures/loinc-version (-> (protos/cs-metadata *codesystem* {}) first :version)))))
 
 (deftest ^:live live-cs-lookup-known-code
   (testing "$lookup on a known LOINC code returns full lookup-result"
@@ -122,7 +122,7 @@
 
 (deftest ^:live live-vs-expand-loinc-answer-list
   (testing "$expand on any LOINC AnswerList VS returns concepts"
-    (let [some-vs (-> *valueset* protos/vs-metadata first :url)
+    (let [some-vs (-> (protos/vs-metadata *valueset* {}) first :url)
           r (hades/expand *svc* {:url some-vs})]
       (is (some? r))
       (is (sequential? (:concepts r))))))
