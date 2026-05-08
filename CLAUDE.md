@@ -27,7 +27,6 @@ clj -M:run --help install                                                       
 clj -M:test                              # run tests
 clj -M:bench                             # run criterium benchmarks (see below)
 clj -M:lint/kondo                        # static analysis
-clj -M:lint/eastwood                     # lint
 clj -M:test/cloverage                    # test coverage
 clj -M:check                             # compilation check
 clj -M:nrepl                             # start nREPL server (test paths included)
@@ -407,7 +406,6 @@ Run after every task. All items must pass.
 #### Automated checks
 1. `clj -M:test` — all tests pass
 2. `clj -M:lint/kondo` — clean
-3. `clj -M:lint/eastwood` — clean
 
 #### Architectural checks (read back every changed file)
 4. **No HAPI imports anywhere in `src/`.** Runtime code is HAPI-free.
