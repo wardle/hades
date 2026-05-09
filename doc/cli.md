@@ -21,9 +21,9 @@ serving — through a single binary. Examples below use
 
 Commands can be chained on a single command line and execute in the
 order given, sharing positional paths and flags — for example
-`install compact snomed.db --dist uk.nhs/sct-clinical --api-key
-trud.txt`. `index` and `compact` silently skip release source paths so
-they're safe to chain after `import`.
+`install compact snomed.db --dist ihtsdo.mlds/167 --username you@example.com --password ./pw.txt`.
+`index` and `compact` silently skip release source paths so they're
+safe to chain after `import`.
 
 Per-command help is available with `--help`:
 
@@ -37,12 +37,17 @@ java -jar hades.jar --help install
 # Run a FHIR server on port 8080 across SNOMED, LOINC and FHIR packages
 java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
 
-# Download, import and index a SNOMED CT distribution from TRUD
+# Download, import and index SNOMED CT International edition (MLDS)
 java -jar hades.jar install snomed.db \
-    --dist uk.nhs/sct-clinical@2025-02-01 \
-    --api-key trud.txt
+    --dist ihtsdo.mlds/167@2025-02-01 \
+    --username 'you@example.com' --password ./mlds-password.txt
 
-# Install one or more FHIR packages from packages.fhir.org
+# UK alternative: SNOMED CT UK monolith edition (TRUD)
+java -jar hades.jar install snomed.db \
+    --dist uk.nhs/sct-monolith \
+    --api-key ./trud-api-key.txt
+
+# Install one or more FHIR packages from packages.fhir.org (no auth)
 java -jar hades.jar install fhir.db --dist hl7.fhir.r4.core@4.0.1
 
 # Import an unzipped RF2 release into a destination database
@@ -53,7 +58,8 @@ java -jar hades.jar list /path/to/RF2
 
 # Discover available terminologies and versions
 java -jar hades.jar available
-java -jar hades.jar available --dist uk.nhs/sct-clinical --api-key trud.txt
+java -jar hades.jar available --dist ihtsdo.mlds/167 \
+    --username 'you@example.com' --password ./mlds-password.txt
 java -jar hades.jar available --dist hl7.fhir.r4.core
 
 # Maintenance

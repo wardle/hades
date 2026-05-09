@@ -8,14 +8,15 @@ were measured against the **v2.0.198** release on 2026-05-09.
 
 ## Headline figures
 
-| What it does                                  | FHIR endpoint              | Median latency | 99th percentile |  Throughput  |
-|-----------------------------------------------|----------------------------|---------------:|----------------:|-------------:|
-| Look up a SNOMED concept                      | `CodeSystem/$lookup`       |         347 µs |         7.75 ms | 21,900 req/s |
-| Look up a LOINC code                          | `CodeSystem/$lookup`       |         950 µs |         2.90 ms |  9,800 req/s |
-| Test how two SNOMED codes are related         | `CodeSystem/$subsumes`     |         222 µs |         0.97 ms | 37,500 req/s |
-| Validate a code is in a value set             | `ValueSet/$validate-code`  |         575 µs |         3.04 ms | 13,900 req/s |
-| Expand an ECL value set (page of 10 concepts) | `ValueSet/$expand`         |         1.1 ms |         3.50 ms |  7,700 req/s |
-| Translate via a SNOMED map reference set      | `ConceptMap/$translate`    |         162 µs |         0.83 ms | 51,100 req/s |
+| What it does                                       | FHIR endpoint              | Median latency | 99th percentile |  Throughput  |
+|----------------------------------------------------|----------------------------|---------------:|----------------:|-------------:|
+| Single concept lookup (SNOMED)                     | `CodeSystem/$lookup`       |         347 µs |         7.75 ms | 21,900 req/s |
+| Single concept lookup (LOINC)                      | `CodeSystem/$lookup`       |         950 µs |         2.90 ms |  9,800 req/s |
+| Free-text search, 10 results                       | `ValueSet/$expand`         |         772 µs |         3.14 ms | 10,900 req/s |
+| Subsumption test (two SNOMED codes)                | `CodeSystem/$subsumes`     |         222 µs |         0.97 ms | 37,500 req/s |
+| Code validation against a value set                | `ValueSet/$validate-code`  |         575 µs |         3.04 ms | 13,900 req/s |
+| Value set expansion (ECL refinement, 10 results)   | `ValueSet/$expand`         |         1.1 ms |         3.50 ms |  7,700 req/s |
+| Concept translation (SNOMED → ICD-10)              | `ConceptMap/$translate`    |         162 µs |         0.83 ms | 51,100 req/s |
 
 ## How to read the table
 
@@ -52,11 +53,15 @@ lookup, not a routing layer.
 - **Variation:** `$lookup`, `$subsumes` and `$validate-code` rotate
   through a pool of 2002 SNOMED or LOINC codes per request via a Lua
   script (so the server can't return a single cached response);
-  `$expand` and `$translate` use a fixed URL
+  free-text search rotates through ~40 representative 3–6 character
+  clinical prefixes (e.g. `diab`, `card`, `infa`, `pneum`) — typical
+  of an autocomplete workload; the ECL `$expand` and `$translate` rows
+  use a fixed URL
 
 A registry-layer [Criterium](https://github.com/hugoduncan/criterium)
 micro-benchmark suite (HTTP bypassed, useful for bisecting performance
-changes) is also available via `clj -M:bench`.
+changes) is also available via `clj -M:bench`. I use this to check for
+performance regressions.
 
 ## Comparing against other servers
 

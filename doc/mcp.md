@@ -9,41 +9,12 @@ package — behind a single, FHIR-shaped tool surface. The same `lookup`,
 `validate_code`, `expand`, and `translate` tools work uniformly across
 every CodeSystem and ValueSet you load.
 
-## Quick install
+## Provisioning terminologies
 
-```shell
-# 1. Download the latest hades release jar.
-wget -O hades.jar \
-  https://github.com/wardle/hades/releases/latest/download/hades.jar
-
-# 2a. Provision SNOMED CT International edition. Free MLDS Affiliate
-#     licence at https://mlds.ihtsdotools.org — once you have an account,
-#     put your password in a file (e.g. mlds-password.txt).
-java -jar hades.jar install snomed.db \
-  --dist ihtsdo.mlds/167@2025-02-01 \
-  --username 'you@example.com' --password ./mlds-password.txt
-
-# 2b. — OR — UK SNOMED Clinical (monolith) edition. Free TRUD account
-#     at https://isd.digital.nhs.uk/trud — put your API key in a file
-#     (e.g. trud-api-key.txt). The UK Clinical edition bundles the
-#     NHS Dictionary of Medicines and Devices (dm+d).
-java -jar hades.jar install snomed.db \
-  --dist uk.nhs/sct-monolith \
-  --api-key trud-api-key.txt
-
-# 3. Provision FHIR conformance packages (no credentials needed).
-java -jar hades.jar install fhir.db \
-  --dist hl7.fhir.r4.core@4.0.1 \
-  --dist hl7.terminology.r4
-
-# 4. (Optional) LOINC, downloaded separately from https://loinc.org.
-java -jar hades.jar import loinc.db /path/to/Loinc_2.81/
-java -jar hades.jar index loinc.db
-```
-
-See the [README Quickstart](../README.md#quickstart) for full provisioning
-detail (other SNOMED national editions, custom FHIR packages, ad-hoc
-FHIR JSON directories).
+The MCP server reads from the same databases as the FHIR HTTP server.
+Build them once with the steps in [Installation](installation.md) —
+SNOMED CT (international or UK editions), LOINC, and any HL7 FHIR
+package — then point the MCP server at the resulting paths.
 
 ## Setup
 

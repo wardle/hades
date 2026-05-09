@@ -1,37 +1,57 @@
 # Installation
 
-This walkthrough builds three terminologies side-by-side and serves them
-from a single Hades process: SNOMED CT (UK monolith edition from TRUD),
-LOINC, and a couple of FHIR conformance packages from
-[packages.fhir.org](https://packages.fhir.org). Each block is a discrete
-step — skip any terminology you don't need.
+This walkthrough builds three terminologies side-by-side and serves
+them from a single Hades process: SNOMED CT, LOINC, and a couple of
+FHIR conformance packages from
+[packages.fhir.org](https://packages.fhir.org). Each block is a
+discrete step — skip any terminology you don't need.
 
-You'll need:
+## Prerequisites
 
-- Java 21 or above
-- A [TRUD](https://isd.digital.nhs.uk/trud) API key, saved to a file
-  (e.g. `trud-api-key.txt`), for the UK SNOMED download
-- A LOINC release archive — sign in at
+- **Java 21 or above** — required for everything below.
+- **A SNOMED CT licence** — free, but you must register. Pick one:
+  - [**MLDS Affiliate licence**](https://mlds.ihtsdotools.org) — the
+    standard route for international users (research, evaluation,
+    clinical care in non-Member countries). Provides SNOMED CT
+    International edition.
+  - [**UK TRUD account**](https://isd.digital.nhs.uk/trud) — for UK
+    users. Provides the UK editions (UK Clinical, UK Drug, and the
+    "monolith" merged edition that bundles dm+d).
+- **A LOINC release archive** — sign in at
   [loinc.org/downloads](https://loinc.org/downloads/) (free) and unzip
-  it locally (e.g. to `/tmp/Loinc_2.81/`)
+  the archive locally (e.g. to `/tmp/Loinc_2.81/`).
 
 > Throughout this document, examples use `java -jar hades.jar`. From a
 > source checkout, replace with `clj -M:run` throughout.
 
-## 1. Install SNOMED CT (UK monolith edition)
+## 1. Install SNOMED CT
 
-The monolith is the merged UK edition (international + clinical + drug
-extensions in one). One command downloads, imports and indexes:
+Pick the path that matches your licence. Both produce a
+queryable `snomed.db` directory in a few minutes (~2 GB on disk).
+
+**International edition (MLDS):** save your MLDS password to a file
+(e.g. `mlds-password.txt`), then:
+
+```shell
+java -jar hades.jar install snomed.db \
+    --dist ihtsdo.mlds/167@2025-02-01 \
+    --username 'you@example.com' \
+    --password ./mlds-password.txt
+```
+
+**UK monolith edition (TRUD):** save your TRUD API key to a file
+(e.g. `trud-api-key.txt`), then:
 
 ```shell
 java -jar hades.jar install snomed.db \
     --dist uk.nhs/sct-monolith \
-    --api-key trud-api-key.txt
+    --api-key ./trud-api-key.txt
 ```
 
-`install` auto-indexes the destination so the resulting `snomed.db/` is
-queryable as soon as it returns. Build takes a few minutes; the
-database is around 2 GB.
+`install` auto-indexes the destination so `snomed.db/` is queryable
+as soon as it returns. See [SNOMED CT](#snomed-ct) below for layering
+extensions, pinning releases, and importing a manually-downloaded
+RF2 archive.
 
 ## 2. Build LOINC
 
@@ -52,10 +72,10 @@ java -jar hades.jar install fhir.db \
 ```
 
 Packages are pulled from `packages.fhir.org` and loaded into a SQLite
-container. To serve in-memory instead — faster lookups, larger heap —
-add `--cache-dir packages/` and `serve` the extracted directories
-directly (see [In-memory vs SQLite container](#in-memory-vs-sqlite-container)
-below).
+container. No credentials needed. To serve in-memory instead —
+faster lookups, larger heap — add `--cache-dir packages/` and `serve`
+the extracted directories directly (see
+[In-memory vs SQLite container](#in-memory-vs-sqlite-container) below).
 
 ## 4. Check what you've got
 
@@ -131,13 +151,18 @@ lists every distribution Hades knows. The common choices:
 
 | Identifier | Source | Auth |
 |---|---|---|
-| `uk.nhs/sct-monolith` | UK monolith (intl + clinical + drug ext, merged) | TRUD `--api-key` |
-| `uk.nhs/sct-clinical` | UK clinical edition | TRUD `--api-key` |
-| `uk.nhs/sct-drug-ext` | UK drug extension (layer on top of clinical) | TRUD `--api-key` |
-| `ihtsdo.mlds/167` | SNOMED CT International (from MLDS) | MLDS `--username` + `--password` |
+| `ihtsdo.mlds/167` | SNOMED CT International edition (from MLDS) | MLDS `--username` + `--password` |
+| `uk.nhs/sct-monolith` | UK monolith — international + UK clinical + UK drug extension, merged | TRUD `--api-key` |
+| `uk.nhs/sct-clinical` | UK clinical edition (no drug extension) | TRUD `--api-key` |
+| `uk.nhs/sct-drug-ext` | UK drug extension — layer on top of UK clinical | TRUD `--api-key` |
+
+Other national editions distributed via MLDS use the same shape:
+`<member>.mlds/<package-id>` (e.g. `ihtsdo.mlds/167` for the
+International edition published by IHTSDO). Run `available` to see
+every member/package pair the local hermes registry knows.
 
 Pin a release with `@<version>`, e.g.
-`--dist uk.nhs/sct-monolith@2025-02-01`. Run
+`--dist ihtsdo.mlds/167@2025-02-01`. Run
 `java -jar hades.jar available --dist <id>` to list available versions
 (some registries authenticate read access — pass the same credentials
 you'd use for install).

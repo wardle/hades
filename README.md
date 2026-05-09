@@ -31,31 +31,28 @@ compilation, no JVM flags required.
 ## Quickstart
 
 Download the latest `hades.jar` from the
-[releases page](https://github.com/wardle/hades/releases). Examples
-below use `java -jar hades.jar`; from a source checkout, use
-`clj -M:run` instead.
-
-Build a SNOMED CT database and serve it:
+[releases page](https://github.com/wardle/hades/releases), then
+install a FHIR R4 conformance package and serve it:
 
 ```shell
-java -jar hades.jar install snomed.db \
-    --dist uk.nhs/sct-monolith \
-    --api-key trud-api-key.txt
-
-java -jar hades.jar serve snomed.db --port 8080
+java -jar hades.jar install fhir.db --dist hl7.fhir.r4.core@4.0.1
+java -jar hades.jar serve fhir.db --port 8080
 ```
 
-Try it:
+In another terminal, expand a value set:
 
 ```shell
-curl -sG 'http://localhost:8080/fhir/CodeSystem/$lookup' \
-  --data-urlencode 'system=http://snomed.info/sct' \
-  --data-urlencode 'code=73211009' | jq .
+curl -sG 'http://localhost:8080/fhir/ValueSet/$expand' \
+  --data-urlencode 'url=http://hl7.org/fhir/ValueSet/administrative-gender' | jq .
 ```
 
-For the full walkthrough — SNOMED, LOINC, and FHIR packages
-side-by-side from a single Hades process — see
-[Installation](doc/installation.md).
+That's the lowest-friction path: a FHIR conformance package with no
+licence, no API key, no registration. SNOMED CT and LOINC need a free
+licence — see [Installation](doc/installation.md) for the
+multi-terminology walkthrough.
+
+> Examples use `java -jar hades.jar`. From a source checkout, replace
+> with `clj -M:run` throughout.
 
 ## Performance
 
@@ -66,14 +63,15 @@ end-to-end over HTTP on an Apple M1 MacBook Pro driving the server at
 request takes; *throughput* is the sustained request rate at that
 concurrency. Server-class hardware with more cores scales higher.
 
-| What it does                                  | FHIR endpoint              | Latency | Throughput   |
-|-----------------------------------------------|----------------------------|--------:|-------------:|
-| Look up a SNOMED concept                      | `CodeSystem/$lookup`       |  347 µs | 21,900 req/s |
-| Look up a LOINC code                          | `CodeSystem/$lookup`       |  950 µs |  9,800 req/s |
-| Test how two SNOMED codes are related         | `CodeSystem/$subsumes`     |  222 µs | 37,500 req/s |
-| Validate a code is in a value set             | `ValueSet/$validate-code`  |  575 µs | 13,900 req/s |
-| Expand an ECL value set (page of 10 concepts) | `ValueSet/$expand`         |  1.1 ms |  7,700 req/s |
-| Translate via a SNOMED map reference set      | `ConceptMap/$translate`    |  162 µs | 51,100 req/s |
+| What it does                                       | FHIR endpoint              | Latency | Throughput   |
+|----------------------------------------------------|----------------------------|--------:|-------------:|
+| Single concept lookup (SNOMED)                     | `CodeSystem/$lookup`       |  347 µs | 21,900 req/s |
+| Single concept lookup (LOINC)                      | `CodeSystem/$lookup`       |  950 µs |  9,800 req/s |
+| Free-text search, 10 results                       | `ValueSet/$expand`         |  772 µs | 10,900 req/s |
+| Subsumption test (two SNOMED codes)                | `CodeSystem/$subsumes`     |  222 µs | 37,500 req/s |
+| Code validation against a value set                | `ValueSet/$validate-code`  |  575 µs | 13,900 req/s |
+| Value set expansion (ECL refinement, 10 results)   | `ValueSet/$expand`         |  1.1 ms |  7,700 req/s |
+| Concept translation (SNOMED → ICD-10)              | `ConceptMap/$translate`    |  162 µs | 51,100 req/s |
 
 See [Performance](doc/performance.md) for the methodology, tail
 latencies and the full per-operation breakdown.
