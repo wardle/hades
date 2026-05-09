@@ -204,20 +204,6 @@ CREATE TABLE IF NOT EXISTS valueset (
 CREATE INDEX IF NOT EXISTS vs_status    ON valueset(status);
 CREATE INDEX IF NOT EXISTS vs_publisher ON valueset(publisher);
 
--- Optional precomputed expansion cache, keyed by a hash of the
--- normalised expansion parameters. Servers may populate this lazily;
--- absence is not an error.
-CREATE TABLE IF NOT EXISTS valueset_expansion (
-  vs_url       TEXT NOT NULL,
-  vs_version   TEXT NOT NULL DEFAULT '',
-  params_hash  TEXT NOT NULL,
-  expansion    TEXT NOT NULL,            -- JSON: ValueSet.expansion
-  computed_at  TEXT NOT NULL,
-  expires_at   TEXT,
-  PRIMARY KEY (vs_url, vs_version, params_hash),
-  FOREIGN KEY (vs_url, vs_version) REFERENCES valueset(url, version)
-) WITHOUT ROWID;
-
 -- ---------------------------------------------------------------------------
 -- ConceptMap
 -- ---------------------------------------------------------------------------

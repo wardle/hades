@@ -212,7 +212,7 @@ jobs:
         id: cache
         with:
           path: .hades/loinc-2.81.db
-          key: loinc-2.81-v2
+          key: loinc-2.81-v3
 
       - name: Provision pinned LOINC DB
         id: provision
@@ -247,7 +247,7 @@ jobs:
         if: always() && steps.provision.outcome == 'success'
         with:
           path: .hades/loinc-2.81.db
-          key: loinc-2.81-v2
+          key: loinc-2.81-v3
 
   # The install CLI downloads + extracts + imports in one shot:
   #   --cache-dir lands extracted JSON at <cache>/<id>-<version>/package/
@@ -291,7 +291,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v1
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v2
 
       - name: Provision pinned FHIR packages (in-memory + SQLite)
         id: provision
@@ -312,7 +312,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v1
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v2
 
   # ---------------------------------------------------------------------------
   # Test + conformance: each restores only the caches it actually consumes.
@@ -363,7 +363,7 @@ jobs:
       - uses: actions/cache/restore@v5
         with:
           path: .hades/loinc-2.81.db
-          key: loinc-2.81-v2
+          key: loinc-2.81-v3
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
@@ -371,7 +371,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v1
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v2
           fail-on-cache-miss: true
 
       - name: Compile check
@@ -427,7 +427,7 @@ jobs:
       - uses: actions/cache/restore@v5
         with:
           path: .hades/loinc-2.81.db
-          key: loinc-2.81-v2
+          key: loinc-2.81-v3
           fail-on-cache-miss: true
 
       # Cache the tx-ecosystem clone keyed on the pinned commit. Bump
@@ -499,7 +499,7 @@ jobs:
       - uses: actions/cache/restore@v5
         with:
           path: .hades/loinc-2.81.db
-          key: loinc-2.81-v2
+          key: loinc-2.81-v3
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
@@ -507,7 +507,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v1
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-v2
           fail-on-cache-miss: true
 
       - id: pin

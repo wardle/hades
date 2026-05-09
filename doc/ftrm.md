@@ -329,26 +329,10 @@ CREATE TABLE valueset (
   compose       TEXT,                  -- JSON: ValueSet.compose
   PRIMARY KEY (url, version)
 ) WITHOUT ROWID;
-
-CREATE TABLE valueset_expansion (
-  vs_url       TEXT NOT NULL,
-  vs_version   TEXT NOT NULL DEFAULT '',
-  params_hash  TEXT NOT NULL,
-  expansion    TEXT NOT NULL,          -- JSON: ValueSet.expansion
-  computed_at  TEXT NOT NULL,
-  expires_at   TEXT,
-  PRIMARY KEY (vs_url, vs_version, params_hash),
-  FOREIGN KEY (vs_url, vs_version) REFERENCES valueset(url, version)
-) WITHOUT ROWID;
 ```
 
 `compose` is the raw FHIR JSON `ValueSet.compose`; readers expand it
-at request time. `valueset_expansion` is an **optional** cache —
-readers **MAY** populate it lazily, and the absence of an entry is
-not an error. The `params_hash` key is implementation-defined; it
-**MUST** be stable for a given normalised parameter set so cache hits
-are reproducible. Writers **MUST NOT** rely on cache rows being
-present.
+at request time.
 
 #### Baked expansions in source resources
 
@@ -494,8 +478,7 @@ inserts:
 3. `concept_parent`, `concept_property`, `concept_designation`
 4. `concept_ancestor`
 
-The same rule applies to `valueset` → `valueset_expansion` and
-`conceptmap` → `conceptmap_element`.
+The same rule applies to `conceptmap` → `conceptmap_element`.
 
 ## 7. Round-trip semantics
 
@@ -529,8 +512,7 @@ An implementation is a conforming FTRM v1 **reader** if:
 6. `cs-find-matches` (or the implementation's equivalent) uses
    `concept_fts` / `designation_fts` for text and
    `cp_pushdown` / `concept_ancestor` for filter pushdown.
-7. `vs-expand` parses `valueset.compose` and **MAY** consult
-   `valueset_expansion` as a cache.
+7. `vs-expand` parses `valueset.compose`.
 8. `cm-translate` honours `(cm_url, cm_version, source_system,
    source_code)` for the forward direction and `(cm_url, cm_version,
    target_system, target_code)` for the reverse.
