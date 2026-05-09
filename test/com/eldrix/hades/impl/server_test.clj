@@ -245,7 +245,20 @@
     :expect {:status 404
              :content-type #"application/fhir\+json"
              :assertions [["body is OperationOutcome" operation-outcome?]
-                          ["issue.code = not-found" (issue-code-equals? "not-found")]]}}])
+                          ["issue.code = not-found" (issue-code-equals? "not-found")]]}}
+
+   {:name "$subsumes with no params returns 400 invalid OperationOutcome"
+    :request {:method :post
+              :path "/CodeSystem/$subsumes"
+              :body {:resourceType "Parameters" :parameter []}}
+    :expect {:status 400
+             :content-type #"application/fhir\+json"
+             :assertions [["body is OperationOutcome" operation-outcome?]
+                          ["issue.code = invalid" (issue-code-equals? "invalid")]
+                          ["text mentions codeA/codeB or codingA/codingB"
+                           (issue-text-matches? #"codeA.*codeB|codingA.*codingB")]
+                          ["does not say 'No endpoint matches path'"
+                           (issue-text-not-matches? #"No endpoint matches path")]]}}])
 
 (deftest ^:live operation-cases
   (doseq [c cases] (check c)))

@@ -492,9 +492,13 @@
                       {:systemA system :codeA codeA :systemB system :codeB codeB}
                       (and codingA codingB)
                       {:systemA (get codingA "system") :codeA (get codingA "code")
-                       :systemB (get codingB "system") :codeB (get codingB "code")})
-        result  (when subs-params (hades/subsumes svc subs-params))]
-    {:status 200 :body (when result (wire/subsumes->parameters result))}))
+                       :systemB (get codingB "system") :codeB (get codingB "code")})]
+    (if subs-params
+      {:status 200 :body (wire/subsumes->parameters (hades/subsumes svc subs-params))}
+      {:status 400
+       :body   (wire/operation-outcome
+                [{:severity "error" :type "invalid"
+                  :text "$subsumes requires either (codeA, codeB, system) or (codingA, codingB)"}])})))
 
 ;; ---------------------------------------------------------------------------
 ;; ValueSet $validate-code
@@ -900,21 +904,43 @@
       ["/fhir/ValueSet"                   :get  (conj vs-search-i vs-search)                        :route-name ::vs-search-get]
       ["/fhir/ValueSet/_search"           :post (conj vs-search-i vs-search)                        :route-name ::vs-search-post]}))
 
+(defn- fhir-error-response
+  [status issues]
+  {:status  status
+   :headers {"Content-Type" "application/fhir+json; charset=utf-8"}
+   :body    (write-json-str (wire/operation-outcome issues))})
+
 (def fhir-not-found
-  "Catch unmatched routes on the way out and return a FHIR JSON 404
-  OperationOutcome instead of Pedestal's plain-text default."
+  "Catch failures on the way out and return a FHIR JSON OperationOutcome
+  instead of Pedestal's plain-text default. Two branches:
+
+   - `:response` missing — no route matched. 404 not-found.
+   - `:response` present with nil `:body` — a handler ran but returned
+     an empty body. 500 exception. Architectural invariant: handlers
+     must always return a body; this branch is a defensive backstop
+     that surfaces such bugs honestly rather than disguising them as
+     a routing failure."
   {:name  ::fhir-not-found
    :leave (fn [context]
-            (if (nil? (get-in context [:response :body]))
-              (let [path (get-in context [:request :uri])
-                    body (wire/operation-outcome
-                          [{:severity "error" :type "not-found"
-                            :text (str "No endpoint matches path '" path "'")}])]
+            (cond
+              (nil? (:response context))
+              (let [path (get-in context [:request :uri])]
                 (assoc context :response
-                       {:status  404
-                        :headers {"Content-Type" "application/fhir+json; charset=utf-8"}
-                        :body    (write-json-str body)}))
-              context))})
+                       (fhir-error-response
+                        404
+                        [{:severity "error" :type "not-found"
+                          :text (str "No endpoint matches path '" path "'")}])))
+
+              (nil? (get-in context [:response :body]))
+              (let [path (get-in context [:request :uri])]
+                (log/warn "handler returned empty body" {:uri path})
+                (assoc context :response
+                       (fhir-error-response
+                        500
+                        [{:severity "error" :type "exception"
+                          :text (str "Internal error: handler returned empty body for '" path "'")}])))
+
+              :else context))})
 
 (defn make-server
   "Create an unstarted Hades FHIR server connector wired to `svc`.
