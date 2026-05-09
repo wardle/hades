@@ -1,16 +1,11 @@
-(ns com.eldrix.hades.impl.operations-bench
+(ns com.eldrix.hades.bench
   "Criterium micro-benchmarks for Hades' FHIR terminology operations.
-
-  Measurements bypass HTTP parsing and wire serialisation so changes in
-  domain logic register cleanly. Each entry in `operations` is a
-  `{:id :fn}` map; `:fn` is a one-arg function taking the single Hades
-  service opened at the top of the deftest. The service is built from
-  the pinned SNOMED + LOINC fixtures, so thunks just choose the system
-  URL they hit (composite dispatches to the right provider).
-
-  Run via `clj -M:bench`. Provision the pinned fixtures per CLAUDE.md;
-  `hades/open` raises file-not-found if absent."
-  (:require [clojure.test :refer [deftest]]
+  Run via `clj -M:bench`; writes `target/bench-results.json`."
+  (:require [clojure.data.json :as json]
+            [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
             [com.eldrix.hades.impl.compose :as compose]
@@ -38,14 +33,14 @@
 
 (def operations
   [;; --- $lookup -----------------------------------------------------------
-   {:id :lookup/minimal
+   {:id :lookup/minimal :tx-bench "LK01"
     :fn (fn [svc]
           (hades/lookup svc {:system snomed-uri :code (str multiple-sclerosis)}))}
    ;; FHIR `_property=*` wildcard — same observable output as no
    ;; filter, but goes through the `property-filter/parse` predicate
    ;; bundle on every section. A wide gap vs `:lookup/minimal` would
    ;; flag the gating overhead.
-   {:id :lookup/property-wildcard
+   {:id :lookup/property-wildcard :tx-bench "LK01"
     :fn (fn [svc]
           (hades/lookup svc {:system snomed-uri :code (str multiple-sclerosis)
                              :properties ["*"]}))}
@@ -53,20 +48,26 @@
    ;; concrete-values and attribute relationships entirely. Should be
    ;; meaningfully cheaper than `:lookup/full` if the filter is doing
    ;; its job.
-   {:id :lookup/property-parent-only
+   {:id :lookup/property-parent-only :tx-bench "LK01"
     :fn (fn [svc]
           (hades/lookup svc {:system snomed-uri :code (str multiple-sclerosis)
                              :properties ["parent"]}))}
+   {:id :lookup/loinc :tx-bench "LK02"
+    :fn (fn [svc]
+          (hades/lookup svc {:system loinc-uri :code "8867-4"}))}
+   {:id :lookup/nonexistent :tx-bench "LK05"
+    :fn (fn [svc]
+          (hades/lookup svc {:system snomed-uri :code "999973211009"}))}
 
    ;; --- $validate-code ----------------------------------------------------
-   {:id :validate-code/plain
+   {:id :validate-code/plain :tx-bench "VC01"
     :fn (fn [svc]
           (hades/validate-code svc {:system snomed-uri :code (str diabetes-mellitus)}))}
-   {:id :validate-code/display
+   {:id :validate-code/display :tx-bench "VC02"
     :fn (fn [svc]
           (hades/validate-code svc {:system snomed-uri :code (str diabetes-mellitus)
                                     :display "Diabetes mellitus"}))}
-   {:id :validate-code/against-valueset
+   {:id :validate-code/against-valueset :tx-bench "VC03"
     :fn (fn [svc]
           (hades/validate-code svc
             {:url    (expand-url (str "ecl/<<" disease))
@@ -74,7 +75,7 @@
    ;; Display-mismatch path — exercises the descriptions scan + active
    ;; display enumeration + invalid-display issue building. Hot when
    ;; clients send displays drifted from the current release.
-   {:id :validate-code/wrong-display
+   {:id :validate-code/wrong-display :tx-bench "VC02"
     :fn (fn [svc]
           (hades/validate-code svc {:system snomed-uri :code (str diabetes-mellitus)
                                     :display "completely-wrong-label"}))}
@@ -93,32 +94,29 @@
             {:url (expand-url (str "ecl/<<" disease))}))}
 
    ;; --- $subsumes — all four branches -------------------------------------
-   {:id :subsumes/equivalent
+   {:id :subsumes/equivalent :tx-bench "SS01"
     :fn (fn [svc]
           (hades/subsumes svc {:systemA snomed-uri :codeA (str diabetes-mellitus)
                                :systemB snomed-uri :codeB (str diabetes-mellitus)}))}
-   {:id :subsumes/subsumes
+   {:id :subsumes/subsumes :tx-bench "SS01"
     :fn (fn [svc]
           (hades/subsumes svc {:systemA snomed-uri :codeA (str disease)
                                :systemB snomed-uri :codeB (str influenza)}))}
-   {:id :subsumes/subsumed-by
+   {:id :subsumes/subsumed-by :tx-bench "SS01"
     :fn (fn [svc]
           (hades/subsumes svc {:systemA snomed-uri :codeA (str type-2-dm)
                                :systemB snomed-uri :codeB (str diabetes-mellitus)}))}
    ;; Historical-equivalence fallback — exercises the unrelated-pair branch
    ;; that walks the historical-association refsets.
-   {:id :subsumes/unrelated
+   {:id :subsumes/unrelated :tx-bench "SS01"
     :fn (fn [svc]
           (hades/subsumes svc {:systemA snomed-uri :codeA (str asthma)
                                :systemB snomed-uri :codeB (str influenza)}))}
 
    ;; --- $translate --------------------------------------------------------
-   ;; 56485000 is a retired concept with a SAME-AS pointing to 398390002 —
-   ;; exercises the real historical-association lookup rather than the
-   ;; no-hits fast path. Uses the REPLACED-BY historical refset
-   ;; (900000000000526001) to match the implicit ConceptMap shape that
-   ;; tx-benchmark's CM01 sends.
-   {:id :translate/historical
+   ;; 56485000 is retired with a SAME-AS pointing to 398390002 — exercises
+   ;; the real historical-association lookup, not the no-hits fast path.
+   {:id :translate/historical :tx-bench "CM01"
     :fn (fn [svc]
           (hades/translate svc
             {:url    (str snomed-uri "?fhir_cm=900000000000526001")
@@ -126,16 +124,16 @@
              :target snomed-uri}))}
 
    ;; --- $expand via implicit-VS URLs --------------------------------------
-   {:id :expand/ecl-small
+   {:id :expand/ecl-small :tx-bench "EX01"
     :fn (fn [svc]
           (hades/expand svc {:url (expand-url (str "ecl/<<" diabetes-mellitus)) :count 50}))}
-   {:id :expand/ecl-medium
+   {:id :expand/ecl-medium :tx-bench "EX01"
     :fn (fn [svc]
           (hades/expand svc {:url (expand-url (str "ecl/<<" asthma)) :count 100}))}
-   {:id :expand/ecl-large
+   {:id :expand/ecl-large :tx-bench "EX01"
     :fn (fn [svc]
           (hades/expand svc {:url (expand-url (str "ecl/<<" clinical-finding)) :count 100}))}
-   {:id :expand/isa
+   {:id :expand/isa :tx-bench "EX01"
     :fn (fn [svc]
           (hades/expand svc {:url (expand-url (str "isa/" clinical-finding)) :count 100}))}
    {:id :expand/text-filter-rare
@@ -146,14 +144,11 @@
     :fn (fn [svc]
           (hades/expand svc {:url (expand-url (str "ecl/<<" clinical-finding))
                              :filter "pain" :count 20}))}
-   {:id :expand/paged
+   {:id :expand/paged :tx-bench "EX01"
     :fn (fn [svc]
           (hades/expand svc {:url (expand-url (str "ecl/<<" clinical-finding))
                              :offset 1000 :count 20}))}
-   ;; Mirrors tx-benchmark's EX03 — implicit "all of SNOMED" VS + text filter.
-   ;; The shape that regressed from p95 128 ms to 11 s at 50 VUs in the
-   ;; preflight comparison.
-   {:id :expand/all-snomed-text-filter
+   {:id :expand/all-snomed-text-filter :tx-bench "EX03"
     :fn (fn [svc]
           (hades/expand svc {:url (str snomed-uri "?fhir_vs")
                              :filter "diabetes" :count 100}))}
@@ -175,7 +170,7 @@
                              :count 100 :displayLanguage "en-US"}))}
 
    ;; --- $expand via hand-built compose (bypasses URL parsing) -------------
-   {:id :compose/is-a
+   {:id :compose/is-a :tx-bench "EX02"
     :fn (fn [svc]
           (compose/expand-compose svc
             {"include" [{"system" snomed-uri
@@ -189,30 +184,29 @@
    ;; Compose paths translate to ECL (<< or <) and go through the generic
    ;; expand-paginated which materialises the full subtree to compute
    ;; :total. Expected: URL ≪ both compose entries.
-   {:id :expand/isa-page-10
+   {:id :expand/isa-page-10 :tx-bench "EX01"
     :fn (fn [svc]
           (hades/expand svc {:url (expand-url (str "isa/" clinical-finding)) :count 10}))}
-   {:id :compose/is-a-page-10
+   {:id :compose/is-a-page-10 :tx-bench "EX02"
     :fn (fn [svc]
           (compose/expand-compose svc
             {"include" [{"system" snomed-uri
                          "filter" [{"property" "concept" "op" "is-a" "value" (str clinical-finding)}]}]}
             {:count 10}))}
-   {:id :compose/descendent-of-page-10
+   {:id :compose/descendent-of-page-10 :tx-bench "EX02"
     :fn (fn [svc]
           (compose/expand-compose svc
             {"include" [{"system" snomed-uri
                          "filter" [{"property" "concept" "op" "descendent-of" "value" (str clinical-finding)}]}]}
             {:count 10}))}
-   ;; Mirrors tx-benchmark's EX05 — focus concept + attribute refinement.
-   {:id :compose/refinement
+   {:id :compose/refinement :tx-bench "EX05"
     :fn (fn [svc]
           (compose/expand-compose svc
             {"include" [{"system" snomed-uri
                          "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}
                                    {"property" "363698007" "op" "=" "value" "89187006"}]}]}
             {:count 50}))}
-   {:id :compose/multi-include
+   {:id :compose/multi-include :tx-bench "EX07"
     :fn (fn [svc]
           (compose/expand-compose svc
             {"include" [{"system" snomed-uri
@@ -228,14 +222,12 @@
              "exclude" [{"system" snomed-uri
                          "filter" [{"property" "concept" "op" "is-a" "value" (str asthma)}]}]}
             {:count 100}))}
-   ;; Mirrors tx-benchmark EX07 — system-only include + text filter, no ECL.
-   {:id :compose/all-snomed-text-filter
+   {:id :compose/all-snomed-text-filter :tx-bench "EX07"
     :fn (fn [svc]
           (compose/expand-compose svc
             {"include" [{"system" snomed-uri}]}
             {:filter "pain" :count 200}))}
-   ;; Mirrors tx-benchmark EX08 — is-a + attribute refinement + text filter.
-   {:id :compose/refinement-text-filter
+   {:id :compose/refinement-text-filter :tx-bench "EX08"
     :fn (fn [svc]
           (compose/expand-compose svc
             {"include" [{"system" snomed-uri
@@ -278,17 +270,17 @@
    ;;   *-browse   — unfiltered. Bounded by the per-provider walk;
    ;;                SQLite VS catalogue (~2.5k entries in smoke)
    ;;                drives the worst case.
-   {:id :fs01/cs-by-url
+   {:id :fs01/cs-by-url :tx-bench "FS01"
     :fn (fn [svc]
           (hades/search-code-systems svc
             {:url "http://hl7.org/fhir/sid/icd-10"}))}
-   {:id :fs01/vs-by-url
+   {:id :fs01/vs-by-url :tx-bench "FS01"
     :fn (fn [svc]
           (hades/search-value-sets svc
             {:url "http://hl7.org/fhir/ValueSet/administrative-gender"}))}
-   {:id :fs01/cs-browse
+   {:id :fs01/cs-browse :tx-bench "FS01"
     :fn (fn [svc] (hades/search-code-systems svc {}))}
-   {:id :fs01/vs-browse
+   {:id :fs01/vs-browse :tx-bench "FS01"
     :fn (fn [svc] (hades/search-value-sets svc {}))}])
 
 ;; ─── Test entry point (clj -M:bench) ──────────────────────────────────────
@@ -319,14 +311,48 @@
     :quick (crit/quick-benchmark* (fn [] (f svc)) {})
     :smoke (crit/quick-benchmark* (fn [] (f svc)) (apply hash-map smoke-opts))))
 
+(def ^:private results-path "target/bench-results.json")
+
+(defn- summarise [{:keys [id tx-bench]} r]
+  ;; Criterium reports :mean / :lower-q / :upper-q as [value variance]
+  ;; pairs in seconds. We keep the central value — variance is just
+  ;; noise in a per-op delta table.
+  (cond-> {:id      (str id)
+           :mean    (first (:mean r))
+           :lower-q (first (:lower-q r))
+           :upper-q (first (:upper-q r))
+           :samples (count (:samples r))}
+    tx-bench (assoc :tx-bench tx-bench)))
+
+(defn- git-sha []
+  (try
+    (let [{:keys [exit out]} (shell/sh "git" "rev-parse" "--short" "HEAD")]
+      (if (zero? exit) (str/trim out) "unknown"))
+    (catch Exception _ "unknown")))
+
+(defn- write-results! [mode results]
+  (let [doc {:meta    {:mode      (name mode)
+                       :sha       (git-sha)
+                       :timestamp (str (java.time.Instant/now))}
+             :results results}
+        f   (io/file results-path)]
+    (io/make-parents f)
+    (with-open [w (io/writer f)]
+      (json/write doc w))
+    (println "wrote" results-path)))
+
 (deftest operations-bench
   (let [svc  (hades/open [fixtures/snomed-db-path
                           fixtures/loinc-db-path
                           fixtures/fhir-smoke-db-path])
         mode (bench-mode)]
     (try
-      (doseq [{:keys [id fn]} operations]
-        (println "\n***" id)
-        (crit/report-result (run-one mode fn svc)))
+      (let [results (mapv (fn [{:keys [id fn] :as entry}]
+                            (println "\n***" id)
+                            (let [r (run-one mode fn svc)]
+                              (crit/report-result r)
+                              (summarise entry r)))
+                          operations)]
+        (write-results! mode results))
       (finally
         (hades/close svc)))))

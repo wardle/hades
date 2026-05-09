@@ -15,7 +15,7 @@
     clj -X:bench :nses '[com.eldrix.hades.sqlite-vs-inmemory-bench]'
     ;; or in REPL:
     (require 'com.eldrix.hades.sqlite-vs-inmemory-bench :reload)
-    (com.eldrix.hades.sqlite-vs-inmemory-bench/run!)"
+    (com.eldrix.hades.sqlite-vs-inmemory-bench/compare-providers!)"
   (:require [clojure.java.io :as io]
             [clojure.pprint :as pp]
             [com.eldrix.hades.core :as hades]
@@ -131,7 +131,7 @@
 ;; Driver
 ;; ---------------------------------------------------------------------------
 
-(defn run!
+(defn compare-providers!
   "Run both benches and pretty-print a comparison."
   [& _]
   (println "\n--- SQLite container ---")
