@@ -2,7 +2,14 @@
 
 This log documents significant changes for each release.
 
-## Not yet released
+## [v2.0.198] - 2026-05-09
+
+* FHIR REST search latency on the URL-by-url hot path roughly halved.
+* Validation message wording is now identical across in-memory and
+  SQLite providers.
+* Source-walker I/O errors are surfaced instead of silently skipped.
+
+## [v2.0.191] - 2026-05-07
 
 Headline: Hades is now a **multi-terminology** FHIR server. SNOMED CT,
 LOINC, and arbitrary FHIR NPM packages run side-by-side in one process,
