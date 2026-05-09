@@ -227,5 +227,20 @@
                                {:svc *svc* :query query :limit 50})]
       (is (seq concepts) "asthma + lung-finding-site refinement should return concepts"))))
 
+(deftest ^:live ecl-filter-property-aliases
+  (testing "constraint and expression both parse the same ECL"
+    (doseq [property ["constraint" "expression"]]
+      (let [{:keys [query issues]}
+            (snomed/compose-filters->query *svc*
+              [{:property property :op "=" :value "<< 73211009"}])]   ; diabetes mellitus
+        (is (nil? issues) (str "property=" property " produced issues"))
+        (is (instance? Query query) (str "property=" property " did not produce a query")))))
+  (testing "unsupported op surfaces the property name in the issue"
+    (let [{:keys [issues]}
+          (snomed/compose-filters->query *svc*
+            [{:property "constraint" :op "regex" :value ".*"}])]
+      (is (= 1 (count issues)))
+      (is (str/includes? (:text (first issues)) "property=constraint")))))
+
 (comment
   (#'snomed/parse-snomed-uri "http://snomed.info/sct"))

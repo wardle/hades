@@ -159,7 +159,8 @@
                    `generalizes`, `in`, `=`)
   - `parent`     : direct-parent exact match (`=`)
   - `child`      : direct-child exact match (`=`)
-  - `expression` : raw ECL string (`=` or `in`)
+  - `constraint` : raw ECL string (`=` or `in`)
+  - `expression` : alias for `constraint`
   - `<sctid>`    : attribute-value refinement (`=` only)
   - `expressions`: post-coordinated expression toggle — engine no-op."
   [svc {:keys [property op value]}]
@@ -193,11 +194,11 @@
       (parse-long (str value)) (hermes.search/q-childOf (parse-long (str value)))
       :else                    (value-issue property op value))
 
-    (= property "expression")
+    (contains? #{"constraint" "expression"} property)
     (if (contains? #{"=" "in"} op)
       (let [{:keys [query issue]} (parse-ecl-or-issue svc value)]
         (or issue query))
-      (not-supported-issue (str "filter property=expression op=" op " not supported")))
+      (not-supported-issue (str "filter property=" property " op=" op " not supported")))
 
     ;; `expressions` toggles inclusion of post-coordinated expressions
     ;; in the enumeration. The description index is pre-coordinated only,
