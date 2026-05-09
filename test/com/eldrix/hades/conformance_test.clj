@@ -49,16 +49,6 @@
 ;; Test data management
 ;; ---------------------------------------------------------------------------
 
-(defn- git!
-  "Run git synchronously. Returns trimmed stdout; throws on non-zero
-  exit. Runs in the tx-ecosystem clone dir by default; pass
-  `:at-repo false` for the initial clone (no cwd yet)."
-  [args & {:keys [at-repo] :or {at-repo true}}]
-  (str/trim
-    (if at-repo
-      (apply process/exec {:dir test-data-dir} "git" args)
-      (apply process/exec "git" args))))
-
 (defn ensure-test-data!
   "Ensure the tx-ecosystem test data is present AND checked out at the
   pinned revision. Clones on first use; fetches and checks out the
@@ -66,31 +56,47 @@
   []
   (when-not (.exists (io/file test-data-dir "tests" "test-cases.json"))
     (log/info "Cloning tx-ecosystem test data to" test-data-dir)
-    (git! ["clone" test-data-repo test-data-dir] :at-repo false))
-  (let [cur (git! ["rev-parse" "HEAD"])]
+    (process/exec "git" "clone" test-data-repo test-data-dir))
+  (let [cur (str/trim (process/exec {:dir test-data-dir} "git" "rev-parse" "HEAD"))]
     (when-not (= cur tx-ecosystem-pinned-rev)
       (log/info "Checking out pinned tx-ecosystem rev"
                 {:from cur :to tx-ecosystem-pinned-rev})
-      (try (git! ["fetch" "--quiet" "origin"]) (catch Exception _ nil))
-      (git! ["-c" "advice.detachedHead=false"
-             "checkout" "--quiet" tx-ecosystem-pinned-rev])))
+      (try (process/exec {:dir test-data-dir} "git" "fetch" "--quiet" "origin")
+           (catch Exception _ nil))
+      (process/exec {:dir test-data-dir}
+                    "git" "-c" "advice.detachedHead=false"
+                    "checkout" "--quiet" tx-ecosystem-pinned-rev)))
   test-data-dir)
 
 (defn- tx-ecosystem-rev
   "Current HEAD commit hash of the tx-ecosystem clone, or nil."
   []
   (when (.exists (io/file test-data-dir ".git"))
-    (try (git! ["rev-parse" "HEAD"]) (catch Exception _ nil))))
+    (try (str/trim (process/exec {:dir test-data-dir} "git" "rev-parse" "HEAD"))
+         (catch Exception _ nil))))
 
 (defn- upstream-head-rev
   "Upstream main-branch HEAD via `git ls-remote`. Nil on any failure —
   offline-friendly; never blocks a run."
   []
   (try
-    (-> (git! ["ls-remote" "origin" "HEAD"])
+    (-> (process/exec {:dir test-data-dir} "git" "ls-remote" "origin" "HEAD")
         (str/split #"\s+")
         first)
     (catch Exception _ nil)))
+
+(defn- hades-describe
+  "`git describe --tags --always` for the Hades working copy, or nil."
+  []
+  (try (str/trim (process/exec "git" "describe" "--tags" "--always"))
+       (catch Exception _ nil)))
+
+(defn- hades-dirty?
+  "True if the Hades working copy has uncommitted changes (tracked or
+  untracked). Nil on git failure."
+  []
+  (try (-> (process/exec "git" "status" "--porcelain") seq boolean)
+       (catch Exception _ nil)))
 
 ;; ---------------------------------------------------------------------------
 ;; Server lifecycle (REPL-friendly: start! / stop! / restart!)
@@ -325,6 +331,8 @@
        :skipped skipped
        :timestamp (str (Instant/now))
        :tx-ecosystem-rev (tx-ecosystem-rev)
+       :hades-describe (hades-describe)
+       :hades-dirty? (hades-dirty?)
        :tests tests})))
 
 ;; ---------------------------------------------------------------------------
@@ -620,6 +628,8 @@
    :failed           (:failed results)
    :skipped          (or (:skipped results) 0)
    :tx-ecosystem-rev (:tx-ecosystem-rev results)
+   :hades-describe   (:hades-describe results)
+   :hades-dirty?     (:hades-dirty? results)
    :tests     (mapv (fn [{:keys [name suite status operation actions expected-response]}]
                       (cond-> {:name name :suite suite :status status}
                         operation (assoc :operation operation)
@@ -666,15 +676,12 @@
   (load-results baseline-path))
 
 (defn save-baseline!
-  "Save results as the new baseline."
+  "Save results as the new baseline. Writes the full per-test detail —
+  the same shape as latest.json — so `diff` can compare directly against
+  it after a rev bump or refactor."
   [results]
   (let [skipped (or (:skipped results) 0)]
-    (spit baseline-path (json/write-str {:total            (:total results)
-                                         :passed           (:passed results)
-                                         :failed           (:failed results)
-                                         :skipped          skipped
-                                         :tx-ecosystem-rev (:tx-ecosystem-rev results)}
-                                        :indent true))
+    (spit baseline-path (json/write-str (results->json results) :indent true))
     (println (format "Baseline updated: %d/%d passed." (:passed results) (- (:total results) skipped)))))
 
 ;; ---------------------------------------------------------------------------
