@@ -196,10 +196,9 @@
                             (get compose "include"))
         pairs (into concept-pairs include-pairs)]
     (mapv (fn [[sys ver]]
-            (let [cs (when sys
-                       (or (when ver (composite/find-codesystem svc (canonical/versioned-uri sys ver)))
-                           (composite/find-codesystem svc sys)))
-                  meta (when cs (protos/cs-resource cs {}))
+            (let [meta (when sys
+                         (or (when ver (composite/cs-meta svc (canonical/versioned-uri sys ver)))
+                             (composite/cs-meta svc sys)))
                   ver' (or ver (:version meta))
                   uri (if ver' (str sys "|" ver') sys)]
               (cond-> {:uri uri}

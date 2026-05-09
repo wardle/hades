@@ -1,9 +1,13 @@
 (ns com.eldrix.hades.impl.compose-test
-  (:require [clojure.test :refer [deftest is testing use-fixtures]]
+  (:require [clojure.java.io :as io]
+            [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.impl.compose :as compose]
             [com.eldrix.hades.impl.composite :as composite]
-            [com.eldrix.hades.impl.load :as load-fhir]))
+            [com.eldrix.hades.impl.index.sqlite :as sqlite-index]
+            [com.eldrix.hades.impl.load :as load-fhir]
+            [com.eldrix.hades.impl.sqlite.provider :as sqlite-provider])
+  (:import (java.io File)))
 
 (def test-cs-map
   {"resourceType" "CodeSystem"
@@ -204,3 +208,43 @@
           compose {"include" [{"system" "http://example.com/cs"}]}
           concepts (:concepts (compose/expand-compose *svc* compose params))]
       (is (zero? (count concepts))))))
+
+(defn- temp-sqlite-path []
+  (let [^File f (File/createTempFile "hades-compose-test" ".db")]
+    (.delete f)
+    (.getPath f)))
+
+(defn- delete-quietly [path]
+  (let [^File f (io/file path)]
+    (when (.exists f) (.delete f))))
+
+(defn- build-draft-cs-db [path]
+  (sqlite-index/build! path
+    [{:type :codesystem-meta
+      :url "http://example.org/cs/draft"
+      :version "1.0"
+      :status "draft"
+      :experimental true
+      :content "complete"}
+     {:type :concept
+      :system "http://example.org/cs/draft" :version "1.0"
+      :code "x" :display "X"}]
+    {:loader-type "synthetic-draft"})
+  (sqlite-index/index! path))
+
+(deftest expand-compose-used-codesystem-from-sqlite-test
+  (testing "used-codesystem entry carries status/experimental for SQLite catalogues"
+    (let [path (temp-sqlite-path)]
+      (try
+        (build-draft-cs-db path)
+        (let [{:keys [codesystem]} (sqlite-provider/open-providers path)
+              svc (composite/from-providers [codesystem])
+              compose {"include" [{"system" "http://example.org/cs/draft"
+                                   "version" "1.0"}]}
+              {:keys [used-codesystems]} (compose/expand-compose svc compose {})
+              u (first used-codesystems)]
+          (is (= 1 (count used-codesystems)))
+          (is (= "http://example.org/cs/draft|1.0" (:uri u)))
+          (is (= "draft" (:status u)))
+          (is (true? (:experimental u))))
+        (finally (delete-quietly path))))))
