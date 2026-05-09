@@ -15,7 +15,7 @@ Headline: Hades is now a **multi-terminology** FHIR server. SNOMED CT,
 LOINC, and arbitrary FHIR NPM packages run side-by-side in one process,
 dispatched by canonical URL. v1.x served SNOMED only.
 
-Hades passes **491 / 603 (81.4%)** of the HL7 FHIR Terminology Ecosystem
+Hades passes **493 / 603 (81.8%)** of the HL7 FHIR Terminology Ecosystem
 IG conformance tests against the pinned tx-ecosystem rev (`fb9078f6`). 
 
 The major version bump signals two things: the surface is broader (LOINC,

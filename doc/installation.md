@@ -1,0 +1,269 @@
+# Installation
+
+This walkthrough builds three terminologies side-by-side and serves them
+from a single Hades process: SNOMED CT (UK monolith edition from TRUD),
+LOINC, and a couple of FHIR conformance packages from
+[packages.fhir.org](https://packages.fhir.org). Each block is a discrete
+step — skip any terminology you don't need.
+
+You'll need:
+
+- Java 21 or above
+- A [TRUD](https://isd.digital.nhs.uk/trud) API key, saved to a file
+  (e.g. `trud-api-key.txt`), for the UK SNOMED download
+- A LOINC release archive — sign in at
+  [loinc.org/downloads](https://loinc.org/downloads/) (free) and unzip
+  it locally (e.g. to `/tmp/Loinc_2.81/`)
+
+> Throughout this document, examples use `java -jar hades.jar`. From a
+> source checkout, replace with `clj -M:run` throughout.
+
+## 1. Install SNOMED CT (UK monolith edition)
+
+The monolith is the merged UK edition (international + clinical + drug
+extensions in one). One command downloads, imports and indexes:
+
+```shell
+java -jar hades.jar install snomed.db \
+    --dist uk.nhs/sct-monolith \
+    --api-key trud-api-key.txt
+```
+
+`install` auto-indexes the destination so the resulting `snomed.db/` is
+queryable as soon as it returns. Build takes a few minutes; the
+database is around 2 GB.
+
+## 2. Build LOINC
+
+LOINC isn't distributed via a registry — point `import` at the unzipped
+release directory:
+
+```shell
+java -jar hades.jar import loinc.db /tmp/Loinc_2.81/
+```
+
+## 3. Install FHIR conformance packages
+
+```shell
+java -jar hades.jar install fhir.db \
+    --dist hl7.fhir.r4.core@4.0.1 \
+    --dist hl7.terminology.r4@7.0.1 \
+    --dist hl7.fhir.uv.ips@2.0.0
+```
+
+Packages are pulled from `packages.fhir.org` and loaded into a SQLite
+container. To serve in-memory instead — faster lookups, larger heap —
+add `--cache-dir packages/` and `serve` the extracted directories
+directly (see [In-memory vs SQLite container](#in-memory-vs-sqlite-container)
+below).
+
+## 4. Check what you've got
+
+```shell
+java -jar hades.jar status snomed.db loinc.db fhir.db
+```
+
+Reports the CodeSystems, ValueSets and ConceptMaps each source
+contributes — handy as a smoke test before exposing the server. Add
+`--format json` for machine-readable output.
+
+## 5. Serve them together
+
+```shell
+java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
+```
+
+The composite catalogue dispatches operations to the right provider by
+canonical URL — no per-terminology routes, no client-side configuration.
+A single endpoint serves all three.
+
+When two providers claim the same canonical URL (e.g. an International
+and a UK SNOMED database both serving `http://snomed.info/sct`),
+disambiguate with one or more `--default URL=VERSION` flags. A request
+that names the bare URL is routed to the matching version; requests
+that include an explicit `version` are routed normally.
+
+```shell
+java -jar hades.jar serve snomed-intl.db snomed-uk.db \
+    --default http://snomed.info/sct=http://snomed.info/sct/83821000000107/version/20250416
+```
+
+## 6. Try it
+
+```shell
+# SNOMED CT — 73211009 is "Diabetes mellitus"
+curl -sG 'http://localhost:8080/fhir/CodeSystem/$lookup' \
+  --data-urlencode 'system=http://snomed.info/sct' \
+  --data-urlencode 'code=73211009' | jq .
+
+# LOINC — 718-7 is "Hemoglobin [Mass/volume] in Blood"
+curl -sG 'http://localhost:8080/fhir/CodeSystem/$lookup' \
+  --data-urlencode 'system=http://loinc.org' \
+  --data-urlencode 'code=718-7' | jq .
+
+# FHIR — expand the administrative-gender ValueSet from hl7.fhir.r4.core
+curl -sG 'http://localhost:8080/fhir/ValueSet/$expand' \
+  --data-urlencode 'url=http://hl7.org/fhir/ValueSet/administrative-gender' | jq .
+```
+
+See [HTTP API](http-api.md) for more examples and
+[CLI reference](cli.md) for full per-command options.
+
+---
+
+# Per-terminology details
+
+## SNOMED CT
+
+Hades wraps [Hermes](https://github.com/wardle/hermes) (LMDB + Lucene)
+to serve SNOMED CT. Operations are full-fidelity: ECL queries, the
+implicit `http://snomed.info/sct?fhir_vs=…` / `?fhir_cm=…` URI patterns,
+$translate via SNOMED map reference sets, and lookup with all
+designations and properties.
+
+### Distributions
+
+```shell
+java -jar hades.jar available
+```
+
+lists every distribution Hades knows. The common choices:
+
+| Identifier | Source | Auth |
+|---|---|---|
+| `uk.nhs/sct-monolith` | UK monolith (intl + clinical + drug ext, merged) | TRUD `--api-key` |
+| `uk.nhs/sct-clinical` | UK clinical edition | TRUD `--api-key` |
+| `uk.nhs/sct-drug-ext` | UK drug extension (layer on top of clinical) | TRUD `--api-key` |
+| `ihtsdo.mlds/167` | SNOMED CT International (from MLDS) | MLDS `--username` + `--password` |
+
+Pin a release with `@<version>`, e.g.
+`--dist uk.nhs/sct-monolith@2025-02-01`. Run
+`java -jar hades.jar available --dist <id>` to list available versions
+(some registries authenticate read access — pass the same credentials
+you'd use for install).
+
+### Layering distributions
+
+Multiple `--dist` flags on a single `install` layer into the same
+database; the auto-index runs once at the end:
+
+```shell
+java -jar hades.jar install snomed.db \
+    --dist uk.nhs/sct-clinical \
+    --dist uk.nhs/sct-drug-ext \
+    --api-key trud-api-key.txt
+```
+
+To layer across **separate** invocations (e.g. install one distribution
+today, another next week into the same DB), pass `--no-index` on every
+call but the last to skip the per-call index — then run a final
+unflagged install/import or a standalone `index <db>`:
+
+```shell
+java -jar hades.jar install --no-index snomed.db --dist uk.nhs/sct-clinical --api-key trud-api-key.txt
+java -jar hades.jar install            snomed.db --dist uk.nhs/sct-drug-ext --api-key trud-api-key.txt
+```
+
+### Importing a manually-downloaded release
+
+If you already have an RF2 release on disk, skip `install`:
+
+```shell
+java -jar hades.jar list /path/to/unzipped-rf2/                       # preview what will be imported
+java -jar hades.jar import snomed.db /path/to/unzipped-rf2/
+```
+
+## LOINC
+
+LOINC is consumed from a local release directory (the unzipped
+`Loinc_<version>` archive from [loinc.org](https://loinc.org/downloads/)).
+There is no registry — manual download is required for licensing reasons,
+but no API key is involved.
+
+```shell
+java -jar hades.jar import loinc.db /path/to/Loinc_2.81/
+```
+
+`import` auto-indexes the destination — the ancestor closure and FTS
+tables (which `descendant-of` filters and text search rely on) are
+built before the command returns.
+
+What's exposed:
+
+- The `http://loinc.org` CodeSystem with `$lookup`, `$validate-code`,
+  `$subsumes` (over LOINC's class hierarchy), and full property metadata
+  (COMPONENT, PROPERTY, SYSTEM, METHOD_TYP, SHORTNAME, etc.)
+- `AccessoryFiles/ComponentHierarchyBySystem/ComponentHierarchyBySystem.csv`
+  is loaded as parent/child concept relations, so `descendant-of`
+  filters in `$expand` and `$subsumes` traverse LOINC's hierarchy
+- `LoincTable/MapTo.csv` is loaded as a LOINC→LOINC ConceptMap
+
+LOINC builds into a SQLite container directly; no separate `index` or
+`compact` is needed.
+
+## FHIR packages
+
+Any [FHIR NPM package](https://registry.fhir.org/) — IGs, conformance
+packages, terminology bundles — can be served alongside SNOMED and
+LOINC. The composite dispatches by canonical URL, so a `ValueSet` from
+`hl7.fhir.us.core` and a `CodeSystem` from `hl7.terminology.r4` resolve
+without any per-package configuration.
+
+```shell
+java -jar hades.jar available                                # show known FHIR packages
+java -jar hades.jar available --dist hl7.fhir.r4.core        # list versions
+```
+
+Common packages:
+
+| Package | Purpose |
+|---|---|
+| `hl7.fhir.r4.core` | FHIR R4 core (CodeSystems and ValueSets) |
+| `hl7.terminology.r4` | HL7 standard CodeSystems and ValueSets |
+| `hl7.fhir.us.core` | US Core implementation guide |
+| `hl7.fhir.uv.ips` | International Patient Summary |
+
+Hades's wire format is FHIR **R4** (the CapabilityStatement reports
+`fhirVersion` 4.0.1). R5 packages can be installed and their
+CodeSystems/ValueSets will mostly load, but the server speaks R4 to
+clients and R5 ConceptMaps (`relationship`, not R4 `equivalence`) are
+not fully supported.
+
+Any other id from `packages.fhir.org` works too — e.g.
+`--dist hl7.fhir.uv.sdc@3.0.0`. If the registry doesn't authenticate the
+listing, `available --dist <id>` shows versions; otherwise pin a known
+version with `@<version>`.
+
+### In-memory vs SQLite container
+
+`install` lands a FHIR package as a SQLite container by default. Add
+`--cache-dir <dir>` to also keep the extracted JSON, then `serve` the
+package directory directly for in-memory operation:
+
+```shell
+# Install once, keep the extracted JSON in ./packages
+java -jar hades.jar install fhir.db \
+    --dist hl7.fhir.r4.core@4.0.1 \
+    --dist hl7.terminology.r4@7.0.1 \
+    --cache-dir packages
+
+# Serve in-memory (faster lookups, larger heap)
+java -jar hades.jar serve --port 8080 \
+    snomed.db loinc.db \
+    packages/hl7.fhir.r4.core-4.0.1/package \
+    packages/hl7.terminology.r4-7.0.1/package
+
+# Or serve from the SQLite container (lower memory)
+java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
+```
+
+| | FHIR JSON dir (in-memory) | `.db` (SQLite container) |
+| --- | --- | --- |
+| Boot time | Slower — parses every JSON at start (~15 s for 6 HL7 packages) | Fast — opens the file |
+| Per-request latency | Hashmap lookup, nanoseconds | JDBC + prepared statement, tens of µs |
+| Memory | Whole corpus in heap (~600 MB live for the 6 HL7 packages above) | ~80 MB regardless of package count |
+| Best for | Latency-sensitive use; small-to-medium catalogues; hosts with ample RAM | Memory-constrained hosts; very large corpora |
+
+In-memory is the default; switch to SQLite with
+`import <out.db> <pkg-dir>` when RAM is constrained. See
+[FTRM](ftrm.md) for the container schema.
