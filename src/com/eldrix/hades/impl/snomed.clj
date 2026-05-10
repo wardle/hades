@@ -112,23 +112,30 @@
 
 (defn- parse-ecl-or-issue
   "Parse a client-supplied ECL expression via Hermes. On parser
-  failure returns `{:issue …}` carrying a FHIR `:processing` issue;
-  on success returns `{:query <Lucene Query>}`. Used at the two sites
-  that consume opaque ECL strings — the compose `expression` filter
-  property and the implicit-VS URL `?fhir_vs=ecl/...` path. Every
-  other filter shape is structurally known and builds its Lucene
-  Query directly via `hermes.search/q-*`, never round-tripping through
-  the ECL parser."
+  failure returns `{:issue …}` carrying a FHIR issue mapped from
+  Hermes' structured `::ecl/parse-error` ex-data; on success returns
+  `{:query <Lucene Query>}`. Used at the two sites that consume opaque
+  ECL strings — the compose `expression` filter property and the
+  implicit-VS URL `?fhir_vs=ecl/...` path. Every other filter shape is
+  structurally known and builds its Lucene Query directly via
+  `hermes.search/q-*`, never round-tripping through the ECL parser."
   [svc ecl]
   (try
     {:query (hermes.ecl/parse svc ecl)}
     (catch clojure.lang.ExceptionInfo ex
-      {:issue {:severity     "error"
-               :type         "processing"
-               :details-code "vs-invalid"
-               :text         (str "invalid ECL expression"
-                                  (when-let [m (.getMessage ex)]
-                                    (str ": " m)))}})))
+      (let [{:keys [error]} (ex-data ex)
+            [type details-code]
+            (case error
+              :invalid-code  ["code-invalid"  "invalid-code"]
+              :not-found     ["not-found"     "not-found"]
+              :not-supported ["not-supported" "filter-not-supported"]
+              ["invalid"     "vs-invalid"])]
+        {:issue {:severity     "error"
+                 :type         type
+                 :details-code details-code
+                 :text         (str "invalid ECL expression"
+                                    (when-let [m (.getMessage ex)]
+                                      (str ": " m)))}}))))
 
 (defn- value-issue [property op value]
   {:severity     "error"
