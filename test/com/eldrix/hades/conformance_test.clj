@@ -675,13 +675,27 @@
   []
   (load-results baseline-path))
 
+(defn- baseline-shape
+  "Slim regression-gate shape — just totals and the two pins
+  (snomed-version, tx-ecosystem-rev). Full per-test detail (actions,
+  expected vs actual) stays in `latest.json` + the timestamped
+  archive under `test/resources/conformance/` for live debugging;
+  the regression gate only needs the headline counts."
+  [results]
+  {:total            (:total results)
+   :passed           (:passed results)
+   :failed           (:failed results)
+   :skipped          (or (:skipped results) 0)
+   :snomed-version   fixtures/snomed-version
+   :tx-ecosystem-rev (:tx-ecosystem-rev results)})
+
 (defn save-baseline!
-  "Save results as the new baseline. Writes the full per-test detail —
-  the same shape as latest.json — so `diff` can compare directly against
-  it after a rev bump or refactor."
+  "Save results as the new baseline — totals + the SNOMED /
+  tx-ecosystem pins. Bulky failure detail stays in `latest.json`
+  and the timestamped archive under `test/resources/conformance/`."
   [results]
   (let [skipped (or (:skipped results) 0)]
-    (spit baseline-path (json/write-str (results->json results) :indent true))
+    (spit baseline-path (str (json/write-str (baseline-shape results) :indent true) "\n"))
     (println (format "Baseline updated: %d/%d passed." (:passed results) (- (:total results) skipped)))))
 
 ;; ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 {
   "total": 603,
-  "passed": 490,
-  "failed": 110,
+  "passed": 493,
+  "failed": 107,
   "skipped": 3,
   "snomed-version": "20250201",
   "tx-ecosystem-rev": "fb9078f6102088e3307e5b77c255bd41453fdcec"
