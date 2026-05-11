@@ -930,21 +930,11 @@
          all-closers)))))
 
 (defn with-overlays
-  "Return a derived TerminologyService layering the given providers on
-  top of `base`. Overlay entries take precedence on exact-key match.
-  The derived handle is a view: closing the base service releases
-  resources, closing the view does nothing.
-
-  Because the view never runs closers, overlay providers must not own
-  resources — `Closeable` providers are rejected at construction time.
-  If you need a resource-owning overlay, build a fresh service via
-  `from-providers`/`core/open` and close it explicitly when done."
+  "Return a derived TerminologyService layering `providers` on top of
+  `base`. Overlay entries take precedence on exact-key match. Used
+  per-request for `tx-resource` parameters."
   ([base providers] (with-overlays base providers nil))
   ([base providers {:keys [supplements naming-systems]}]
-   (when-let [bad (first (filter #(instance? java.io.Closeable %) providers))]
-     (throw (ex-info "Overlay provider is Closeable; with-overlays cannot release it"
-                     {:reason :closeable-overlay
-                      :provider-class (.getName (class bad))})))
    (let [overlay (from-providers providers
                                   (cond-> {:lookup-fallback #(find-codesystem base %)}
                                     (seq supplements) (assoc :supplements supplements)

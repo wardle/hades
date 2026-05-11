@@ -5,7 +5,7 @@
   This file targets the dispatch and cross-cutting behaviour itself:
 
     - precomputed `cs-meta` / `vs-meta` cache
-    - `with-overlays` precedence and Closeable rejection
+    - `with-overlays` precedence
     - ConceptMap candidate selection (single, ambiguous)
     - version-availability + check-system-version issue construction"
   (:require [clojure.test :refer [deftest is testing]]
@@ -207,20 +207,6 @@
     (testing "base service still works after layering (view, not mutation)"
       (is (some? (composite/find-codesystem base "http://example.com/r/cs|1.0")))
       (is (nil? (composite/find-codesystem base "http://example.com/r/cs|2.0"))))))
-
-(deftest with-overlays-rejects-closeable-test
-  (let [base (svc-of [cs-v1])
-        closeable-provider (reify
-                             java.io.Closeable (close [_] nil)
-                             protos/CodeSystem
-                             (cs-metadata [_ _opts] [{:url "http://example.com/r/closeable"}])
-                             (cs-resource [_ _] nil)
-                             (cs-lookup [_ _] nil)
-                             (cs-validate-code [_ _] nil)
-                             (cs-subsumes [_ _] nil)
-                             (cs-expand* [_ _] nil))]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Closeable"
-          (hades/with-overlays base [closeable-provider])))))
 
 ;; ---------------------------------------------------------------------------
 ;; ConceptMap candidate selection
