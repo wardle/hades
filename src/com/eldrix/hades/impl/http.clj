@@ -494,7 +494,17 @@
                       {:systemA (get codingA "system") :codeA (get codingA "code")
                        :systemB (get codingB "system") :codeB (get codingB "code")})]
     (if subs-params
-      {:status 200 :body (wire/subsumes->parameters (hades/subsumes svc subs-params))}
+      (let [result (hades/subsumes svc subs-params)]
+        (cond
+          (:not-found result)
+          {:status 404 :body (wire/operation-outcome (:issues result))}
+
+          (seq (:issues result))
+          {:status (issue->status (first (:issues result)))
+           :body   (wire/operation-outcome (:issues result))}
+
+          :else
+          {:status 200 :body (wire/subsumes->parameters result)}))
       {:status 400
        :body   (wire/operation-outcome
                 [{:severity "error" :type "invalid"

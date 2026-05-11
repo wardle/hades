@@ -94,6 +94,14 @@
 (defn- no-match? [body]
   (nil? (get-param body "match")))
 
+(defn- not-parameters-with-empty-outcome? [body]
+  ;; Guards against the regression where $subsumes returns
+  ;; 200 + Parameters with outcome typed as valueString "" / "nil"
+  ;; because the composite returned nil for an unknown system.
+  (not (and (= "Parameters" (get body "resourceType"))
+            (let [p (get-param body "outcome")]
+              (and p (not (get p "valueCode")))))))
+
 (defn- check
   "Run one case from the table. Asserts status, optional content-type
   regex, and every body predicate (each `assertions` entry is
@@ -258,7 +266,45 @@
                           ["text mentions codeA/codeB or codingA/codingB"
                            (issue-text-matches? #"codeA.*codeB|codingA.*codingB")]
                           ["does not say 'No endpoint matches path'"
-                           (issue-text-not-matches? #"No endpoint matches path")]]}}])
+                           (issue-text-not-matches? #"No endpoint matches path")]]}}
+
+   ;; Regression: composite `cs-subsumes` returns nil when the system is
+   ;; unknown; the wire layer then emits a Parameters body with an outcome
+   ;; parameter typed off nil (effectively empty), and the handler wraps
+   ;; it in 200. Should be a 4xx OperationOutcome instead.
+   {:name "$subsumes with unknown system returns 4xx OperationOutcome"
+    :request {:method :post
+              :path "/CodeSystem/$subsumes"
+              :body {:resourceType "Parameters"
+                     :parameter [{:name "codeA" :valueCode "24700007"}
+                                 {:name "codeB" :valueCode "24700007"}
+                                 {:name "system" :valueUri "http://example.com/totally-unknown"}]}}
+    :expect {:status 404
+             :content-type #"application/fhir\+json"
+             :assertions [["body is OperationOutcome" operation-outcome?]
+                          ["not Parameters with empty outcome"
+                           not-parameters-with-empty-outcome?]]}}
+
+   ;; Regression: composite `cs-subsumes` previously raised a bare
+   ;; ex-info when codingA.system != codingB.system; catch-all-error
+   ;; mapped that to 500. Now returns a structured invalid issue (422
+   ;; via issue->status).
+   {:name "$subsumes with mismatched coding systems returns 422 OperationOutcome"
+    :request {:method :post
+              :path "/CodeSystem/$subsumes"
+              :body {:resourceType "Parameters"
+                     :parameter [{:name "codingA"
+                                  :valueCoding {:system "http://snomed.info/sct"
+                                                :code "24700007"}}
+                                 {:name "codingB"
+                                  :valueCoding {:system "http://loinc.org"
+                                                :code "1234-5"}}]}}
+    :expect {:status 422
+             :content-type #"application/fhir\+json"
+             :assertions [["body is OperationOutcome" operation-outcome?]
+                          ["issue.code = invalid" (issue-code-equals? "invalid")]
+                          ["text mentions same code system"
+                           (issue-text-matches? #"(?i)same code system|single code system")]]}}])
 
 (deftest ^:live operation-cases
   (doseq [c cases] (check c)))

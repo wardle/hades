@@ -331,10 +331,23 @@
                      :expression ["system"]}]}))))
 
   (cs-subsumes [this {:keys [systemA systemB] :as params}]
-    (when-not (= systemA systemB)
-      (throw (ex-info "Currently, can only check subsumption within same codesystem" params)))
-    (when-let [cs (find-codesystem this systemA)]
-      (protos/cs-subsumes cs params)))
+    (cond
+      (not= systemA systemB)
+      {:issues [{:severity "error" :type "invalid"
+                 :details-code "MSG_PARAM_INVALID"
+                 :text "$subsumes can only check subsumption within a single code system"
+                 :expression ["systemA" "systemB"]}]}
+
+      :else
+      (if-let [cs (find-codesystem this systemA)]
+        (protos/cs-subsumes cs params)
+        (let [msg (str "A definition for the code system '" systemA
+                       "' could not be found, so subsumption cannot be tested")]
+          {:not-found        true
+           :x-unknown-system systemA
+           :issues           [{:severity "error" :type "not-found"
+                               :details-code "not-found" :text msg
+                               :expression ["system"]}]}))))
 
   (cs-expand* [this {:keys [system version] :as query}]
     (let [lookup-key (canonical/versioned-uri system version)]
