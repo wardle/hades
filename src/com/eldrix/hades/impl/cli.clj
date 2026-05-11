@@ -81,7 +81,7 @@
                   :parse-fn parse-long
                   :validate [#(< 0 % 0x10000) "Must be a number between 0 and 65536"]]
    :bind-address ["-a" "--bind-address ADDR" "Address to bind"]
-   :locale       [nil "--locale LOCALE" "Default / fallback locale (e.g. en-GB)"]
+   :locale       [nil "--locale LOCALE" "Sets server default locale (e.g. en-GB)"]
    :format       [nil "--format FMT" "Output format ('json' or 'edn')"
                   :parse-fn keyword :validate [#{:json :edn} "Format must be 'json' or 'edn'"]]
    :default      [nil "--default URL=VERSION" "Bind a bare canonical URL to VERSION. Repeatable."

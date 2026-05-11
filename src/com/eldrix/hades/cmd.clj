@@ -359,8 +359,9 @@
 
 (defn- build-svc
   "Open CLI positional paths as a Hades service."
-  [{:keys [default]} paths]
-  (let [svc (hades/open paths {:defaults default})]
+  [{:keys [default locale]} paths]
+  (let [svc (hades/open paths (cond-> {:defaults default}
+                                locale (assoc :default-locale locale)))]
     (log-catalogue-summary svc)
     svc))
 

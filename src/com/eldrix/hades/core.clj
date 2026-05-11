@@ -77,6 +77,7 @@
     :supplements    — vector of `{:meta :lookup}` supplement entries
     :naming-systems — vector of resolver fns for OID/URN aliases
     :defaults       — map of bare canonical URL to version for disambiguation
+    :default-locale — fallback BCP 47 locale forwarded to `hermes/open`
     :metadata       — load report (returned by `metadata`)
     :closers        — extra close fns
 

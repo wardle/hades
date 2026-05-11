@@ -64,7 +64,7 @@ Add to your `claude_desktop_config.json`:
 hades mcp <paths...> [--locale LOCALE] [--default URL=VERSION]
 ```
 
-- `--locale` sets the default Accept-Language for preferred displays.
+- `--locale` sets the server default locale (e.g. `en-GB`) for terminologies that support it, such as SNOMED CT.
 - `--default URL=VERSION` resolves the bare canonical URL to a specific
   version when multiple providers serve the same URL. Repeatable.
 
