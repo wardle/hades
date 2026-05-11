@@ -18,25 +18,11 @@ package — then point the MCP server at the resulting paths.
 
 ## Setup
 
-### Claude Code
-
-```shell
-claude mcp add --transport stdio --scope user hades -- \
-  java -jar /path/to/hades.jar mcp \
-  /path/to/snomed.db /path/to/fhir.db /path/to/loinc.db
-```
-
-This registers hades for all your Claude Code sessions. Use
-`--scope project` to scope to one project, or `--scope local` for a
-local-only configuration. The CLI after `--` is what Claude invokes —
-each positional path is a terminology source (auto-detected): mix and
-match SNOMED, FHIR-tx SQLite, LOINC, or directories of FHIR JSON.
-
-To verify:
-
-```shell
-claude mcp list
-```
+The recommended setup runs Hades from a source checkout via the
+Clojure CLI. Restarting the MCP picks up source changes immediately —
+no jar rebuild, no stable-name dance, no chance of running yesterday's
+binary by accident. Prerequisites: a hades source clone and the
+`clojure` CLI (`brew install clojure/tools/clojure` on macOS).
 
 ### Claude Desktop
 
@@ -46,11 +32,58 @@ Add to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "hades": {
-      "command": "java",
+      "command": "clojure",
       "args": [
-        "-jar", "/path/to/hades.jar", "mcp",
+        "-M:run", "mcp",
         "/path/to/snomed.db",
         "/path/to/fhir.db",
+        "/path/to/loinc.db"
+      ],
+      "cwd": "/path/to/hades-source"
+    }
+  }
+}
+```
+
+Each positional path after `mcp` is a terminology source (auto-detected):
+mix and match SNOMED, FHIR-tx SQLite, LOINC, or directories of FHIR JSON.
+
+### Claude Code
+
+Same shape. `claude mcp add-json` accepts the JSON object directly:
+
+```shell
+claude mcp add-json --scope user hades '{
+  "command": "clojure",
+  "args": ["-M:run", "mcp", "/path/to/snomed.db", "/path/to/loinc.db"],
+  "cwd": "/path/to/hades-source"
+}'
+```
+
+Use `--scope project` to scope to one project, or `--scope local` for a
+local-only configuration. To verify:
+
+```shell
+claude mcp list
+```
+
+### Running from a packaged jar
+
+If you don't want a source checkout — a deployment scenario, or a
+locked-down host — point at the uberjar instead. Build it with
+`clojure -T:build uber`, which writes `target/hades-<version>.jar`. The
+`release` task additionally copies that to `target/hades.jar` (a
+versionless mirror) but only as part of publishing a GitHub release; for
+local use you'll typically reference the versioned filename directly:
+
+```json
+{
+  "mcpServers": {
+    "hades": {
+      "command": "java",
+      "args": [
+        "-jar", "/path/to/hades-2.0.207.jar", "mcp",
+        "/path/to/snomed.db",
         "/path/to/loinc.db"
       ]
     }
