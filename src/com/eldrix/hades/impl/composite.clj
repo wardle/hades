@@ -283,8 +283,6 @@
 ;; any single provider.
 ;; ---------------------------------------------------------------------------
 
-(declare ->TerminologyService)
-
 (defn- run-closers [closers]
   (run! (fn [f]
           (try (f) (catch Exception _ nil)))
