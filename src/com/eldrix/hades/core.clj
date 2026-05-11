@@ -160,7 +160,7 @@
   "CodeSystem $find-matches. `query` is an `::input/query` describing
   the filters/text/properties the provider must satisfy."
   [svc query]
-  (protos/cs-find-matches svc query))
+  (protos/cs-expand* svc query))
 
 (s/fdef expand
   :args (s/cat :svc some? :params map?)

@@ -66,12 +66,12 @@
   (->> metadata (map (juxt :url :version)) set))
 
 (defn- first-code-from-cs
-  "Pull one code from a CodeSystem via `cs-find-matches` with no filters,
+  "Pull one code from a CodeSystem via `cs-expand*` with no filters,
   bounded by `:max-hits 1`. Returns nil when the CS exposes no concepts
   (e.g. content=not-present)."
   [svc system]
   (when-let [cs (composite/find-codesystem svc system)]
-    (-> (protos/cs-find-matches cs {:system system :max-hits 1})
+    (-> (protos/cs-expand* cs {:system system :max-hits 1})
         :concepts first :code)))
 
 (deftest ^:live cs-metadata-parity

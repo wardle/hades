@@ -260,23 +260,23 @@
     (let [result (protos/vs-validate-code hier-cs nil {:code "B"})]
       (is (true? (:result result))))))
 
-;; --- cs-find-matches ---
+;; --- cs-expand* ---
 
-(defn- find-matches [impl query]
-  (:concepts (protos/cs-find-matches impl query)))
+(defn- search-concepts [impl query]
+  (:concepts (protos/cs-expand* impl query)))
 
-(deftest cs-find-matches-test
+(deftest cs-expand*-test
   (testing "nil filters returns all concepts"
-    (let [result (find-matches hier-cs {:system "http://example.com/test-cs"})]
+    (let [result (search-concepts hier-cs {:system "http://example.com/test-cs"})]
       (is (= 6 (count result)))
       (is (every? #(= "http://example.com/test-cs" (:system %)) result))))
 
   (testing "empty filters returns all concepts"
-    (let [result (find-matches hier-cs {:system "http://example.com/test-cs" :filters []})]
+    (let [result (search-concepts hier-cs {:system "http://example.com/test-cs" :filters []})]
       (is (= 6 (count result)))))
 
   (testing "is-a filter"
-    (let [result (find-matches hier-cs
+    (let [result (search-concepts hier-cs
                    {:system "http://example.com/test-cs"
                     :filters [{:property "concept" :op "is-a" :value "A"}]})
           codes (set (map :code result))]
@@ -287,7 +287,7 @@
       (is (not (contains? codes "B")))))
 
   (testing "descendent-of filter excludes the root"
-    (let [result (find-matches hier-cs
+    (let [result (search-concepts hier-cs
                    {:system "http://example.com/test-cs"
                     :filters [{:property "concept" :op "descendent-of" :value "A"}]})
           codes (set (map :code result))]
@@ -297,7 +297,7 @@
       (is (contains? codes "A2a"))))
 
   (testing "is-not-a filter"
-    (let [result (find-matches hier-cs
+    (let [result (search-concepts hier-cs
                    {:system "http://example.com/test-cs"
                     :filters [{:property "concept" :op "is-not-a" :value "A"}]})
           codes (set (map :code result))]
@@ -306,21 +306,21 @@
       (is (not (contains? codes "A1")))))
 
   (testing "= filter on property"
-    (let [result (find-matches hier-cs
+    (let [result (search-concepts hier-cs
                    {:system "http://example.com/test-cs"
                     :filters [{:property "status" :op "=" :value "active"}]})
           codes (set (map :code result))]
       (is (contains? codes "B"))))
 
   (testing "= filter on code property"
-    (let [result (find-matches hier-cs
+    (let [result (search-concepts hier-cs
                    {:system "http://example.com/test-cs"
                     :filters [{:property "code" :op "=" :value "B"}]})
           codes (set (map :code result))]
       (is (= #{"B"} codes))))
 
   (testing "multiple filters are ANDed"
-    (let [result (find-matches hier-cs
+    (let [result (search-concepts hier-cs
                    {:system "http://example.com/test-cs"
                     :filters [{:property "concept" :op "is-a" :value "A"}
                               {:property "code" :op "=" :value "A1"}]})

@@ -2,7 +2,7 @@
   "Live integration tests against the pinned LOINC SQLite container.
   Tagged `^:live`. Exercises the SQLite provider end-to-end:
   catalogue load, point queries (lookup / validate-code), text search
-  (find-matches), and registry dispatch."
+  (cs-expand*), and registry dispatch."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
@@ -20,7 +20,7 @@
 
 (defn provider-fixture [f]
   ;; Open the SQLite providers separately so per-impl tests can call
-  ;; `protos/cs-find-matches` directly. The Hades service is built from
+  ;; `protos/cs-expand*` directly. The Hades service is built from
   ;; the same providers + a naming-system entry installed idempotently
   ;; for the OID resolver test. The application file ships without
   ;; NamingSystem entries by default.
@@ -76,11 +76,11 @@
       (is (false? (:result r)))
       (is (= "invalid-display" (-> r :issues first :details-code))))))
 
-(deftest ^:live live-cs-find-matches-fts-text
+(deftest ^:live live-cs-expand*-fts-text
   (testing "FTS text matching finds LOINC concepts ranked by relevance"
     (let [;; Query is specific enough to put the canonical
           ;; 'Hemoglobin [Mass/volume] in Blood' (718-7) at the top.
-          r (protos/cs-find-matches *codesystem*
+          r (protos/cs-expand* *codesystem*
               {:system loinc-url
                :text "Hemoglobin Mass volume Blood"
                :max-hits 5})
@@ -88,9 +88,9 @@
       (is (pos? (count codes)))
       (is (= "718-7" (first codes))))))
 
-(deftest ^:live live-cs-find-matches-text-and-property-filter
+(deftest ^:live live-cs-expand*-text-and-property-filter
   (testing "FTS text combined with a property filter narrows results"
-    (let [r (protos/cs-find-matches *codesystem*
+    (let [r (protos/cs-expand* *codesystem*
               {:system loinc-url
                :text "Creatinine Mass volume Serum Plasma"
                :filters [{:property "STATUS" :op "=" :value "ACTIVE"}]
@@ -98,9 +98,9 @@
           codes (mapv :code (:concepts r))]
       (is (some #{"2160-0"} codes)))))
 
-(deftest ^:live live-cs-find-matches-direct-code-filter
+(deftest ^:live live-cs-expand*-direct-code-filter
   (testing "code = filter pinpoints a single concept"
-    (let [r (protos/cs-find-matches *codesystem*
+    (let [r (protos/cs-expand* *codesystem*
               {:system loinc-url
                :filters [{:property "code" :op "=" :value "718-7"}]})]
       (is (= 1 (count (:concepts r))))

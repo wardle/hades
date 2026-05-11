@@ -336,10 +336,10 @@
     (when-let [cs (find-codesystem this systemA)]
       (protos/cs-subsumes cs params)))
 
-  (cs-find-matches [this {:keys [system version] :as query}]
+  (cs-expand* [this {:keys [system version] :as query}]
     (let [lookup-key (canonical/versioned-uri system version)]
       (when-let [cs (find-codesystem this lookup-key)]
-        (protos/cs-find-matches cs query))))
+        (protos/cs-expand* cs query))))
 
   protos/ValueSet
   (vs-metadata [_ opts]

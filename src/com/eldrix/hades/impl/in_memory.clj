@@ -325,7 +325,7 @@
        (ancestor? (:parents hierarchy) codeB codeA) "subsumes"
        :else "not-subsumed")})
 
-  (cs-find-matches [_ query]
+  (cs-expand* [_ query]
     (let [{:keys [filters displayLanguage properties max-hits text active-only]} query
           url     (:url meta)
           version (:version meta)

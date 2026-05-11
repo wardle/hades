@@ -155,7 +155,7 @@
                    ::multi-version-systems]))
 
 ;; ---------------------------------------------------------------------------
-;; Match result — returned by cs-find-matches. `:total` is optional and
+;; Match result — returned by cs-expand*. `:total` is optional and
 ;; populated only when cheaply knowable by the provider.
 ;; ---------------------------------------------------------------------------
 

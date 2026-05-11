@@ -79,37 +79,37 @@
             (is (= "code-invalid" (-> r :issues first :type))))))
       (finally (delete-quietly path)))))
 
-(deftest cs-find-matches-text-search
+(deftest cs-expand*-text-search
   (let [path (new-temp-path)]
     (try
       (build-fixture-db path)
       (let [{:keys [codesystem]} (sqlite-provider/open-providers path)]
         (testing "FTS text query matches display"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://loinc.org" :text "Hemoglobin"})
                 codes (set (map :code (:concepts r)))]
             (is (contains? codes "718-7"))
             (is (contains? codes "4548-4"))
             (is (not (contains? codes "2160-0")))))
         (testing "FTS tokens are AND-ed"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://loinc.org" :text "Creatinine Serum"})
                 codes (set (map :code (:concepts r)))]
             (is (contains? codes "2160-0"))
             (is (not (contains? codes "718-7")))))
         (testing "blank text returns whole CodeSystem (subject to active-only)"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://loinc.org" :text ""})]
             (is (>= (count (:concepts r)) 8)))))
       (finally (delete-quietly path)))))
 
-(deftest cs-find-matches-filters
+(deftest cs-expand*-filters
   (let [path (new-temp-path)]
     (try
       (build-fixture-db path)
       (let [{:keys [codesystem]} (sqlite-provider/open-providers path)]
         (testing "= on a property"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://loinc.org"
                      :filters [{:property "CLASS" :op "=" :value "CHEM"}]})
                 codes (set (map :code (:concepts r)))]
@@ -117,40 +117,40 @@
             (is (contains? codes "2345-7"))
             (is (not (contains? codes "718-7")))))
         (testing "in on a property"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://loinc.org"
                      :filters [{:property "CLASS" :op "in" :value "CHEM,HEM/BC"}]})
                 codes (set (map :code (:concepts r)))]
             (is (contains? codes "2160-0"))
             (is (contains? codes "718-7"))))
         (testing "exists on a property"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://loinc.org"
                      :filters [{:property "STATUS" :op "exists" :value "true"}]})]
             (is (pos? (count (:concepts r))))))
         (testing "= on c.code direct column"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://loinc.org"
                      :filters [{:property "code" :op "=" :value "718-7"}]})]
             (is (= 1 (count (:concepts r))))
             (is (= "718-7" (:code (first (:concepts r)))))))
         (testing "max-hits caps results"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://loinc.org" :max-hits 2})]
             (is (= 2 (count (:concepts r))))))
         (testing "unknown system → empty"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://nope.example/cs" :text "hemoglobin"})]
             (is (= [] (:concepts r))))))
       (finally (delete-quietly path)))))
 
-(deftest cs-find-matches-active-only-and-text
+(deftest cs-expand*-active-only-and-text
   (let [path (new-temp-path)]
     (try
       (build-fixture-db path)
       (let [{:keys [codesystem]} (sqlite-provider/open-providers path)]
         (testing "text + filter combine (LOINC fixture has DEPRECATED row 1009-0)"
-          (let [r (protos/cs-find-matches codesystem
+          (let [r (protos/cs-expand* codesystem
                     {:system "http://loinc.org"
                      :text "antiglobulin"})
                 codes (set (map :code (:concepts r)))]

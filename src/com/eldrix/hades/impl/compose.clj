@@ -156,7 +156,7 @@
                               "' could not be found, so the value set cannot be fully expanded")})
         bad-filter-issue (when (seq filters) (broken-filter-issue system filters))
         match-result (when (and system (not concepts))
-                       (protos/cs-find-matches svc (build-query system version filters params)))
+                       (protos/cs-expand* svc (build-query system version filters params)))
         match-issues (:issues match-result)
         system-results (cond
                          concepts (expand-include-concepts svc system version concepts params)
@@ -263,7 +263,7 @@
         ;; `expand-include-concepts` returns explicit-concept lists
         ;; verbatim (it has no FTS to consult). Apply the filter text
         ;; here so concept-driven includes honour `$expand`'s `filter`
-        ;; param. Match-driven includes pre-filter via `cs-find-matches`,
+        ;; param. Match-driven includes pre-filter via `cs-expand*`,
         ;; so this post-filter is a no-op for them.
         filter-text (:text params)
         filtered (if filter-text

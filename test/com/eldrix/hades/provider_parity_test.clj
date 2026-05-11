@@ -15,7 +15,7 @@
     - cm-translate         (source → target lookup)
 
   Out of scope (genuinely different semantics, documented):
-    - cs-find-matches text search: in-memory is substring scan, SQLite
+    - cs-expand* text search: in-memory is substring scan, SQLite
       is FTS5 BM25 — set may match but order diverges. Tested
       independently per-provider; not parity-checked.
 

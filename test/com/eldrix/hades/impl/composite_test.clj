@@ -218,7 +218,7 @@
                              (cs-lookup [_ _] nil)
                              (cs-validate-code [_ _] nil)
                              (cs-subsumes [_ _] nil)
-                             (cs-find-matches [_ _] nil))]
+                             (cs-expand* [_ _] nil))]
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"Closeable"
           (hades/with-overlays base [closeable-provider])))))
 

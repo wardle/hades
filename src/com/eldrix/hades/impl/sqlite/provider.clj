@@ -12,7 +12,7 @@
   Operations:
     - `cs-lookup`, `cs-validate-code`        — direct point queries with
                                                 displayLanguage selection
-    - `cs-find-matches`                      — FTS + filter pushdown
+    - `cs-expand*`                           — FTS + filter pushdown
     - `cs-subsumes`                          — closure-table lookup
     - `vs-expand`, `vs-validate-code`        — delegated to compose engine
     - `cm-translate`                         — direct point query
@@ -262,7 +262,7 @@
   (or (:version params) (:system-version params)))
 
 ;; ---------------------------------------------------------------------------
-;; cs-find-matches helpers (FTS + filter pushdown)
+;; cs-expand* helpers (FTS + filter pushdown)
 ;; ---------------------------------------------------------------------------
 
 (defn- fts-query
@@ -399,7 +399,7 @@
      :unsupported-op op}))
 
 (defn- find-matches-sql
-  "Compose the SQL for `cs-find-matches`. Returns `{:sql :params :post-filters :issues}`.
+  "Compose the SQL for `cs-expand*`. Returns `{:sql :params :post-filters :issues}`.
 
   When a free-text query is supplied the FTS5 virtual table is JOINed
   in and results are ordered by `rank` (relevance) so that LIMIT cuts
@@ -408,7 +408,7 @@
   `LIMIT` is pushed into SQL only when there are no post-filters
   (regex). With post-filters present, SQL would drop survivors after
   the limit was applied, returning fewer rows than the caller asked
-  for; the caller slices in Clojure instead. See `cs-find-matches`."
+  for; the caller slices in Clojure instead. See `cs-expand*`."
   [url version filters text active-only? max-hits]
   (let [base-where    ["c.cs_url = ?" "c.cs_version = ?"]
         base-params   [url (v version)]
@@ -666,8 +666,8 @@
          "subsumed-by"
          :else "not-subsumed")}))
 
-  (cs-find-matches [_ {:keys [system version filters text active-only max-hits displayLanguage]
-                       :as query}]
+  (cs-expand* [_ {:keys [system version filters text active-only max-hits displayLanguage]
+                  :as query}]
     (let [meta (lookup-entry cache (or system (:url query)) (or version (params-version query)))]
       (if (nil? meta)
         {:concepts []}

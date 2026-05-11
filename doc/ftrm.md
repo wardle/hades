@@ -509,7 +509,7 @@ An implementation is a conforming FTRM v1 **reader** if:
    well-knowns, parents, children, properties and designations.
 5. `cs-validate-code` honours `displayLanguage` against
    `concept_designation.language`.
-6. `cs-find-matches` (or the implementation's equivalent) uses
+6. `cs-expand*` (or the implementation's equivalent) uses
    `concept_fts` / `designation_fts` for text and
    `cp_pushdown` / `concept_ancestor` for filter pushdown.
 7. `vs-expand` parses `valueset.compose`.

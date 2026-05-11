@@ -708,7 +708,7 @@
          ;; look up historical associations, and check for equivalence  - this catches SAME-AS and REPLACED-BY etc.
          (and (= systemA systemB) ((hermes/with-historical svc [codeA']) codeB')) "equivalent"
          :else "not-subsumed")}))
-  (cs-find-matches [_ q]
+  (cs-expand* [_ q]
     (let [{:keys [version filters max-hits text active-only displayLanguage]} q
           ver (or version (version-uri svc))
           {base-q :query issues :issues} (compose-filters->query svc filters)]

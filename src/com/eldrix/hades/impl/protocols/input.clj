@@ -27,7 +27,7 @@
 (s/def ::canonical string?)
 
 ;; `:properties` on input is the list of property *names* the caller
-;; wants `cs-lookup` / `cs-find-matches` to surface in the result.
+;; wants `cs-lookup` / `cs-expand*` to surface in the result.
 ;; Result-side `:properties` is a list of full property maps and lives
 ;; under `result/properties`; the namespace separation prevents
 ;; collision.
@@ -47,7 +47,7 @@
           :opt-un [::version ::date ::displayLanguage ::properties ::useSupplements]))
 
 ;; ---------------------------------------------------------------------------
-;; Query — the unified request passed to cs-find-matches. Carries every
+;; Query — the unified request passed to cs-expand*. Carries every
 ;; constraint a provider must honour: concept-level filters, request
 ;; text, display language, requested properties, pagination, active
 ;; scope. Providers MUST return concepts that satisfy the ENTIRE query.

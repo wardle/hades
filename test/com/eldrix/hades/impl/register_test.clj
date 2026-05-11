@@ -240,7 +240,7 @@
                                   :display "Diabetes mellitus"})
     (cs-validate-code [_ _]     {:result true :system snomed-uri :code (keyword "73211009")})
     (cs-subsumes     [_ _]      {:outcome "not-subsumed"})
-    (cs-find-matches [_ _]      {:concepts []})))
+    (cs-expand*      [_ _]      {:concepts []})))
 
 (deftest one-hermes-service-multi-module-binds-bare-url-test
   (testing "ONE Hermes service holding multiple SNOMED modules (Intl +
@@ -315,7 +315,7 @@
                       {:result false :code (keyword "A")
                        :system "http://example.com/cs-only"})
                     (cs-subsumes [_ _] {:outcome "not-subsumed"})
-                    (cs-find-matches [_ _] {:concepts []}))
+                    (cs-expand*  [_ _] {:concepts []}))
           svc (composite/from-providers [cs-only])]
       (is (some? (composite/find-codesystem svc "http://example.com/cs-only|1")))
       (is (nil? (composite/find-valueset svc "http://example.com/cs-only|1"))
@@ -450,7 +450,7 @@
     (cs-lookup       [_ _]      {:system url :code (keyword "X") :display display})
     (cs-validate-code [_ _]     {:result true :system url :code (keyword "X") :display display})
     (cs-subsumes     [_ _]      {:outcome "not-subsumed"})
-    (cs-find-matches [_ _]      {:concepts []})))
+    (cs-expand*      [_ _]      {:concepts []})))
 
 (defn- stub-vs-provider
   "Reified ValueSet provider with one (url, version) entry. Used for

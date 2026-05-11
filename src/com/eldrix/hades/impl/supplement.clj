@@ -88,10 +88,10 @@
   (cs-subsumes [_ params]
     (protos/cs-subsumes base params))
 
-  (cs-find-matches [_ query]
+  (cs-expand* [_ query]
     ;; Augmented search across supplement designations is a deferred
     ;; refinement; pass-through for now.
-    (protos/cs-find-matches base query))
+    (protos/cs-expand* base query))
 
   protos/ValueSet
   (vs-metadata [_ opts]

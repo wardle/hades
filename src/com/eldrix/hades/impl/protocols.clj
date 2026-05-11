@@ -164,13 +164,13 @@
     "Test the subsumption relationship between code/Coding A and
     code/Coding B given the semantics of subsumption in the underlying
     code system")
-  (cs-find-matches [this query]
-    "Return the concepts that satisfy the ENTIRE query
-    (`::input/query`). Providers must honour every supplied constraint
-    — filters, text, bounds, properties, activeOnly, displayLanguage —
-    either natively or by delegating to shared helpers. Returns a
-    `::result/match` map. Returning a lazy seq for `:concepts` is fine;
-    only `:total` needs to be computed eagerly when known."))
+  (cs-expand* [this query]
+    "Internal expansion/content callback, not a FHIR CodeSystem
+    operation. Return the concepts that satisfy the ENTIRE query
+    (`::input/query`). Providers must honour every supplied constraint:
+    filters, text, bounds, properties, activeOnly, displayLanguage.
+    Returns a `::result/match` map. Returning a lazy seq for `:concepts`
+    is fine; only `:total` needs to be computed eagerly when known."))
 
 (defprotocol ValueSet
   "A value set is selection of codes for use in a particular context."

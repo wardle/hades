@@ -237,7 +237,7 @@
 
    ;; --- $find-matches via SQLite LOINC ------------------------------------
    ;;
-   ;; `cs-find-matches` for SQLite catalogues fans out per surviving row to
+   ;; `cs-expand*` for SQLite catalogues fans out per surviving row to
    ;; fetch designations (when `displayLanguage` is set) and properties
    ;; (when a regex post-filter targets a property). LOINC 2.81 carries
    ;; ~66 multi-language designation rows per code, so `displayLanguage`

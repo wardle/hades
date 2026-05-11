@@ -59,8 +59,8 @@
     (protos/cs-lookup cs-impl {:system bench-system :code code})
     (protos/cs-validate-code cs-impl {:system bench-system :code code})))
 
-(defn- exercise-find-matches [cs-impl]
-  (protos/cs-find-matches cs-impl
+(defn- exercise-cs-expand [cs-impl]
+  (protos/cs-expand* cs-impl
     {:system bench-system :text "female" :max-hits 5}))
 
 ;; ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@
             cs       (composite/find-codesystem svc bench-system)
             _warm    (time-ms (exercise-cs cs))
             queries  (time-ms (dotimes [_ 100] (exercise-cs cs)))
-            fts      (time-ms (dotimes [_ 50] (exercise-find-matches cs)))]
+            fts      (time-ms (dotimes [_ 50] (exercise-cs-expand cs)))]
         (merge build
                {:open-ms (:ms open)
                 :register-ms (:ms register)
@@ -116,7 +116,7 @@
         cs (composite/find-codesystem svc bench-system)
         warm (time-ms (exercise-cs cs))
         queries (time-ms (dotimes [_ 100] (exercise-cs cs)))
-        fts (time-ms (dotimes [_ 50] (exercise-find-matches cs)))
+        fts (time-ms (dotimes [_ 50] (exercise-cs-expand cs)))
         jvm-mb (let [rt (Runtime/getRuntime)]
                  (do (System/gc) (Thread/sleep 100)
                      (double (/ (- (.totalMemory rt) (.freeMemory rt)) 1024 1024))))]
@@ -151,5 +151,5 @@
                        (or (:jvm-heap-used-mb m) 0.0)))
       (println (format "Hot lookups (100 cycles):  SQLite %d ms vs in-mem %d ms"
                        (:warm-100x-ms s) (:warm-100x-ms m)))
-      (println (format "FTS / text find-matches:   SQLite %d ms vs in-mem %d ms (50 calls)"
+      (println (format "FTS / text cs-expand*:     SQLite %d ms vs in-mem %d ms (50 calls)"
                        (:fts-50x-ms s) (:fts-50x-ms m))))))
