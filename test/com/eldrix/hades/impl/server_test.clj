@@ -102,6 +102,25 @@
             (let [p (get-param body "outcome")]
               (and p (not (get p "valueCode")))))))
 
+(defn- expansion-display-language [body]
+  (some (fn [p] (when (= "displayLanguage" (get p "name"))
+                  (get p "valueCode")))
+        (get-in body ["expansion" "parameter"])))
+
+(defn- expansion-display-language-equals? [expected]
+  (fn [body] (= expected (expansion-display-language body))))
+
+(defn- expansion-display-language-absent? [body]
+  (nil? (expansion-display-language body)))
+
+(def ^:private tiny-snomed-vs-param
+  {:name     "valueSet"
+   :resource {:resourceType "ValueSet"
+              :compose      {:include [{:system "http://snomed.info/sct"
+                                        :filter [{:property "concept"
+                                                  :op       "is-a"
+                                                  :value    "195967001"}]}]}}})
+
 (defn- check
   "Run one case from the table. Asserts status, optional content-type
   regex, and every body predicate (each `assertions` entry is
@@ -304,7 +323,46 @@
              :assertions [["body is OperationOutcome" operation-outcome?]
                           ["issue.code = invalid" (issue-code-equals? "invalid")]
                           ["text mentions same code system"
-                           (issue-text-matches? #"(?i)same code system|single code system")]]}}])
+                           (issue-text-matches? #"(?i)same code system|single code system")]]}}
+
+   ;; Display-language selection contract: per-call `displayLanguage`
+   ;; parameter wins, then `Accept-Language` header, then nothing —
+   ;; the server echoes only what the client supplied (matches the
+   ;; tx-ecosystem IG fixtures). The operator's `--locale` pin still
+   ;; flows into Hermes for the actual display lookup.
+   {:name "$expand: displayLanguage parameter wins over Accept-Language header"
+    :request {:method  :post
+              :path    "/ValueSet/$expand"
+              :headers {"Accept" "application/fhir+json" "Accept-Language" "fr-FR"}
+              :body    {:resourceType "Parameters"
+                        :parameter    [tiny-snomed-vs-param
+                                       {:name "count" :valueInteger 5}
+                                       {:name "displayLanguage" :valueCode "en-GB"}]}}
+    :expect {:status 200
+             :assertions [["expansion echoes displayLanguage=en-GB"
+                           (expansion-display-language-equals? "en-GB")]]}}
+
+   {:name "$expand: Accept-Language is consulted when no displayLanguage parameter"
+    :request {:method  :post
+              :path    "/ValueSet/$expand"
+              :headers {"Accept" "application/fhir+json" "Accept-Language" "en-GB"}
+              :body    {:resourceType "Parameters"
+                        :parameter    [tiny-snomed-vs-param
+                                       {:name "count" :valueInteger 5}]}}
+    :expect {:status 200
+             :assertions [["expansion echoes displayLanguage=en-GB"
+                           (expansion-display-language-equals? "en-GB")]]}}
+
+   {:name "$expand: no parameter and no header → no displayLanguage echo"
+    :request {:method  :post
+              :path    "/ValueSet/$expand"
+              :headers {"Accept" "application/fhir+json"}
+              :body    {:resourceType "Parameters"
+                        :parameter    [tiny-snomed-vs-param
+                                       {:name "count" :valueInteger 5}]}}
+    :expect {:status 200
+             :assertions [["expansion does not echo displayLanguage"
+                           expansion-display-language-absent?]]}}])
 
 (deftest ^:live operation-cases
   (doseq [c cases] (check c)))
