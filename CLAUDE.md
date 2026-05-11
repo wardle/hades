@@ -36,6 +36,7 @@ clj -M:nrepl                             # start nREPL server (test paths includ
 clj -X:conformance
 clj -X:conformance :snomed '"path/to/snomed.db"'        # override the pinned DB
 clj -X:conformance :url '"http://localhost:8080/fhir"'   # test an already-running server
+clj -X:conformance :update-baseline true                 # promote current result to regression baseline
 ```
 
 ### Conformance / integration test data
@@ -110,7 +111,8 @@ current functions and their docstrings — that is the source of truth.
 server (once per session — uses the pinned DB), run tests (optionally
 filtered to one suite while iterating), inspect failures, edit code,
 restart to reload Hades namespaces, re-run, diff against the previous
-result, and save the baseline only when intentional.
+result, and save the baseline only when intentionally promoting that result
+as the new regression gate.
 
 **Shell escaping notes for `clj-nrepl-eval`:**
 - Wrap the entire Clojure form in double quotes: `"(ct/start! ...)"`
@@ -455,31 +457,23 @@ Run after every task. All items must pass.
 
 ### Before releasing (release checklist)
 
-1. **Refresh conformance figure in all three places** whenever the pass/total
-   changes. The figure must match everywhere or the badge lies:
-   - `README.md` — the shields.io badge URL (`conformance-PASSED%2FTOTAL%20(XX.X%25)-…`)
-   - `README.md` — the prose sentence ("Hades passes **N / T (XX.X%)** …")
-   - `CHANGELOG.md` — the release headline
-   Get the current numbers from `(ct/run-tests)` in the REPL, or the
-   `:totals` map of `test/resources/conformance-results.json`.
+1. **Follow the conformance release workflow in [`doc/conformance.md`](doc/conformance.md).**
+   That document is authoritative for where conformance results live, when to
+   promote `test/resources/conformance-baseline.json`, and which README /
+   CHANGELOG figures must match.
 2. **Run the full conformance suite** and confirm no regression against the
    previous release's pass count.
 3. **Update `CHANGELOG.md`** with the release's headline changes.
-4. **Verify the three conformance figures match.** Grep all three locations
-   (badge URL in `README.md`, prose sentence in `README.md`, headline in
-   `CHANGELOG.md`) and confirm pass/total/percent are identical. A drift
-   between e.g. `490/600` and `490/603` means the badge is lying — a
-   one-character typo in any one place breaks the contract.
-5. **Audit `CHANGELOG.md` for stale CLI surface.** For every CLI flag
+4. **Audit `CHANGELOG.md` for stale CLI surface.** For every CLI flag
    removed in this release, confirm the CHANGELOG (and `README.md`) does
    not still document it under examples or migration notes. Common
    regressions: `--resources <dir>`, `--db`, `--snomed`, `-r`, `-s`.
-6. **`git status` must be clean of untracked source/test files.** Run
+5. **`git status` must be clean of untracked source/test files.** Run
    `git status --short` and confirm no `??` lines under `src/` or `test/`
    — a new namespace that compiles locally but isn't tracked will pass
    `clj -M:test` here and fail in CI (or, worse, ship a release whose jar
    doesn't include the file).
-7. **Test fixture install hints stay current.** When CLI surface changes,
+6. **Test fixture install hints stay current.** When CLI surface changes,
    re-read every fixture-existence check in the test fixtures namespace and
    confirm the printed install hint actually works against the current
    parser.

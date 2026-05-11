@@ -18,6 +18,19 @@ timestamped JSON file and `latest.json` (the most recent run, always
 overwritten). The baseline used to detect regressions is
 `test/resources/conformance-baseline.json`.
 
+A normal run does not update the regression baseline. When a new
+conformance result is intentional and should become the release gate,
+promote it explicitly:
+
+```shell
+clj -X:conformance :update-baseline true
+```
+
+For a release, the advertised pass count in the README badge, README
+prose, and CHANGELOG must match both `latest.json` and
+`conformance-baseline.json`. Do not publish a higher pass count while
+leaving the baseline behind; that weakens future regression checks.
+
 ## REPL-driven workflow
 
 `clj -X:conformance` is fine for one-shot runs but slow when iterating.
@@ -46,4 +59,4 @@ banner is the trigger to consider bumping.
 Bumping the pin is a deliberate act: update the rev, re-run
 conformance (the harness checks the new rev out), fix any new failures
 the updated fixtures surface, then update the conformance baseline
-under `test/resources/`.
+under `test/resources/` and refresh the advertised pass count.
