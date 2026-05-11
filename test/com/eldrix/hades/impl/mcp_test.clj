@@ -9,11 +9,11 @@
     (testing "tools is a non-empty vector"
       (is (vector? tools))
       (is (seq tools)))
-    (testing "tools includes the full Phase 2 surface"
-      (is (= #{"lookup" "validate_code" "subsumes" "expand" "translate"
-               "validate_codeable_concept" "find_matches"
-               "search_code_systems" "search_value_sets" "service_info"}
-             (set (map :name tools)))))
+      (testing "tools includes the full Phase 2 surface"
+        (is (= #{"lookup" "validate_code" "subsumes" "expand" "translate"
+                 "validate_codeable_concept"
+                 "search_code_systems" "search_value_sets" "service_info"}
+               (set (map :name tools)))))
     (testing "no :fn handlers leak onto the wire"
       (is (every? #(not (contains? % :fn)) tools)))
     (testing "each tool has a description and inputSchema"

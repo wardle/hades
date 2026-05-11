@@ -118,16 +118,6 @@
                       value_set_version (assoc :valueSetVersion value_set_version))]
     (hades/validate-codeable-concept svc codings* base-params)))
 
-(defn- tool-find-matches
-  [svc {:keys [system query version display_language properties max_hits active_only]}]
-  (hades/find-matches svc (cond-> {:system system}
-                            version             (assoc :version version)
-                            query               (assoc :text query)
-                            display_language    (assoc :displayLanguage display_language)
-                            (seq properties)    (assoc :properties properties)
-                            max_hits            (assoc :max-hits max_hits)
-                            (some? active_only) (assoc :active-only active_only))))
-
 (defn- search-params
   [{:keys [url version status name title description
            name_mode title_mode description_mode
@@ -274,22 +264,6 @@
                   :required   ["url" "codings"]}
     :fn          tool-validate-codeable-concept}
 
-   {:name        "find_matches"
-    :description (str "CodeSystem $find-matches. Search a CodeSystem by free-text query "
-                      "and/or filters; ideal for autocomplete and concept discovery. "
-                      "Returns matching concepts with displays.")
-    :inputSchema {:type       "object"
-                  :properties {:system           system-url-schema
-                               :query            {:type "string"  :description "Free-text query to match against displays/designations."}
-                               :version          version-schema
-                               :display_language display-language-schema
-                               :properties       {:type "array" :items {:type "string"}
-                                                  :description "Optional property codes to surface on each match."}
-                               :max_hits         {:type "integer" :description "Maximum results to return."}
-                               :active_only      {:type "boolean" :description "Restrict to active concepts."}}
-                  :required   ["system"]}
-    :fn          tool-find-matches}
-
    {:name        "search_code_systems"
     :description (str "FHIR REST search across registered CodeSystems. Filter by URL, "
                       "version, status, name, title, or description (with mode = "
@@ -348,7 +322,7 @@
 (def ^:private operations-guide
   "# FHIR terminology operations — Hades
 
-The Hades MCP exposes ten operation tools. Use this to pick the right one
+The Hades MCP exposes nine operation tools. Use this to pick the right one
 and to understand what each returns.
 
 ## Tool selection
@@ -361,7 +335,6 @@ and to understand what each returns.
 | List concepts in a ValueSet, optionally text-filtered | `expand` |
 | Map a code to one in another CodeSystem | `translate` |
 | Test whether one code is an ancestor of another | `subsumes` |
-| Search a CodeSystem by free text (autocomplete) | `find_matches` |
 | Find a CodeSystem or ValueSet by name/title/description | `search_code_systems` / `search_value_sets` |
 | Discover what terminology is installed | `service_info` |
 
@@ -400,18 +373,11 @@ Translate a code from a source CodeSystem to one or more target codes.
 
 Tests whether one code is an ancestor of another within a single CodeSystem.
 
-## $find-matches
-
-Search-as-you-type within a CodeSystem. Backed by Lucene for SNOMED, by
-SQLite FTS for FHIR-tx providers. Use this rather than `expand` when
-you're looking for \"concepts mentioning X\" rather than \"concepts in
-this ValueSet\".
-
 ## Workflows
 
-- **Code a clinical term**: `find_matches` for candidates → `lookup` to
+- **Code a clinical term**: `expand` with `filter` for candidates → `lookup` to
   inspect the best one → `validate_code` against the target ValueSet.
-- **Build a draft ValueSet**: `find_matches` to seed → `expand` against
+- **Build a draft ValueSet**: `expand` with `filter` to seed → `expand` against
   draft compose → iterate.
 - **Cross-terminology mapping**: `service_info` to find ConceptMaps with
   the right target → `translate` per code.
@@ -590,10 +556,10 @@ them, dedupes by (system, code), and applies any `compose.exclude` last.
     {:description (str "Code the clinical term '" term "'.")
      :messages    [(user-message
                     (str "I need a code for the clinical term: " term ".\n\n"
-                         "Please:\n"
-                         (if system
-                           (str "1. Use `find_matches` against `" system "` for candidate concepts matching the term.\n")
-                           "1. Use `search_code_systems` to identify the most appropriate CodeSystem for the term, then `find_matches` against it.\n")
+                           "Please:\n"
+                           (if system
+                             (str "1. Use `expand` with `url=\"" system "\"`, `filter=\"" term "\"`, and a small `count` to find candidate concepts.\n")
+                             "1. Use `search_code_systems` to identify the most appropriate CodeSystem, then use `expand` with that URL, the clinical term as `filter`, and a small `count`.\n")
                          "2. For the most plausible candidate(s), use `lookup` to inspect parents and properties to confirm semantic fit.\n"
                          (when target (str "3. Use `validate_code` against `" target "` to confirm the code is bindable in that ValueSet.\n"))
                          "Report the chosen `(system, code, display)` plus your confidence and any ambiguity."))]}))
@@ -604,10 +570,10 @@ them, dedupes by (system, code), and applies any `compose.exclude` last.
     {:description (str "Draft a ValueSet for '" domain "'.")
      :messages    [(user-message
                     (str "I want to construct a ValueSet for the clinical domain: " domain ".\n\n"
-                         "Please:\n"
-                         (if system
-                           (str "1. Use `find_matches` against `" system "` to seed candidate concepts.\n")
-                           "1. Use `search_code_systems` to identify the appropriate CodeSystem(s). Use `find_matches` to seed candidates.\n")
+                           "Please:\n"
+                           (if system
+                             (str "1. Use `expand` with `url=\"" system "\"`, a relevant `filter`, and a small `count` to seed candidate concepts.\n")
+                             "1. Use `search_code_systems` to identify the appropriate CodeSystem(s). Use `expand` with `filter` and a small `count` to seed candidates.\n")
                          "2. For SNOMED candidates, look at parents (via `lookup`) and propose an `is-a` filter or ECL expression that captures the domain cleanly.\n"
                          "3. Use `expand` with a draft compose block to preview the result. Report the count and a sample.\n"
                          "4. Iterate until the expansion matches intent.\n"
@@ -635,7 +601,7 @@ them, dedupes by (system, code), and applies any `compose.exclude` last.
                          "Please:\n"
                          "1. Use `lookup` with `properties=['parent','child','definition']` for full context.\n"
                          "2. Use `validate_code` (no `url`) to confirm the concept is currently active and not retired.\n"
-                         "3. Use `find_matches` with a query derived from the display to surface sibling concepts in the same area.\n"
+                           "3. Use `expand` with `url=\"" system "\"` and a filter derived from the display to surface related concepts in the same area.\n"
                          "4. Summarise what this concept represents, where it sits in the hierarchy, and any notable peers."))]}))
 
 (def ^:private prompts*

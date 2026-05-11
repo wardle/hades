@@ -9,6 +9,7 @@
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
             [com.eldrix.hades.impl.compose :as compose]
+            [com.eldrix.hades.impl.protocols :as protos]
             [criterium.core :as crit]))
 
 (set! *warn-on-reflection* true)
@@ -235,7 +236,7 @@
                                    {"property" "116676008" "op" "=" "value" "72704001"}]}]}
             {:filter "fracture" :count 50}))}
 
-   ;; --- $find-matches via SQLite LOINC ------------------------------------
+   ;; --- Concept discovery via SQLite LOINC -----------------------------------
    ;;
    ;; `cs-expand*` for SQLite catalogues fans out per surviving row to
    ;; fetch designations (when `displayLanguage` is set) and properties
@@ -243,22 +244,22 @@
    ;; ~66 multi-language designation rows per code, so `displayLanguage`
    ;; makes per-row designation reads dominate the cost profile (the 52%
    ;; slice flagged in todo.txt). These benches isolate that hot path.
-   {:id :find-matches/loinc-text-no-lang
-    :fn (fn [svc]
-          (hades/find-matches svc
-            {:system loinc-uri :text "glucose" :max-hits 50}))}
-   {:id :find-matches/loinc-text-with-lang
-    :fn (fn [svc]
-          (hades/find-matches svc
-            {:system loinc-uri :text "glucose" :max-hits 50 :displayLanguage "en"}))}
-   {:id :find-matches/loinc-text-large-with-lang
-    :fn (fn [svc]
-          (hades/find-matches svc
-            {:system loinc-uri :text "glucose" :max-hits 200 :displayLanguage "en"}))}
-   {:id :find-matches/loinc-text-small-no-lang
-    :fn (fn [svc]
-          (hades/find-matches svc
-            {:system loinc-uri :text "glucose" :max-hits 10}))}
+     {:id :search-concepts/loinc-text-no-lang
+      :fn (fn [svc]
+            (protos/cs-expand* svc
+              {:system loinc-uri :text "glucose" :max-hits 50}))}
+     {:id :search-concepts/loinc-text-with-lang
+      :fn (fn [svc]
+            (protos/cs-expand* svc
+              {:system loinc-uri :text "glucose" :max-hits 50 :displayLanguage "en"}))}
+     {:id :search-concepts/loinc-text-large-with-lang
+      :fn (fn [svc]
+            (protos/cs-expand* svc
+              {:system loinc-uri :text "glucose" :max-hits 200 :displayLanguage "en"}))}
+     {:id :search-concepts/loinc-text-small-no-lang
+      :fn (fn [svc]
+            (protos/cs-expand* svc
+              {:system loinc-uri :text "glucose" :max-hits 10}))}
 
    ;; --- FHIR REST search (FS01) -----------------------------------------
    ;;

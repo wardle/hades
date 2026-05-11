@@ -127,7 +127,6 @@ maps.
 
 | Tool | What it does |
 |---|---|
-| `find_matches` | CodeSystem $find-matches — search-as-you-type against a CodeSystem (Lucene for SNOMED, FTS for FHIR-tx) |
 | `search_code_systems` | FHIR REST search across registered CodeSystems |
 | `search_value_sets` | FHIR REST search across registered ValueSets |
 | `service_info` | List every CodeSystem, ValueSet, and ConceptMap installed on the server, with totals |
@@ -152,10 +151,10 @@ instruction the LLM follows using the available tools:
 
 | Prompt | Arguments | Workflow |
 |---|---|---|
-| `code_a_term` | `clinical_term`, `system?`, `target_value_set?` | Search → find_matches → lookup → validate_code against the target VS |
-| `build_value_set` | `clinical_domain`, `system?` | Search → find_matches to seed → expand against draft compose → iterate → emit `ValueSet.compose` JSON |
+| `code_a_term` | `clinical_term`, `system?`, `target_value_set?` | Search → expand with filter → lookup → validate_code against the target VS |
+| `build_value_set` | `clinical_domain`, `system?` | Search → expand with filter to seed → expand against draft compose → iterate → emit `ValueSet.compose` JSON |
 | `translate_codes` | `source_codes`, `target_system` | service_info to find ConceptMaps → translate per code → report equivalences |
-| `explore_concept` | `system`, `code` | lookup with properties → validate_code → find_matches for siblings → summarise |
+| `explore_concept` | `system`, `code` | lookup with properties → validate_code → expand with filter for related concepts → summarise |
 
 ## Example session
 
@@ -168,8 +167,8 @@ into one Hades process:
 
 The assistant calls:
 
-1. `find_matches` against `http://snomed.info/sct` with `query="type 1
-   diabetes"` — gets 154 candidates including `46635009` (Type 1 diabetes
+1. `expand` against `http://snomed.info/sct` with `filter="type 1
+   diabetes"` — gets candidates including `46635009` (Type 1 diabetes
    mellitus).
 2. `lookup` for `46635009` — confirms display "Type 1 diabetes mellitus"
    and the SNOMED parent hierarchy (Diabetes mellitus → Disorder of

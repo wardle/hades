@@ -15,7 +15,6 @@
     - `validate-code`                CodeSystem $validate-code (no :url)
                                        or ValueSet $validate-code (:url present)
     - `subsumes`                     CodeSystem $subsumes
-    - `find-matches`                 CodeSystem $find-matches
     - `expand`                       ValueSet $expand
     - `validate-codeable-concept`    ValueSet $validate-code with a CC
     - `translate`                    ConceptMap $translate
@@ -52,7 +51,6 @@
 (s/def ::validate-result    ::result/validate)
 (s/def ::expansion-result   ::result/expansion)
 (s/def ::translate-result   ::result/translate)
-(s/def ::match-result       ::result/match)
 (s/def ::search-result      ::result/search-result)
 (s/def ::issue              ::result/issue)
 (s/def ::expansion-concept  ::result/expansion-concept)
@@ -152,16 +150,6 @@
   Returns a `::translate-result`-shaped map or nil."
   [svc params]
   (protos/cs-subsumes svc params))
-
-(s/fdef find-matches
-  :args (s/cat :svc some? :query map?)
-  :ret  (s/nilable ::match-result))
-
-(defn find-matches
-  "CodeSystem $find-matches. `query` is an `::input/query` describing
-  the filters/text/properties the provider must satisfy."
-  [svc query]
-  (protos/cs-expand* svc query))
 
 (s/fdef expand
   :args (s/cat :svc some? :params map?)
