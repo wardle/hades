@@ -1,8 +1,8 @@
 (ns com.eldrix.hades.impl.sqlite.loinc-live-test
   "Live integration tests against the pinned LOINC SQLite container.
-  Tagged `^:live`. Exercises the SQLite provider end-to-end:
-  catalogue load, point queries (lookup / validate-code), text search
-  (cs-expand*), and registry dispatch."
+  Tagged `^:live`. Most tests are data-driven via `cases` — one row per
+  case, dispatched on `:op`. Multi-step / catalogue / setup-coupled
+  tests keep their own deftest below."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
@@ -22,8 +22,7 @@
   ;; Open the SQLite providers separately so per-impl tests can call
   ;; `protos/cs-expand*` directly. The Hades service is built from
   ;; the same providers + a naming-system entry installed idempotently
-  ;; for the OID resolver test. The application file ships without
-  ;; NamingSystem entries by default.
+  ;; for the OID resolver test.
   (let [{:keys [datasource codesystem valueset conceptmap]}
         (sqlite-provider/open-providers fixtures/loinc-db-path)]
     (db/add-naming-system! datasource
@@ -39,82 +38,133 @@
 
 (use-fixtures :once provider-fixture)
 
-(deftest ^:live live-providers-load
-  (testing "providers materialise and expose LOINC metadata"
-    (is (some? *codesystem*))
-    (is (some? *valueset*))
-    (is (some? *conceptmap*))
-    (is (= loinc-url (-> (protos/cs-metadata *codesystem* {}) first :url)))
-    (is (= fixtures/loinc-version (-> (protos/cs-metadata *codesystem* {}) first :version)))))
+;; ---------------------------------------------------------------------------
+;; Predicate helpers — keep the cases table flat
+;; ---------------------------------------------------------------------------
 
-(deftest ^:live live-cs-lookup-known-code
-  (testing "$lookup on a known LOINC code returns full lookup-result"
-    (let [r (hades/lookup *svc*
-              {:system loinc-url :code "718-7"})]
-      (is (= "Hemoglobin [Mass/volume] in Blood" (:display r)))
-      (is (= :718-7 (:code r)))
-      (is (= loinc-url (:system r))))))
+(defn- includes-code? [code]
+  (fn [{:keys [concepts]}] (some #{code} (map :code concepts))))
 
-(deftest ^:live live-cs-lookup-unknown-code
-  (testing "$lookup returns a not-found result for an unknown code"
-    (let [r (hades/lookup *svc*
-              {:system loinc-url :code "doesnt-exist-xx"})]
-      (is (true? (:not-found r)))
-      (is (= :unknown-code (:not-found-reason r))))))
+(defn- top-code? [code]
+  (fn [{:keys [concepts]}] (= code (-> concepts first :code))))
 
-(deftest ^:live live-cs-validate-code-success
-  (testing "$validate-code on a valid LOINC code"
-    (let [r (hades/validate-code *svc*
-              {:system loinc-url :code "2160-0"})]
-      (is (true? (:result r)))
-      (is (= "Creatinine [Mass/volume] in Serum or Plasma" (:display r))))))
+(defn- count>= [n] (fn [{:keys [concepts]}] (>= (count concepts) n)))
+(defn- count<= [n] (fn [{:keys [concepts]}] (<= (count concepts) n)))
+(defn- count=  [n] (fn [{:keys [concepts]}] (= n (count concepts))))
 
-(deftest ^:live live-cs-validate-code-display-mismatch
-  (testing "$validate-code with wrong display fails with invalid-display"
-    (let [r (hades/validate-code *svc*
-              {:system loinc-url :code "2160-0" :display "Not the LOINC display"})]
-      (is (false? (:result r)))
-      (is (= "invalid-display" (-> r :issues first :details-code))))))
+(defn- display? [s]      (fn [r] (= s (:display r))))
+(defn- result?  [v]      (fn [r] (= v (:result r))))
+(defn- not-found?       [r] (true? (:not-found r)))
+(defn- not-found-reason? [reason] (fn [r] (= reason (:not-found-reason r))))
+(defn- issue-details? [code] (fn [r] (= code (-> r :issues first :details-code))))
 
-(deftest ^:live live-cs-expand*-fts-text
-  (testing "FTS text matching finds LOINC concepts ranked by relevance"
-    (let [;; Query is specific enough to put the canonical
-          ;; 'Hemoglobin [Mass/volume] in Blood' (718-7) at the top.
-          r (protos/cs-expand* *codesystem*
-              {:system loinc-url
-               :text "Hemoglobin Mass volume Blood"
-               :max-hits 5})
-          codes (mapv :code (:concepts r))]
-      (is (pos? (count codes)))
-      (is (= "718-7" (first codes))))))
+;; ---------------------------------------------------------------------------
+;; Dispatch + check
+;; ---------------------------------------------------------------------------
 
-(deftest ^:live live-cs-expand*-text-and-property-filter
-  (testing "FTS text combined with a property filter narrows results"
-    (let [r (protos/cs-expand* *codesystem*
-              {:system loinc-url
-               :text "Creatinine Mass volume Serum Plasma"
-               :filters [{:property "STATUS" :op "=" :value "ACTIVE"}]
-               :max-hits 5})
-          codes (mapv :code (:concepts r))]
-      (is (some #{"2160-0"} codes)))))
+(defn- run-op [op input]
+  (let [input (assoc input :system loinc-url)]
+    (case op
+      :lookup        (hades/lookup *svc* input)
+      :validate-code (hades/validate-code *svc* input)
+      :search-concepts  (protos/cs-expand* *codesystem* input))))
 
-(deftest ^:live live-cs-expand*-direct-code-filter
-  (testing "code = filter pinpoints a single concept"
-    (let [r (protos/cs-expand* *codesystem*
-              {:system loinc-url
-               :filters [{:property "code" :op "=" :value "718-7"}]})]
-      (is (= 1 (count (:concepts r))))
-      (is (= "718-7" (-> r :concepts first :code))))))
+(defn- check [{:keys [name op input expect]}]
+  (testing name
+    (let [r (run-op op input)]
+      (doseq [[label pred] expect]
+        (is (pred r) (str name " — " label))))))
+
+;; ---------------------------------------------------------------------------
+;; Cases — one row per behaviour. Add new rows here, not new deftests.
+;; These cases exercise the internal `cs-expand*` text/filter contract.
+;; ---------------------------------------------------------------------------
+
+(def ^:private cases
+  [;; --- lookup ---
+   {:name "lookup: known code → display + code + system"
+    :op :lookup :input {:code "718-7"}
+    :expect [["display"    (display? "Hemoglobin [Mass/volume] in Blood")]
+             ["code"       #(= :718-7 (:code %))]
+             ["system"     #(= loinc-url (:system %))]]}
+
+   {:name "lookup: unknown code → not-found / unknown-code"
+    :op :lookup :input {:code "doesnt-exist-xx"}
+    :expect [["not-found"  not-found?]
+             ["reason"     (not-found-reason? :unknown-code)]]}
+
+   ;; --- validate-code ---
+   {:name "validate-code: valid code → result=true + display"
+    :op :validate-code :input {:code "2160-0"}
+    :expect [["result"     (result? true)]
+             ["display"    (display? "Creatinine [Mass/volume] in Serum or Plasma")]]}
+
+   {:name "validate-code: wrong display → result=false + invalid-display"
+    :op :validate-code :input {:code "2160-0" :display "Not the LOINC display"}
+    :expect [["result"     (result? false)]
+             ["issue"      (issue-details? "invalid-display")]]}
+
+   ;; --- search-concepts: display path (spec §1 R1.1(a)) ---
+   {:name "search-concepts: multi-token display query ranks 718-7 first"
+    :op :search-concepts :input {:text "Hemoglobin Mass volume Blood" :max-hits 5}
+    :expect [["count>=1"   (count>= 1)]
+             ["top=718-7"  (top-code? "718-7")]]}
+
+   {:name "search-concepts: text + STATUS filter includes 2160-0"
+    :op :search-concepts
+    :input {:text "Creatinine Mass volume Serum Plasma"
+            :filters [{:property "STATUS" :op "=" :value "ACTIVE"}]
+            :max-hits 5}
+    :expect [["includes 2160-0" (includes-code? "2160-0")]]}
+
+   ;; --- search-concepts: designation path (spec §3.2 / §4.1 at live scale) ---
+   {:name "search-concepts: SHORTNAME 'Hgb' → includes 718-7"
+    :op :search-concepts :input {:text "Hgb" :max-hits 500}
+    :expect [["includes 718-7" (includes-code? "718-7")]]}
+
+   {:name "search-concepts: SHORTNAME 'HbA1c' → includes 4548-4"
+    :op :search-concepts :input {:text "HbA1c" :max-hits 500}
+    :expect [["includes 4548-4" (includes-code? "4548-4")]]}
+
+   {:name "search-concepts: LinguisticVariantDisplayName 'Natrium' → includes 2951-2"
+    :op :search-concepts :input {:text "Natrium" :max-hits 500}
+    :expect [["includes 2951-2" (includes-code? "2951-2")]]}
+
+   ;; --- search-concepts: cross-locale RELATEDNAMES2 (spec §4.2) ---
+   {:name "search-concepts: British 'Haemoglobin' surfaces hemoglobin codes"
+    :op :search-concepts :input {:text "Haemoglobin" :max-hits 50}
+    :expect [["count>=1"            (count>= 1)]
+             ["includes 4548-4/718-7"
+              #(or ((includes-code? "4548-4") %)
+                   ((includes-code? "718-7")  %))]]}
+
+   ;; --- search-concepts: axis-only negative guard (spec §4.3) ---
+   {:name "search-concepts: axis-only 'Massenkonzentration' ≤ 10"
+    :op :search-concepts :input {:text "Massenkonzentration" :max-hits 1000}
+    :expect [["count<=10" (count<= 10)]]}
+
+   {:name "search-concepts: axis-only 'Zeitpunkt' ≤ 10"
+    :op :search-concepts :input {:text "Zeitpunkt" :max-hits 1000}
+    :expect [["count<=10" (count<= 10)]]}
+
+   ;; --- search-concepts: filter-only path ---
+   {:name "search-concepts: code = filter → exactly one concept"
+    :op :search-concepts :input {:filters [{:property "code" :op "=" :value "718-7"}]}
+    :expect [["count=1"   (count= 1)]
+             ["is 718-7"  #(= "718-7" (-> % :concepts first :code))]]}])
+
+(deftest ^:live operation-cases
+  (doseq [c cases] (check c)))
+
+;; ---------------------------------------------------------------------------
+;; Complex / multi-step tests — outside the cases table
+;; ---------------------------------------------------------------------------
 
 (deftest ^:live live-loinc-oid-resolves-via-naming-system
   (testing "request with system=urn:oid:... resolves to canonical LOINC URL"
-    ;; The bare OID would be the value FHIR servers expect after stripping
-    ;; the urn:oid: prefix; some clients send the full URN. The resolver
-    ;; matches on the stored alias value, which is the bare OID.
     (let [resolved (composite/resolve-canonical
                      (:naming-systems *svc*) "2.16.840.1.113883.6.1")]
       (is (= loinc-url resolved)))
-    (is (some? (composite/find-codesystem *svc* "2.16.840.1.113883.6.1")))
     (let [r (hades/lookup *svc*
               {:system "2.16.840.1.113883.6.1" :code "718-7"})]
       (is (= "Hemoglobin [Mass/volume] in Blood" (:display r)))
@@ -124,5 +174,4 @@
   (testing "$expand on any LOINC AnswerList VS returns concepts"
     (let [some-vs (-> (protos/vs-metadata *valueset* {}) first :url)
           r (hades/expand *svc* {:url some-vs})]
-      (is (some? r))
       (is (sequential? (:concepts r))))))

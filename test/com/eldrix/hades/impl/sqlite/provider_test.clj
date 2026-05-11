@@ -103,6 +103,35 @@
             (is (>= (count (:concepts r)) 8)))))
       (finally (delete-quietly path)))))
 
+(deftest cs-expand*-searches-designations
+  ;; Search-concepts contract: text matching includes display/designations.
+  ;; designations whose use.code is on the searchable allowlist (LOINC
+  ;; SHORTNAME, RELATEDNAMES2, LinguisticVariantDisplayName, COMPONENT,
+  ;; LONG_COMMON_NAME), not just the primary display.
+  (let [path (new-temp-path)]
+    (try
+      (build-fixture-db path)
+      (let [{:keys [codesystem]} (sqlite-provider/open-providers path)]
+        (testing "matches a SHORTNAME token absent from primary display (Hgb → 718-7)"
+          (let [r (protos/cs-expand* codesystem
+                    {:system "http://loinc.org" :text "Hgb"})
+                codes (set (map :code (:concepts r)))]
+            (is (contains? codes "718-7")
+                "718-7 has SHORTNAME 'Hgb Bld'; query 'Hgb' is absent from LONG_COMMON_NAME")))
+        (testing "matches a SHORTNAME token absent from primary display (HbA1c → 4548-4)"
+          (let [r (protos/cs-expand* codesystem
+                    {:system "http://loinc.org" :text "HbA1c"})
+                codes (set (map :code (:concepts r)))]
+            (is (contains? codes "4548-4")
+                "4548-4 has SHORTNAME 'HbA1c MFr Bld HPLC'; query 'HbA1c' is absent from LONG_COMMON_NAME")))
+        (testing "matches a LinguisticVariantDisplayName (Natrium → 2951-2)"
+          (let [r (protos/cs-expand* codesystem
+                    {:system "http://loinc.org" :text "Natrium"})
+                codes (set (map :code (:concepts r)))]
+            (is (contains? codes "2951-2")
+                "2951-2 (Sodium) has de-AT LinguisticVariantDisplayName='Natrium'; absent from English display"))))
+      (finally (delete-quietly path)))))
+
 (deftest cs-expand*-filters
   (let [path (new-temp-path)]
     (try

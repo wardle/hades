@@ -12,7 +12,7 @@
   Operations:
     - `cs-lookup`, `cs-validate-code`        — direct point queries with
                                                 displayLanguage selection
-    - `cs-expand*`                           — FTS + filter pushdown
+    - `cs-expand*`                      — FTS + filter pushdown
     - `cs-subsumes`                          — closure-table lookup
     - `vs-expand`, `vs-validate-code`        — delegated to compose engine
     - `cm-translate`                         — direct point query
@@ -280,6 +280,44 @@
       (when (seq tokens)
         (str/join " " (map (fn [t] (str \" t \")) tokens))))))
 
+(def ^:private searchable-designation-clause
+  "WHERE-clause excerpt restricting a `concept_designation` row to one
+  whose `(use_system, use_code)` pair is on the searchable-name
+  allowlist defined here. A null/empty
+  `use_code` is treated as a name (the writer did not classify it).
+  LOINC ontology axes (PROPERTY, TIME_ASPCT, SYSTEM, SCALE_TYP,
+  METHOD_TYP, CLASS) are deliberately excluded — bare axis values are
+  not concept names and would explode result sets without adding
+  signal."
+  (str "((cd.use_code IS NULL OR cd.use_code = '')"
+       " OR (cd.use_system = 'http://loinc.org'"
+       "     AND cd.use_code IN ('LONG_COMMON_NAME','SHORTNAME','RELATEDNAMES2',"
+       "                         'LinguisticVariantDisplayName','COMPONENT'))"
+       " OR (cd.use_system = 'http://terminology.hl7.org/CodeSystem/designation-usage'"
+       "     AND cd.use_code IN ('display','synonym')))"))
+
+(def ^:private fts-hits-subquery
+  "Subquery yielding `(rowid, rank)` for every `concept.rowid` hit by
+  EITHER a `concept_fts` (display / definition) match OR an allowlisted
+  `designation_fts` match. UNION ALL + `MIN(rank)` per rowid dedupes
+  concepts that match both streams while retaining the best rank.
+  Two `?` placeholders, both bound to the same FTS query string. The
+  caller filters the resulting concept rows by `cs_url`/`cs_version`
+  in the outer WHERE — the FTS streams span every CodeSystem in the
+  container, mirroring the prior single-stream behaviour."
+  (str "(SELECT rowid, MIN(rank) AS rank FROM ("
+       "  SELECT f.rowid AS rowid, f.rank AS rank "
+       "  FROM concept_fts f WHERE f.concept_fts MATCH ? "
+       "  UNION ALL "
+       "  SELECT cd_c.rowid AS rowid, df.rank AS rank "
+       "  FROM designation_fts df "
+       "  JOIN concept_designation cd ON cd.rowid = df.rowid "
+       "  JOIN concept cd_c ON cd_c.cs_url = cd.cs_url "
+       "                   AND cd_c.cs_version = cd.cs_version "
+       "                   AND cd_c.code = cd.code "
+       "  WHERE df.designation_fts MATCH ? AND " searchable-designation-clause
+       ") GROUP BY rowid)"))
+
 (defn- direct-column [property]
   ;; Filters keyed on `code` / `display` map to columns on `concept`
   ;; rather than `concept_property`.
@@ -398,12 +436,16 @@
      :post-filter (constantly false)
      :unsupported-op op}))
 
-(defn- find-matches-sql
+(defn- search-concepts-sql
   "Compose the SQL for `cs-expand*`. Returns `{:sql :params :post-filters :issues}`.
 
-  When a free-text query is supplied the FTS5 virtual table is JOINed
-  in and results are ordered by `rank` (relevance) so that LIMIT cuts
-  off least-relevant matches first.
+  When a free-text query is supplied, `fts-hits-subquery` is JOINed in
+  to surface concepts hit by either the primary-display FTS index
+  (`concept_fts`) or an allowlisted designation FTS index
+  (`designation_fts`). Results are ordered by `rank` (best of the two
+  streams per concept) so that LIMIT cuts off least-relevant matches
+  first. Searchable designations are restricted to name-like usage codes
+  so axis-only LOINC values do not explode result sets.
 
   `LIMIT` is pushed into SQL only when there are no post-filters
   (regex). With post-filters present, SQL would drop survivors after
@@ -415,16 +457,15 @@
         active-clause (when active-only?
                         ["(c.inactive IS NULL OR c.inactive = 0)"])
         fts           (fts-query text)
-        fts-from      (when fts " JOIN concept_fts f ON f.rowid = c.rowid ")
-        fts-clause    (when fts ["f.concept_fts MATCH ?"])
-        fts-params    (when fts [fts])
-        filter-clauses (mapv filter->sql-clause filters)
-        clause-sqls   (mapv :sql filter-clauses)
-        clause-params (vec (mapcat :params filter-clauses))
-        post-filters  (filterv some? (map :post-filter filter-clauses))
+        fts-from      (when fts (str " JOIN " fts-hits-subquery " hits ON hits.rowid = c.rowid "))
+        fts-params    (when fts [fts fts])
+        filter-clauses (map filter->sql-clause filters)
+        clause-sqls   (map :sql filter-clauses)
+        clause-params (mapcat :params filter-clauses)
+        post-filters  (filter some? (map :post-filter filter-clauses))
         unsupported   (keep :unsupported-op filter-clauses)
-        where         (str/join " AND " (concat base-where active-clause fts-clause clause-sqls))
-        order-by      (when fts " ORDER BY f.rank ")
+        where         (str/join " AND " (concat base-where active-clause clause-sqls))
+        order-by      (when fts " ORDER BY hits.rank ")
         sql-limit?    (and max-hits (empty? post-filters))
         sql (str "SELECT c.rowid AS rowid, c.code, c.display, c.definition, "
                  "c.inactive, c.abstract, c.not_selectable, c.status "
@@ -433,7 +474,7 @@
                  (or order-by "")
                  (when sql-limit? (str " LIMIT " (long max-hits))))]
     {:sql sql
-     :params (vec (concat base-params fts-params clause-params))
+     :params (concat fts-params base-params clause-params)
      :post-filters post-filters
      :issues (when (seq unsupported)
                (mapv (fn [op]
@@ -443,7 +484,7 @@
                         :text (str "The filter operation '" op "' is not supported")})
                      unsupported))}))
 
-(defn- find-matches-row->concept [url version display-langs row designations]
+(defn- search-concepts-row->concept [url version display-langs row designations]
   (let [code (:concept/code row)
         inactive? (= 1 (:concept/inactive row))
         abstract? (= 1 (:concept/abstract row))
@@ -657,24 +698,24 @@
                 ["SELECT 1 FROM concept_ancestor
                   WHERE cs_url=? AND cs_version=? AND ancestor_code=? AND descendent_code=? LIMIT 1"
                  url (v version) codeA codeB]))
-         "subsumes"
-         (and meta
-              (jdbc/execute-one! ds
-                ["SELECT 1 FROM concept_ancestor
-                  WHERE cs_url=? AND cs_version=? AND ancestor_code=? AND descendent_code=? LIMIT 1"
-                 url (v version) codeB codeA]))
-         "subsumed-by"
-         :else "not-subsumed")}))
+           "subsumes"
+           (and meta
+                (jdbc/execute-one! ds
+                  ["SELECT 1 FROM concept_ancestor
+                    WHERE cs_url=? AND cs_version=? AND ancestor_code=? AND descendent_code=? LIMIT 1"
+                   url (v version) codeB codeA]))
+           "subsumed-by"
+           :else "not-subsumed")}))
 
   (cs-expand* [_ {:keys [system version filters text active-only max-hits displayLanguage]
-                  :as query}]
+                         :as query}]
     (let [meta (lookup-entry cache (or system (:url query)) (or version (params-version query)))]
       (if (nil? meta)
         {:concepts []}
         (let [url (:url meta)
               ver (:version meta)
               {:keys [sql params post-filters issues]}
-              (find-matches-sql url ver filters text active-only max-hits)
+              (search-concepts-sql url ver filters text active-only max-hits)
               regex-on-property? (some (fn [{:keys [op property]}]
                                          (and (= "regex" op)
                                               (nil? (direct-column property))))
@@ -715,7 +756,7 @@
                   concepts (mapv (fn [row]
                                    (let [desigs (when (seq display-langs)
                                                   (fetch-designations conn url ver (:concept/code row)))]
-                                     (find-matches-row->concept url ver display-langs row desigs)))
+                                     (search-concepts-row->concept url ver display-langs row desigs)))
                                  survivors)]
               (cond-> {:concepts concepts}
                 (seq issues) (assoc :issues issues)))))))))
