@@ -24,7 +24,7 @@ exist locally. Fixture paths are declared in
 |----------------------------------|-----------------------------------|------------------------------------------|------------------------------------------|
 | SNOMED CT International          | `.hades/snomed-intl-20250201.db`  | `ihtsdo.mlds/167@2025-02-01`             | MLDS                                     |
 | SNOMED CT UK monolith            | `.hades/snomed-uk-monolith.db`    | `uk.nhs/sct-monolith` (latest)           | TRUD                                     |
-| LOINC                            | `.hades/loinc-2.81.db`            | LOINC release `2.81`                     | loinc.org (free account)                 |
+| LOINC                            | `.hades/loinc-2.82.db`            | LOINC release `2.82`                     | loinc.org (free account)                 |
 | FHIR packages (SQLite container) | `.hades/fhir-smoke.db`            | `hl7.fhir.r4.core@4.0.1` + 5 others      | packages.fhir.org                        |
 | FHIR packages (unpacked cache)   | `.hades/fhir-packages/`           | same as above                            | packages.fhir.org                        |
 | tx-ecosystem (conformance)       | `.hades/tx-ecosystem/`            | rev pinned in `conformance_test.clj`     | `HL7/fhir-tx-ecosystem-ig` (auto-cloned) |
@@ -65,16 +65,16 @@ rm -f .hades/trud-api-key.txt
 
 LOINC is licensed and not redistributable, so you download it yourself:
 sign in at [loinc.org/downloads](https://loinc.org/downloads/) (free
-account), grab the **LOINC Table File (CSV)** archive for release 2.81,
-and unzip it. Then point `import` at the unzipped directory:
+account), grab the **LOINC Table File (CSV)** archive for release 2.82,
+and unzip it:
 
 ```bash
-unzip /path/to/Loinc_2.81.zip -d /tmp/Loinc_2.81
-clj -M:run import compact .hades/loinc-2.81.db /tmp/Loinc_2.81
+unzip /path/to/Loinc_2.82.zip -d /tmp/Loinc_2.82
 ```
 
-`import` auto-detects the LOINC release layout (it looks for
-`LoincTableCore/LoincTableCore.csv`).
+LOINC release detection is based on the native loader's required
+`LoincTable/Loinc.csv`. Native LOINC import writes a LOINC-specific
+SQLite store from the release CSVs.
 
 ### FHIR packages
 
@@ -122,7 +122,7 @@ asserts the in-memory and SQLite/FTRM providers produce **the same**
 result for the same fhir-data — including human-readable text. Both
 `:message` and issue `:text` are part of the comparison contract:
 divergence means the provider must converge on a shared helper in
-`impl/issues.clj`, not that the test's normaliser should look the
+`providers/common/issues.clj`, not that the test's normaliser should look the
 other way. The synthetic fixture is small (a handful of toy
 CodeSystems / ValueSets / a ConceptMap), so failures are fast to
 triage.
@@ -232,7 +232,7 @@ cd ~/Dev/hades
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -M:run serve \
   .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.81.db \
+  .hades/loinc-2.82.db \
   .hades/fhir-smoke.db \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!
@@ -267,7 +267,7 @@ cd ~/Dev/hades
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -M:run serve \
   .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.81.db \
+  .hades/loinc-2.82.db \
   .hades/fhir-smoke.db \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!
@@ -341,7 +341,7 @@ RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-par
 clj -T:build uber
 java -Xmx6g -jar target/hades.jar serve \
   .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.81.db \
+  .hades/loinc-2.82.db \
   .hades/fhir-smoke.db \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!

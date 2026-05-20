@@ -1,7 +1,7 @@
 (ns com.eldrix.hades.impl.mcp.server
   "Stdio JSON-RPC 2.0 transport for the Hades MCP server. Reads
   newline-delimited messages from stdin, dispatches to handlers in
-  `com.eldrix.hades.impl.mcp`, writes responses to stdout. Logs to
+  `com.eldrix.hades.impl.mcp.tools`, writes responses to stdout. Logs to
   stderr; `System/out` is redirected to stderr for the lifetime of the
   loop so stray prints from any downstream library can't corrupt the
   wire."
@@ -10,7 +10,7 @@
             [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
-            [com.eldrix.hades.impl.mcp :as mcp])
+            [com.eldrix.hades.impl.mcp.tools :as mcp])
   (:import (java.io BufferedReader InputStreamReader OutputStreamWriter PrintStream)))
 
 (set! *warn-on-reflection* true)

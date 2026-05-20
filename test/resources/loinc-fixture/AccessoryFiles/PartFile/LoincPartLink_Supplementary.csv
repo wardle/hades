@@ -1,0 +1,2 @@
+"LoincNumber","LongCommonName","PartNumber","PartName","PartCodeSystem","PartTypeName","LinkTypeName","Property"
+"100000-9","Health informatics pioneer and the father of LOINC","LP431397-1","Health informatics pioneer and the father of LOINC","http://loinc.org","COMPONENT","DetailedModel","http://loinc.org/property/analyte"

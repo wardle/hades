@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'wip/**'
   pull_request:
 
 concurrency:
@@ -211,8 +213,8 @@ jobs:
       - uses: actions/cache/restore@v5
         id: cache
         with:
-          path: .hades/loinc-2.81.db
-          key: loinc-2.81-v3
+          path: .hades/loinc-2.82.db
+          key: loinc-2.82-native-v1
 
       - name: Provision pinned LOINC DB
         id: provision
@@ -226,28 +228,28 @@ jobs:
           fi
           mkdir -p .hades
           extract_dir=$(mktemp -d)
-          gh release download 2.81 \
+          gh release download 2.82 \
             --repo wardle/loinc-releases \
-            --pattern 'Loinc_2.81.zip' \
+            --pattern 'Loinc_2.82.zip' \
             --output "$extract_dir/loinc.zip"
           # Extract into a directory whose name encodes the version so
-          # the LOINC loader's infer-version regex (Loinc[_-]?\d+...)
-          # matches whether the zip unpacks to LoincTableCore/... at the
-          # top level or nests inside its own Loinc_2.81/ folder.
-          unzip -q "$extract_dir/loinc.zip" -d "$extract_dir/Loinc_2.81"
-          release_dir=$(dirname "$(find "$extract_dir/Loinc_2.81" -maxdepth 3 -type d -name LoincTableCore | head -n 1)")
-          if [ -z "$release_dir" ] || [ ! -f "$release_dir/LoincTableCore/LoincTableCore.csv" ]; then
-            echo "::error::Could not locate LoincTableCore/LoincTableCore.csv inside the LOINC zip."
+          # local path is clear in logs whether the zip unpacks files at
+          # the top level or nests inside its own Loinc_2.82/ folder.
+          unzip -q "$extract_dir/loinc.zip" -d "$extract_dir/Loinc_2.82"
+          loinc_table_dir=$(find "$extract_dir/Loinc_2.82" -maxdepth 4 -type d -name LoincTable | head -n 1)
+          release_dir=$(dirname "$loinc_table_dir")
+          if [ -z "$loinc_table_dir" ] || [ ! -f "$release_dir/LoincTable/Loinc.csv" ]; then
+            echo "::error::Could not locate LoincTable/Loinc.csv inside the LOINC zip."
             exit 1
           fi
-          clojure -M:run import compact .hades/loinc-2.81.db "$release_dir"
+          clojure -M:run import compact .hades/loinc-2.82.db "$release_dir"
           rm -rf "$extract_dir"
 
       - uses: actions/cache/save@v5
         if: always() && steps.provision.outcome == 'success'
         with:
-          path: .hades/loinc-2.81.db
-          key: loinc-2.81-v3
+          path: .hades/loinc-2.82.db
+          key: loinc-2.82-native-v1
 
   # The install CLI downloads + extracts + imports in one shot:
   #   --cache-dir lands extracted JSON at <cache>/<id>-<version>/package/
@@ -362,8 +364,8 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/loinc-2.81.db
-          key: loinc-2.81-v3
+          path: .hades/loinc-2.82.db
+          key: loinc-2.82-native-v1
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
@@ -426,8 +428,8 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/loinc-2.81.db
-          key: loinc-2.81-v3
+          path: .hades/loinc-2.82.db
+          key: loinc-2.82-native-v1
           fail-on-cache-miss: true
 
       # Cache the tx-ecosystem clone keyed on the pinned commit. Bump
@@ -498,8 +500,8 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/loinc-2.81.db
-          key: loinc-2.81-v3
+          path: .hades/loinc-2.82.db
+          key: loinc-2.82-native-v1
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
@@ -526,7 +528,7 @@ jobs:
         run: |
           clojure -M:run serve \
             .hades/snomed-intl-20250201.db \
-            .hades/loinc-2.81.db \
+            .hades/loinc-2.82.db \
             .hades/fhir-smoke.db \
             --port 8080 &
           echo $! > hades.pid

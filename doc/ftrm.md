@@ -23,7 +23,7 @@ This document is the contract.
 | First published | 2026-05 |
 | Stability | Stable. Breaking changes will bump the schema version and ship migration tooling. |
 | Reference implementation | Hades — <https://github.com/wardle/hades> |
-| Reference DDL | [`resources/com/eldrix/hades/sqlite/schema-v1.sql`](../resources/com/eldrix/hades/sqlite/schema-v1.sql) |
+| Reference DDL | [`resources/com/eldrix/hades/providers/ftrm/schema-v1.sql`](../resources/com/eldrix/hades/providers/ftrm/schema-v1.sql) |
 | Licence | The schema, identifiers and prose of this specification are licensed under CC0. Implementations may use any licence. |
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**,

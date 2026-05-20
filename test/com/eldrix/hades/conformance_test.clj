@@ -138,19 +138,19 @@
     (when-not port
       (throw (ex-info "No server to restart. Call (start!) first." {})))
     (stop!)
-    (doseq [ns-sym '[com.eldrix.hades.impl.protocols
-                     com.eldrix.hades.impl.canonical
+    (doseq [ns-sym '[com.eldrix.hades.protocols
+                     com.eldrix.hades.providers.common.canonical
                      com.eldrix.hades.impl.wire
                      com.eldrix.hades.impl.metadata
-                     com.eldrix.hades.impl.snomed
-                     com.eldrix.hades.impl.compose
-                     com.eldrix.hades.impl.fhir-extract
-                     com.eldrix.hades.impl.loaders.fhir
-                     com.eldrix.hades.impl.in-memory
-                     com.eldrix.hades.impl.index.memory
-                     com.eldrix.hades.impl.sqlite.db
-                     com.eldrix.hades.impl.sqlite.provider
-                     com.eldrix.hades.impl.composite
+                     com.eldrix.hades.providers.snomed.provider
+                     com.eldrix.hades.providers.common.compose
+                     com.eldrix.hades.providers.common.fhir-extract
+                     com.eldrix.hades.providers.common.fhir-loader
+                     com.eldrix.hades.providers.in-memory.provider
+                     com.eldrix.hades.providers.in-memory.index
+                     com.eldrix.hades.providers.ftrm.db
+                     com.eldrix.hades.providers.ftrm.provider
+                     com.eldrix.hades.composite
                      com.eldrix.hades.impl.http
                      com.eldrix.hades.core
                      com.eldrix.hades.fixtures]]

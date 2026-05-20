@@ -28,11 +28,11 @@
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
-            [com.eldrix.hades.impl.composite :as composite]
+            [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
-            [com.eldrix.hades.impl.index.sqlite :as sqlite-index]
-            [com.eldrix.hades.impl.protocols :as protos]
-            [com.eldrix.hades.impl.sqlite.provider :as sqlite-provider])
+            [com.eldrix.hades.providers.ftrm.provider :as ftrm-provider]
+            [com.eldrix.hades.providers.ftrm.index :as ftrm-index]
+            [com.eldrix.hades.protocols :as protos])
   (:import (java.io File)))
 
 ;; ---------------------------------------------------------------------------
@@ -108,7 +108,8 @@
    ;; ConceptMap colours → ISO colours.
    {:type :conceptmap
     :url cm-url :version "1.0"
-    :source-uri cs-url :target-uri target-cs
+    :source-uri "http://example.org/vs/colours-source"
+    :target-uri "http://example.org/vs/iso-colours-target"
     :groups [{:source cs-url :target target-cs
               :elements [{:code "red"   :target [{:code "ISO-R" :equivalence "equivalent"}]}
                          {:code "green" :target [{:code "ISO-G" :equivalence "equivalent"}]}
@@ -141,10 +142,10 @@
 
 (defn- build-sqlite-providers [data]
   (let [path (temp-db-path)]
-    (sqlite-index/build! path data {:loader-type "parity-test"})
-    (sqlite-index/index! path)
+    (ftrm-index/build! path data {:loader-type "parity-test"})
+    (ftrm-index/index! path)
     (let [{:keys [codesystem valueset conceptmap datasource]}
-          (sqlite-provider/open-providers path)
+          (ftrm-provider/open-providers path)
           providers (filterv some? [codesystem valueset conceptmap])
           svc (composite/from-providers providers)]
       {:cs codesystem :vs valueset :cm conceptmap
@@ -359,10 +360,41 @@
     (testing "code in VS with displayLanguage and matching designation"
       (check {:code "red" :system cs-url :display "Rouge" :displayLanguage "fr"}))
     (testing "code in VS with wrong display under displayLanguage"
-      (check {:code "red" :system cs-url :display "Rojo" :displayLanguage "es"}))))
+      (check {:code "red" :system cs-url :display "Rojo" :displayLanguage "es"}))
+    (testing "wrong-case code is rejected for case-sensitive CodeSystem"
+      (check {:code "RED" :system cs-url}))))
+
+(deftest parity-code-filters-respect-case-sensitivity
+  (let [im-svc (get-in @state [:in-mem :svc])
+        sq-svc (get-in @state [:sqlite :svc])
+        im-ci (composite/find-codesystem im-svc ci-cs-url)
+        sq-ci (get-in @state [:sqlite :cs])
+        im-cs (get-in @state [:in-mem :cs])
+        sq-cs (get-in @state [:sqlite :cs])]
+    (testing "case-insensitive CodeSystem code filter accepts different case"
+      (let [params {:system ci-cs-url
+                    :filters [{:property "code" :op "=" :value "square"}]}
+            im-r (normalise-result (protos/cs-expand* im-ci params))
+            sq-r (normalise-result (protos/cs-expand* sq-ci params))]
+        (is (= ["Square"] (mapv :code (:concepts im-r))))
+        (is (= (mapv :code (:concepts im-r))
+               (mapv :code (:concepts sq-r)))
+            (diff "cs-expand* case-insensitive code filter" [params] im-r sq-r))))
+    (testing "case-sensitive CodeSystem code filter rejects different case"
+      (let [params {:system cs-url
+                    :filters [{:property "code" :op "=" :value "RED"}]}
+            im-r (normalise-result (protos/cs-expand* im-cs params))
+            sq-r (normalise-result (protos/cs-expand* sq-cs params))]
+        (is (empty? (:concepts im-r)))
+        (is (= (mapv :code (:concepts im-r))
+               (mapv :code (:concepts sq-r)))
+            (diff "cs-expand* case-sensitive code filter" [params] im-r sq-r))))))
 
 (deftest parity-cm-translate
   (let [{{im :cm} :in-mem {sq :cm} :sqlite} @state]
+    (testing "URL-only translate uses group source systems"
+      (parity-check "cm-translate" protos/cm-translate im sq
+                    {:url cm-url :code "red"}))
     (testing "forward translate red → ISO-R"
       (parity-check "cm-translate" protos/cm-translate im sq
                     {:url cm-url :system cs-url :code "red"}))

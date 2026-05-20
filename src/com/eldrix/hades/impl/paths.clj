@@ -2,13 +2,14 @@
   "Open terminology artefact paths as Hades provider bundles."
   (:require [clojure.spec.alpha :as s]
             [clojure.tools.logging.readable :as log]
-            [com.eldrix.hades.impl.composite :as composite]
+            [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
-            [com.eldrix.hades.impl.loaders.fhir :as fhir-loader]
-            [com.eldrix.hades.impl.snomed :as snomed]
+            [com.eldrix.hades.providers.common.fhir-loader :as fhir-loader]
+            [com.eldrix.hades.providers.snomed.provider :as snomed]
             [com.eldrix.hades.impl.sources :as sources]
-            [com.eldrix.hades.impl.sqlite.db :as sqlite-db]
-            [com.eldrix.hades.impl.sqlite.provider :as sqlite-provider]
+            [com.eldrix.hades.providers.ftrm.db :as ftrm-db]
+            [com.eldrix.hades.providers.ftrm.provider :as ftrm-provider]
+            [com.eldrix.hades.providers.loinc.provider :as loinc-provider]
             [com.eldrix.hermes.core :as hermes])
   (:import (java.io Closeable File)))
 
@@ -44,7 +45,7 @@
 (defn open-database
   "Open one built-database entry as a provider bundle. Dispatches on
   `:kind`; uses `:dir` for Hermes (the DB is a directory) and `:file`
-  for FTRM (the DB is a file).
+  for FTRM / native LOINC (the DB is a file).
 
   `opts` may carry `:default-locale` (a BCP 47 / Accept-Language string)
   forwarded to `hermes/open` for Hermes entries."
@@ -63,16 +64,25 @@
      :fhir-tx-db
      (let [path (.getPath file)
            {:keys [datasource codesystem valueset conceptmap naming-system]}
-           (sqlite-provider/open-providers path)
+           (ftrm-provider/open-providers path)
            providers (filterv some? [codesystem valueset conceptmap])]
        (log/info "registered provider"
                  (merge {:source path :kind :fhir-tx-db
                          :naming-system? (some? naming-system)}
-                        (summarise-resources (sqlite-db/list-resources datasource))))
+                        (summarise-resources (ftrm-db/list-resources datasource))))
        {:providers      providers
         :naming-systems (when naming-system [naming-system])
         :closers        (when (instance? Closeable datasource)
-                          [#(.close ^Closeable datasource)])}))))
+                          [#(.close ^Closeable datasource)])})
+
+     :loinc-db
+     (let [path (.getPath file)
+           {:keys [datasource codesystem valueset conceptmap naming-system]} (loinc-provider/open-providers path)]
+       (log/info "registered provider" {:source path :kind :loinc-db})
+       {:providers (filterv some? [codesystem valueset conceptmap])
+        :naming-systems (when naming-system [naming-system])
+        :closers   (when (instance? Closeable datasource)
+                     [#(.close ^Closeable datasource)])}))))
 
 (defn- aggregate-fhir-json
   "Build one in-memory provider set from FHIR JSON files."
@@ -102,7 +112,7 @@
   ([path opts]
    (let [files     (sources/tx-file-seq path)
          release   (filter #(and (:importable? %) (not (:database? %))) files)
-         databases (filter #(#{:hermes-db :fhir-tx-db} (:kind %)) files)
+         databases (filter #(#{:hermes-db :fhir-tx-db :loinc-db} (:kind %)) files)
          json      (filter #(= :fhir-json (:kind %)) files)]
      (when (empty? files)
        (throw (ex-info (str "Couldn't find any terminology sources under " path)

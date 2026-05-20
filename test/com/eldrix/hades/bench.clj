@@ -8,14 +8,18 @@
             [clojure.test :refer [deftest]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
-            [com.eldrix.hades.impl.compose :as compose]
-            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.providers.common.compose :as compose]
+            [com.eldrix.hades.providers.loinc.model :as loinc-model]
+            [com.eldrix.hades.protocols :as protos]
             [criterium.core :as crit]))
 
 (set! *warn-on-reflection* true)
 
 (def ^:private snomed-uri "http://snomed.info/sct")
 (def ^:private loinc-uri  "http://loinc.org")
+(def ^:private ieee-uri "urn:iso:std:iso:11073:10101")
+(def ^:private radlex-uri "http://www.radlex.org")
+(def ^:private rsna-playbook-uri "http://www.rsna.org/RadLex_Playbook")
 
 ;; ─── Well-known SNOMED anchors ─────────────────────────────────────────────
 
@@ -123,6 +127,36 @@
             {:url    (str snomed-uri "?fhir_cm=900000000000526001")
              :system snomed-uri :code "56485000"
              :target snomed-uri}))}
+   {:id :translate/loinc-map-to
+    :fn (fn [svc]
+          (hades/translate svc
+            {:url (:url (loinc-model/conceptmap :map-to))
+             :system loinc-uri :code "1009-0"
+             :target loinc-uri}))}
+   {:id :translate/loinc-part-related
+    :fn (fn [svc]
+          (hades/translate svc
+            {:url (loinc-model/part-related-conceptmap-url snomed-uri)
+             :system loinc-uri :code "LP14449-0"
+             :target snomed-uri}))}
+   {:id :translate/loinc-ieee
+    :fn (fn [svc]
+          (hades/translate svc
+            {:url (:url (loinc-model/conceptmap :ieee-medical-device))
+             :system loinc-uri :code "11556-8"
+             :target ieee-uri}))}
+   {:id :translate/loinc-rsna-rid
+    :fn (fn [svc]
+          (hades/translate svc
+            {:url (:url (loinc-model/conceptmap :rsna-rid))
+             :system loinc-uri :code "24531-6"
+             :target radlex-uri}))}
+   {:id :translate/loinc-rsna-rpid-reverse
+    :fn (fn [svc]
+          (hades/translate svc
+            {:url (:url (loinc-model/conceptmap :rsna-rpid))
+             :system rsna-playbook-uri :code "RPID2142"
+             :target loinc-uri}))}
 
    ;; --- $expand via implicit-VS URLs --------------------------------------
    {:id :expand/ecl-small :tx-bench "EX01"
@@ -341,6 +375,38 @@
     (with-open [w (io/writer f)]
       (json/write doc w))
     (println "wrote" results-path)))
+
+(defn operation
+  "Return the benchmark operation with `id`."
+  [id]
+  (let [id (keyword id)]
+    (or (some #(when (= id (:id %)) %) operations)
+        (throw (ex-info "Unknown benchmark operation"
+                        {:id id :available (mapv :id operations)})))))
+
+(defn bench-operation
+  "Run one benchmark operation against an already-open service."
+  ([svc id] (bench-operation svc id (bench-mode)))
+  ([svc id mode]
+   (let [{:keys [fn] :as entry} (operation id)
+         r (run-one mode fn svc)]
+     (crit/report-result r)
+     (summarise entry r))))
+
+(defn bench-one!
+  "Open the standard fixture service and run one benchmark operation.
+
+  Intended for REPL microbenchmarking:
+    (bench-one! :translate/loinc-part-related)"
+  ([id] (bench-one! (if (map? id) (:id id) id) (bench-mode)))
+  ([id mode]
+   (let [svc (hades/open [fixtures/snomed-db-path
+                          fixtures/loinc-db-path
+                          fixtures/fhir-smoke-db-path])]
+     (try
+       (bench-operation svc id mode)
+       (finally
+         (hades/close svc))))))
 
 (deftest operations-bench
   (let [svc  (hades/open [fixtures/snomed-db-path

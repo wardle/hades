@@ -26,7 +26,7 @@
             [clojure.test.check.properties :as prop]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
-            [com.eldrix.hades.impl.compose :as compose]
+            [com.eldrix.hades.providers.common.compose :as compose]
             [com.eldrix.hades.impl.load :as load-fhir]))
 
 (set! *warn-on-reflection* true)

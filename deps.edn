@@ -101,5 +101,9 @@
 
            :lint/kondo
            {:extra-deps {clj-kondo/clj-kondo {:mvn/version "RELEASE"}}
-            :main-opts  ["-m" "clj-kondo.main" "--lint" "src"]}}}
+            :main-opts  ["-m" "clj-kondo.main" "--lint" "src"]}
+
+           :lint/splint
+           {:extra-deps {io.github.noahtheduke/splint {:mvn/version "1.24.0"}}
+            :main-opts  ["-m" "noahtheduke.splint" "src"]}}}
 

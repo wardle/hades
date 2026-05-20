@@ -7,7 +7,10 @@
             [com.eldrix.hades.impl.cli :as cli]
             [com.eldrix.hades.impl.paths :as paths]
             [com.eldrix.hades.impl.sources :as sources]
-            [com.eldrix.hades.impl.sqlite.db :as db])
+            [com.eldrix.hades.providers.ftrm.db :as db]
+            [com.eldrix.hades.providers.loinc.store :as loinc-store]
+            [next.jdbc :as jdbc]
+            [next.jdbc.plan :as plan])
   (:import (clojure.lang ExceptionInfo)
            (java.io File)
            (java.nio.file Files)
@@ -256,3 +259,45 @@
               "the partial DB must still register as a hermes-db so a separate
                `index` invocation can complete it"))
         (finally (delete-tree! root))))))
+
+(deftest import-loinc-release-roundtrip
+  (testing "LOINC fixture imports as a native LOINC SQLite store"
+    (let [root (mk-tmp-dir "loinc-import")
+          dest (.getPath (io/file root "loinc.db"))]
+      (try
+        (#'cmd/import-from {} [dest "test/resources/loinc-fixture"])
+        (is (true? (loinc-store/loinc-db? (io/file dest))))
+        (let [loinc-dbs (filter #(= :loinc-db (:kind %))
+                                (sources/tx-file-seq dest))]
+          (is (= 1 (count loinc-dbs))))
+        (let [ds (loinc-store/open dest)]
+          (try
+            (with-open [conn (jdbc/get-connection ds)]
+              (is (= "2.74"
+                     (plan/select-one! conn :value
+                                       ["SELECT value FROM meta WHERE key = 'loinc_version'"])))
+              (is (= 1
+                     (plan/select-one! conn :count
+                                       ["SELECT COUNT(*) AS count FROM loinc"])))
+              (is (= 21
+                     (plan/select-one! conn :count
+                                       ["SELECT COUNT(*) AS count FROM linguistic_variant_row"]))))
+            (finally
+              (loinc-store/close! ds))))
+        (finally
+          (delete-tree! root))))))
+
+(deftest import-rejects-loinc-and-fhir-json-mix
+  (testing "LOINC and FHIR JSON cannot share one destination"
+    (let [root (mk-tmp-dir "loinc+fhir-import")
+          dest (.getPath (io/file root "mixed.db"))
+          json-dir (io/file root "json")]
+      (try
+        (spit-file! (io/file json-dir "cs.json")
+                    "{\"resourceType\":\"CodeSystem\",\"url\":\"http://example.com/cs\",\"content\":\"complete\"}")
+        (is (= :com.eldrix.hades.cmd/mixed-sources
+               (reason-of
+                #(#'cmd/import-from {:no-index true}
+                   [dest "test/resources/loinc-fixture" (.getPath json-dir)]))))
+        (finally
+          (delete-tree! root))))))

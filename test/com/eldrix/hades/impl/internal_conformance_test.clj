@@ -9,10 +9,10 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
-            [com.eldrix.hades.impl.composite :as composite]
-            [com.eldrix.hades.impl.compose :as compose]
+            [com.eldrix.hades.composite :as composite]
+            [com.eldrix.hades.providers.common.compose :as compose]
             [com.eldrix.hades.impl.load :as load-fhir]
-            [com.eldrix.hades.impl.protocols.result :as result]
+            [com.eldrix.hades.protocols.result :as result]
             [com.eldrix.hades.impl.wire :as wire]))
 
 ;; ---------------------------------------------------------------------------
@@ -270,13 +270,14 @@
       (is (contains? (issue-codes result) "invalid-code")))))
 
 (deftest cc-multi-coding-one-valid-test
-  (testing "two codings, one valid — result false with all issues"
+  (testing "two codings, one valid — result false with issues and message from rejected codings"
     (let [result (hades/validate-codeable-concept *svc*
                    [{:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "MISSING"}
                     {:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "code1"}]
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"})]
-      ;; The valid coding is found but invalid codings make result false
+      (is (false? (:result result)))
       (is (some? (:display result)) "display from valid coding")
+      (is (string? (:message result)))
       (is (some #(= "invalid-code" (:details-code %)) (:issues result))
           "invalid-code issue from the bad coding"))))
 

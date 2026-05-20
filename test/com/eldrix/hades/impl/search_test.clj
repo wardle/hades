@@ -15,11 +15,11 @@
             [clojure.test :refer [deftest is testing]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
-            [com.eldrix.hades.impl.composite :as composite]
+            [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
-            [com.eldrix.hades.impl.loaders.fhir :as loaders]
-            [com.eldrix.hades.impl.protocols :as protos]
-            [com.eldrix.hades.impl.protocols.result :as result]
+            [com.eldrix.hades.providers.common.fhir-loader :as loaders]
+            [com.eldrix.hades.protocols :as protos]
+            [com.eldrix.hades.protocols.result :as result]
             [com.eldrix.hades.impl.wire :as wire])
   (:import (java.net URI URLEncoder)
            (java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers)

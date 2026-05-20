@@ -2,7 +2,6 @@
   "Command-line entry point for the Hades FHIR terminology server."
   (:gen-class)
   (:require [clojure.data.json :as json]
-            [clojure.core.async :as async]
             [clojure.pprint :as pp]
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
@@ -12,12 +11,14 @@
             [com.eldrix.hades.impl.http :as http]
             [com.eldrix.hades.impl.mcp.server :as mcp-server]
             [com.eldrix.hades.impl.fhir-package :as fhir-package]
-            [com.eldrix.hades.impl.index.sqlite :as sqlite-index]
-            [com.eldrix.hades.impl.loaders.fhir :as fhir-loader]
-            [com.eldrix.hades.impl.loaders.loinc :as loinc-loader]
-            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.providers.ftrm.index :as ftrm-index]
+            [com.eldrix.hades.providers.common.fhir-loader :as fhir-loader]
+            [com.eldrix.hades.providers.loinc.import :as loinc-import]
+            [com.eldrix.hades.providers.loinc.index :as loinc-index]
+            [com.eldrix.hades.providers.loinc.loader :as loinc-loader]
+            [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.impl.sources :as sources]
-            [com.eldrix.hades.impl.sqlite.db :as sqlite-db]
+            [com.eldrix.hades.providers.ftrm.db :as ftrm-db]
             [com.eldrix.hermes.core :as hermes]
             [com.eldrix.hermes.download :as download]
             [com.eldrix.hermes.importer :as importer])
@@ -74,15 +75,12 @@
   (hermes/import-snomed file dirs :exclude importer/default-exclude))
 
 (defn- import-loinc! [file roots]
-  (let [ch     (loinc-loader/stream-releases roots)
-        result (sqlite-index/import-fhir-data file ch {:loader-type "loinc-csv"})]
-    (log/info "loinc import complete"
-              (merge {:file file :sources (count roots)}
-                     (summarise-resources (:resources result))))
-    result))
+  (log/info "loinc import" {:file file :sources (count roots) :paths (vec roots)})
+  (doseq [root roots]
+    (loinc-import/import-release! file root)))
 
 (defn- import-fhir-json! [file files]
-  (let [result (sqlite-index/build! file #(fhir-loader/load-files files)
+  (let [result (ftrm-index/build! file #(fhir-loader/load-files files)
                                     {:loader-type "fhir-json"})]
     (log/info "fhir-json import complete"
               (merge {:file file :files (count files)}
@@ -103,7 +101,11 @@
     :fhir-tx-db
     (let [path (.getPath file)]
       (println (str "  → index: " path))
-      (sqlite-index/index! path))
+      (ftrm-index/index! path))
+    :loinc-db
+    (let [path (.getPath file)]
+      (println (str "  → index: " path))
+      (loinc-index/index! path))
     ;; Release-only entries (rf2, loinc) — silently skipped so a chained
     ;; pipeline that mixes release sources with built artefacts doesn't
     ;; fail spuriously. fhir-json gets here too but indexing it is a no-op.
@@ -115,7 +117,7 @@
 (defn- compact-one [{:keys [kind ^File file ^File dir]}]
   (case kind
     :hermes-db  (let [path (.getPath dir)]  (println (str "  → compact: " path)) (hermes/compact path))
-    :fhir-tx-db (let [path (.getPath file)] (println (str "  → vacuum: " path))  (sqlite-db/vacuum! path))
+    :fhir-tx-db (let [path (.getPath file)] (println (str "  → vacuum: " path))  (ftrm-db/vacuum! path))
     nil))
 
 (defn- files-or-throw [paths]
@@ -160,6 +162,12 @@
                       "import — they target different database formats.")
                  {:rf2 rf2-dirs :loinc loinc-dirs
                   :fhir-json (mapv #(.getPath ^File %) fhir-json-files)}))
+    (when (and (seq loinc-dirs) (seq fhir-json-files))
+      (cli-error ::mixed-sources
+                 (str "Cannot mix LOINC releases with FHIR JSON in one import "
+                      "— they target different database formats.")
+                 {:loinc loinc-dirs
+                  :fhir-json (mapv #(.getPath ^File %) fhir-json-files)}))
     (when (seq rf2-dirs)        (import-rf2!       file rf2-dirs))
     (when (seq loinc-dirs)      (import-loinc!     file loinc-dirs))
     (when (seq fhir-json-files) (import-fhir-json! file fhir-json-files))))
@@ -181,24 +189,17 @@
                          files))))
 
 (defn- list-loinc [dir]
-  (let [ch (loinc-loader/stream-release dir)
-        counts (loop [counts {}]
-                 (if-let [batch (async/<!! ch)]
-                   (let [events (if (map? batch) [batch] batch)]
-                     (when-let [err (some #(when (= :stream-error (:type %)) %) events)]
-                       (throw (:ex err)))
-                     (recur (reduce (fn [counts fd]
-                                      (update counts (:type fd) (fnil inc 0)))
-                                    counts
-                                    events)))
-                   counts))
+  (let [{:keys [version]} (loinc-loader/metadata dir)
+        {:keys [per-file by-type]} (loinc-loader/row-counts dir)
         heading (str "| LOINC release at " dir " |")
         banner (str/join (repeat (count heading) "="))]
     (println "\n" banner "\n" heading "\n" banner)
-    (pp/print-table [{:resource "CodeSystem" :count (get counts :codesystem-meta 0)}
-                     {:resource "concepts"   :count (get counts :concept 0)}
-                     {:resource "ValueSets (AnswerLists)" :count (get counts :valueset 0)}
-                     {:resource "ConceptMaps (MapTo)"     :count (get counts :conceptmap 0)}])))
+    (println (str "  Version: " version))
+    (println (str "  Files: " (count per-file)))
+    (pp/print-table (->> by-type
+                         (map (fn [[type rows]]
+                                {:type (name type) :rows rows}))
+                         (sort-by :type)))))
 
 (defn- list-fhir-json [files]
   (let [data (fhir-loader/load-files files)
@@ -220,14 +221,14 @@
     (when (seq cm) (println "\nConceptMaps:") (pp/print-table cm))))
 
 (defn- list-fhir-tx-db [path]
-  (let [ds (sqlite-db/open path)]
+  (let [ds (ftrm-db/open path)]
     (try
-      (let [resources (sqlite-db/list-resources ds)]
+      (let [resources (ftrm-db/list-resources ds)]
         (println (str "\n=== FHIR terminology container " path " ==="))
         (println (str "  Resources: " (count resources)))
         (pp/print-table (map #(select-keys % [:resource-type :url :version :concept-count])
                              resources)))
-      (finally (sqlite-db/close! ds)))))
+      (finally (ftrm-db/close! ds)))))
 
 (defn- list-hermes-db [path]
   (let [st (hermes/status path {:counts? true :log? false})]
@@ -273,7 +274,7 @@
     (try
       (some-> (download/download id (cond-> (dissoc opts :dist)
                                       version (assoc :release-date version)))
-              .toString)
+              str)
       (catch IllegalArgumentException _
         (cli-error ::unknown-distribution
                    (str "Unrecognised SNOMED distribution: " id ". "

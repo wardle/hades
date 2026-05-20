@@ -1,7 +1,2 @@
 "AnswerListId","AnswerListName","AnswerListOID","ExtDefinedYN","ExtDefinedAnswerListCodeSystem","ExtDefinedAnswerListLink","AnswerStringId","LocalAnswerCode","LocalAnswerCodeSystem","SequenceNumber","DisplayText","ExtCodeId","ExtCodeDisplayName","ExtCodeSystem","ExtCodeSystemVersion","ExtCodeSystemCopyrightNotice","SubsequentTextPrompt","Description","Score"
-"LL6136-7","Met/Not met/Ongoing/Unable to assess","2.16.840.1.113883.21","N","","","LA28912-9","M","","1","Met","","","","","","","",""
-"LL6136-7","Met/Not met/Ongoing/Unable to assess","2.16.840.1.113883.21","N","","","LA28913-7","NM","","2","Not met","","","","","","","",""
-"LL6136-7","Met/Not met/Ongoing/Unable to assess","2.16.840.1.113883.21","N","","","LA28914-5","O","","3","Ongoing","","","","","","","",""
-"LL6136-7","Met/Not met/Ongoing/Unable to assess","2.16.840.1.113883.21","N","","","LA28915-2","UA","","4","Unable to assess","","","","","","","",""
-"LL3044-6","Yes/No","2.16.840.1.113883.22","N","","","LA33-6","Y","","1","Yes","","","","","","","",""
-"LL3044-6","Yes/No","2.16.840.1.113883.22","N","","","LA32-8","N","","2","No","","","","","","","",""
+"LL1000-0","PhenX05_13_30D bread amt","1.3.6.1.4.1.12009.10.1.165","N","","","LA13825-7","1","","1","1 slice or 1 dinner roll","","","","","","","",""

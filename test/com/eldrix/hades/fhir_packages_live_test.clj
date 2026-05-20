@@ -18,11 +18,11 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
-            [com.eldrix.hades.impl.composite :as composite]
+            [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
-            [com.eldrix.hades.impl.loaders.fhir :as fhir-loader]
-            [com.eldrix.hades.impl.protocols :as protos]
-            [com.eldrix.hades.impl.sqlite.provider :as sqlite-provider])
+            [com.eldrix.hades.providers.common.fhir-loader :as fhir-loader]
+            [com.eldrix.hades.protocols :as protos]
+            [com.eldrix.hades.providers.ftrm.provider :as ftrm-provider])
   (:import (java.io File)))
 
 (def ^:dynamic *mem-svc* nil)
@@ -50,7 +50,7 @@
         {:keys [providers supplements]} (load-fhir/build-from-fhir-data data)
         mem-svc (composite/from-providers providers {:supplements supplements})
         {:keys [datasource codesystem valueset conceptmap]}
-        (sqlite-provider/open-providers fixtures/fhir-smoke-db-path)
+        (ftrm-provider/open-providers fixtures/fhir-smoke-db-path)
         sql-svc (composite/from-providers (filterv some? [codesystem valueset conceptmap])
                             {:closers [#(when (instance? java.io.Closeable datasource)
                                           (.close ^java.io.Closeable datasource))]})]
@@ -64,6 +64,10 @@
 
 (defn- url-version-set [metadata]
   (->> metadata (map (juxt :url :version)) set))
+
+(defn- match-code?
+  [result code]
+  (some #(= code (:code %)) (:matches result)))
 
 (defn- first-code-from-cs
   "Pull one code from a CodeSystem via `cs-expand*` with no filters,
@@ -98,6 +102,47 @@
   (testing "in-memory and SQLite engines list the same ConceptMaps"
     (is (= (url-version-set (protos/cm-metadata *mem-svc* {}))
            (url-version-set (protos/cm-metadata *sql-svc* {}))))))
+
+(deftest ^:live cm-translate-by-system-target
+  (let [cases [{:label "administrative gender to v3 by target CodeSystem"
+                :params {:system "http://hl7.org/fhir/administrative-gender"
+                         :target "http://terminology.hl7.org/CodeSystem/v3-AdministrativeGender"
+                         :code "male"}
+                :code "M"}
+               {:label "administrative gender to v3 by target ValueSet"
+                :params {:system "http://hl7.org/fhir/administrative-gender"
+                         :target "http://terminology.hl7.org/ValueSet/v3-AdministrativeGender"
+                         :code "male"}
+                :code "M"}
+               {:label "address-use to v3 by target"
+                :params {:system "http://hl7.org/fhir/address-use"
+                         :target "http://terminology.hl7.org/ValueSet/v3-AddressUse"
+                         :code "home"}
+                :code "H"}
+               {:label "contact-point-use to v2 by target"
+                :params {:system "http://hl7.org/fhir/contact-point-use"
+                         :target "http://terminology.hl7.org/CodeSystem/v2-0201"
+                         :code "mobile"}
+                :code "PRS"}
+               {:label "IPS pregnancy LOINC answer to SNOMED by target"
+                :params {:system "http://loinc.org"
+                         :target "http://snomed.info/sct"
+                         :code "LA15173-0"}
+                :code "77386006"}
+               {:label "IPS smoking LOINC answer to SNOMED by target"
+                :params {:system "http://loinc.org"
+                         :target "http://snomed.info/sct"
+                         :code "LA18976-3"}
+                :code "449868002"}]]
+    (doseq [{:keys [label params code]} cases]
+      (testing (str label " (in-memory)")
+        (let [result (hades/translate *mem-svc* params)]
+          (is (true? (:result result)) (pr-str result))
+          (is (match-code? result code) (pr-str (:matches result)))))
+      (testing (str label " (SQLite)")
+        (let [result (hades/translate *sql-svc* params)]
+          (is (true? (:result result)) (pr-str result))
+          (is (match-code? result code) (pr-str (:matches result))))))))
 
 (deftest ^:live cs-lookup-parity-sampled
   (testing "$lookup agrees on the first concept of a sample of CodeSystems"

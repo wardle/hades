@@ -37,6 +37,24 @@
 (def ^:private fhir-cs       "http://terminology.hl7.org/CodeSystem/v3-AdministrativeGender")
 (def ^:private fhir-vs       "http://terminology.hl7.org/ValueSet/v3-AdministrativeGender")
 
+;; ValueSets keyed off LOINC. `observation-codes` is the canonical
+;; FHIR R4 entry point — its compose is `{include [{system http://loinc.org}]}`,
+;; so a `$expand` against it routes through the compose engine to the
+;; LOINC CodeSystem provider. `loinc.org/vs` is the LOINC IG's implicit
+;; "all of LOINC" URL (parallel to `snomed.info/sct?fhir_vs`).
+(def ^:private loinc-observation-vs "http://hl7.org/fhir/ValueSet/observation-codes")
+(def ^:private loinc-implicit-vs    "http://loinc.org/vs")
+(def ^:private loinc-hgb-code       "718-7")
+(def ^:private loinc-hgb-de-display "Hämoglobin [Masse/Volumen] in Blut")
+(def ^:private loinc-part-snomed-map
+  "http://loinc.org/cm/part-related-code-mapping/http%3A%2F%2Fsnomed.info%2Fsct")
+(def ^:private loinc-ieee-map "http://loinc.org/cm/ieee-medical-device")
+(def ^:private loinc-rsna-rid-map "http://loinc.org/cm/rsna-playbook/rid")
+(def ^:private loinc-rsna-rpid-map "http://loinc.org/cm/rsna-playbook/rpid")
+(def ^:private ieee-system "urn:iso:std:iso:11073:10101")
+(def ^:private radlex-system "http://www.radlex.org")
+(def ^:private rsna-playbook-system "http://www.rsna.org/RadLex_Playbook")
+
 ;; A hierarchical FHIR CodeSystem used to exercise the `property=parent`
 ;; filter on the FHIR providers (in-memory + SQLite). `ActClassExposure`
 ;; sits one level under `ActClass`.
@@ -54,6 +72,39 @@
    "content"       "complete" "caseSensitive" true
    "concept"       [{"code" "OV1" "display" "Overlay One"}]})
 
+(def ^:private case-insensitive-cs-url "http://example.com/tx/case-insensitive-cs")
+(def ^:private case-insensitive-vs-url "http://example.com/tx/case-insensitive-vs")
+(def ^:private case-insensitive-cs
+  {"resourceType" "CodeSystem"
+   "url" case-insensitive-cs-url "version" "1.0" "status" "active"
+   "content" "complete" "caseSensitive" false
+   "concept" [{"code" "code1" "display" "Display 1"}]})
+(def ^:private case-insensitive-vs
+  {"resourceType" "ValueSet"
+   "url" case-insensitive-vs-url "version" "1.0" "status" "active"
+   "compose" {"include" [{"system" case-insensitive-cs-url}]}})
+
+(def ^:private unsupported-loinc-filter-vs
+  {"resourceType" "ValueSet"
+   "url" "http://example.com/vs/unsupported-loinc-filter"
+   "status" "active"
+   "compose" {"include" [{"system" loinc-system
+                          "filter" [{"property" "not-a-loinc-filter"
+                                     "op" "="
+                                     "value" "x"}]}]}})
+
+(def ^:private tx-benchmark-ex07-vs
+  {"resourceType" "ValueSet"
+   "compose" {"include" [{"system" snomed-system}
+                         {"system" loinc-system}
+                         {"system" "http://www.nlm.nih.gov/research/umls/rxnorm"}]}})
+
+(def ^:private ips-pregnancy-status-map
+  "http://hl7.org/fhir/uv/ips/ConceptMap/loinc-pregnancy-status-to-snomed-ct-uv-ips")
+
+(def ^:private ips-smoking-status-map
+  "http://hl7.org/fhir/uv/ips/ConceptMap/loinc-smoking-status-to-snomed-ct-uv-ips")
+
 ;; ---------------------------------------------------------------------------
 ;; Body inspectors. Each predicate takes the parsed JSON body and
 ;; returns truthy on match. Mirrors the helpers in
@@ -68,8 +119,96 @@
 (defn- result-false? [body] (false? (get (get-param body "result") "valueBoolean")))
 (defn- has-issues?   [body] (some? (get (get-param body "issues") "resource")))
 (defn- has-display?  [body] (some? (get (get-param body "display") "valueString")))
+(defn- parameters-resource? [body] (= "Parameters" (get body "resourceType")))
 (defn- operation-outcome? [body] (= "OperationOutcome" (get body "resourceType")))
 (defn- valueset-resource? [body] (= "ValueSet" (get body "resourceType")))
+
+(defn- lookup-display [body] (get (get-param body "display") "valueString"))
+
+(defn- param-value
+  [body nm value-key]
+  (get (get-param body nm) value-key))
+
+(defn- param-value=? [nm value-key expected]
+  (fn [body] (= expected (param-value body nm value-key))))
+
+(defn- operation-outcome-detail-codes [body]
+  (into #{}
+        (keep (fn [issue]
+                (some #(get % "code") (get-in issue ["details" "coding"]))))
+        (get body "issue")))
+
+(defn- operation-outcome-has-detail-code? [code]
+  (fn [body] (contains? (operation-outcome-detail-codes body) code)))
+
+(defn- translate-match-codes
+  "Return the target concept codes in a $translate Parameters body."
+  [body]
+  (into #{}
+        (keep (fn [p]
+                (when (= "match" (get p "name"))
+                  (some (fn [pp]
+                          (when (= "concept" (get pp "name"))
+                            (get-in pp ["valueCoding" "code"])))
+                        (get p "part")))))
+        (get body "parameter")))
+
+(defn- translate-match-code? [code]
+  (fn [body] (contains? (translate-match-codes body) code)))
+
+(defn- translate-matches
+  [body]
+  (mapv (fn [p]
+          (let [parts (get p "part")
+                equivalence (some #(when (= "equivalence" (get % "name"))
+                                      (get % "valueCode"))
+                                  parts)
+                coding (some #(when (= "concept" (get % "name"))
+                                (get % "valueCoding"))
+                             parts)]
+            {:equivalence equivalence
+             :system (get coding "system")
+             :code (get coding "code")}))
+        (filter #(= "match" (get % "name")) (get body "parameter"))))
+
+(defn- translate-match?
+  [expected]
+  (fn [body] (some #(= expected (select-keys % (keys expected)))
+                   (translate-matches body))))
+
+(defn- expansion-codes
+  "Return the set of `code` strings in `expansion.contains` of a
+  `$expand` ValueSet response body."
+  [body]
+  (into #{} (keep #(get % "code")) (get-in body ["expansion" "contains"] [])))
+
+(defn- expansion-has-results? [body]
+  (seq (get-in body ["expansion" "contains"])))
+
+(defn- expansion-total [body]
+  (get-in body ["expansion" "total"]))
+
+(defn- expansion-total-at-least? [minimum]
+  (fn [body]
+    (let [total (expansion-total body)]
+      (and (integer? total) (<= minimum total)))))
+
+(defn- expansion-contains?
+  "Predicate: every code in `required` appears in the response's
+  expansion.contains. Locks down `$expand` cases that need to confirm a
+  filter / compose include actually surfaced specific concepts (not just
+  that the body shape is a ValueSet)."
+  [required]
+  (fn [body]
+    (let [present (expansion-codes body)]
+      (every? present required))))
+
+(defn- display-equals?
+  "Predicate: `$lookup`'s `display` parameter equals `expected`. Used to
+  confirm the right designation type was selected — distinct from
+  `has-display?`, which only checks presence."
+  [expected]
+  (fn [body] (= expected (lookup-display body))))
 
 (defn- issues-of-severity?
   "Truthy when the `issues` Parameters part carries at least one
@@ -78,8 +217,15 @@
   (some (fn [iss] (= severity (get iss "severity")))
         (get-in (get (get-param body "issues") "resource") ["issue"] [])))
 
+(defn- parameter-issue-detail-codes [body]
+  (into #{}
+        (keep (fn [issue]
+                (some #(get % "code") (get-in issue ["details" "coding"]))))
+        (get-in (get (get-param body "issues") "resource") ["issue"] [])))
+
 (defn- has-warning-issue? [body] (issues-of-severity? body "warning"))
 (defn- has-error-issue?   [body] (issues-of-severity? body "error"))
+(defn- has-information-issue? [body] (issues-of-severity? body "information"))
 
 (defn- property-codes
   "Return the set of property codes returned in a $lookup Parameters
@@ -257,12 +403,40 @@
         (is (has-warning-issue? body) (str label " — warning issue expected")))
       (when (:error? expect)
         (is (has-error-issue? body) (str label " — error issue expected")))
+      (when (:information? expect)
+        (is (has-information-issue? body) (str label " — information issue expected")))
       (when (:display? expect)
         (is (has-display? body) (str label " — display parameter expected")))
+      (when (:parameters? expect)
+        (is (parameters-resource? body) (str label " — Parameters body expected")))
       (when (:outcome? expect)
         (is (operation-outcome? body) (str label " — OperationOutcome body expected")))
+      (when-let [code (:outcome-detail-code expect)]
+        (is ((operation-outcome-has-detail-code? code) body)
+            (str label " — OperationOutcome detail code=" code
+                 " expected; got " (operation-outcome-detail-codes body))))
       (when (:valueset? expect)
         (is (valueset-resource? body) (str label " — ValueSet body expected")))
+      (when (:expansion-results? expect)
+        (is (expansion-has-results? body)
+            (str label " — non-empty expansion expected")))
+      (when-let [minimum (:expansion-total-at-least expect)]
+        (is ((expansion-total-at-least? minimum) body)
+            (str label " — expansion.total >= " minimum
+                 " expected; got " (pr-str (expansion-total body)))))
+      (when-let [expected (:param-code expect)]
+        (is ((param-value=? "code" "valueCode" expected) body)
+            (str label " — Parameters code=" expected " expected")))
+      (when-let [expected (:param-system expect)]
+        (is ((param-value=? "system" "valueUri" expected) body)
+            (str label " — Parameters system=" expected " expected")))
+      (when-let [expected (:normalized-code expect)]
+        (is ((param-value=? "normalized-code" "valueCode" expected) body)
+            (str label " — Parameters normalized-code=" expected " expected")))
+      (when-let [expected (:issue-detail-code expect)]
+        (is (contains? (parameter-issue-detail-codes body) expected)
+            (str label " — Parameters issues detail code=" expected
+                 " expected; got " (parameter-issue-detail-codes body))))
       (when-let [oc (:subsumes expect)]
         (is ((subsumes-outcome=? oc) body)
             (str label " — subsumes outcome=" oc " expected")))
@@ -277,7 +451,23 @@
       (when-let [required (:contains-property-codes expect)]
         (is ((contains-property-codes? required) body)
             (str label " — all of " required " expected; got "
-                 (property-codes body)))))))
+                 (property-codes body))))
+      (when-let [required (:expansion-contains expect)]
+        (is ((expansion-contains? required) body)
+            (str label " — expansion expected to contain " required
+                 "; got " (expansion-codes body))))
+      (when-let [d (:display-equals expect)]
+        (is ((display-equals? d) body)
+            (str label " — expected display=" (pr-str d)
+                 ", got " (pr-str (lookup-display body)))))
+      (when-let [code (:translate-match-code expect)]
+        (is ((translate-match-code? code) body)
+            (str label " — translate expected match code=" code
+                 "; got " (translate-match-codes body))))
+      (when-let [match (:translate-match expect)]
+        (is ((translate-match? match) body)
+            (str label " — translate expected match " match
+                 "; got " (translate-matches body)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Matrix — one row per case. New cases are a new row.
@@ -348,7 +538,7 @@
    {:terminology :snomed :method :get  :op :cm-translate
     :url "http://example.com/fake-cm"
     :system snomed-system :code "73211009" :target snomed-system
-    :expect {:status 404 :outcome? true}}
+    :expect {:status 200 :result false :issues? true}}
 
    ;; $lookup with `property=` filter — restricts which property/slice
    ;; codes the response carries. Spec: "A property... that the client
@@ -403,6 +593,14 @@
     :system loinc-system :code "8480-6"
     :expect {:status 200 :display? true}}
 
+   {:terminology :loinc :method :get  :op :cs-lookup
+    :system loinc-system :code "8867-4"
+    :reason "tx-benchmark LK02 preflight: Heart rate lookup echoes code + system"
+    :expect {:status 200
+             :parameters? true
+             :param-code "8867-4"
+             :param-system loinc-system}}
+
    {:terminology :loinc :method :post :op :cs-lookup
     :system loinc-system :code "8480-6"
     :expect {:status 200 :display? true}}
@@ -422,7 +620,172 @@
 
    {:terminology :loinc :method :get  :op :cs-lookup
     :system loinc-system :code "0000000-0"
-    :expect {:status 404 :outcome? true}}])
+    :expect {:status 404 :outcome? true}}
+
+   {:terminology :loinc :method :get  :op :cm-translate
+    :url "http://loinc.org/cm/map-to"
+    :system loinc-system :code "1009-0" :target loinc-system
+    :reason "MapTo.csv replacement ConceptMap"
+    :expect {:status 200 :result true :translate-match-code "1007-4"}}
+
+   {:terminology :loinc :method :post :op :cm-translate
+    :url "http://loinc.org/cm/map-to"
+    :system loinc-system :code "1009-0" :target loinc-system
+    :reason "MapTo.csv replacement ConceptMap via POST Parameters"
+    :expect {:status 200 :result true :translate-match-code "1007-4"}}
+
+   {:terminology :loinc :method :get  :op :cm-translate
+    :url loinc-part-snomed-map
+    :system loinc-system :code "LP14449-0" :target snomed-system
+    :reason "PartRelatedCodeMapping.csv forward external mapping"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "equivalent"
+                               :system snomed-system
+                               :code "38082009"}}}
+
+   {:terminology :loinc :method :get  :op :cm-translate
+    :url loinc-part-snomed-map
+    :system snomed-system :code "38082009" :target loinc-system
+    :reason "PartRelatedCodeMapping.csv reverse external mapping"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "equivalent"
+                               :system loinc-system
+                               :code "LP14449-0"}}}
+
+   {:terminology :loinc :method :post :op :cm-translate
+    :url loinc-part-snomed-map
+    :system snomed-system :code "38082009" :target loinc-system
+    :reason "PartRelatedCodeMapping.csv reverse external mapping via POST Parameters"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "equivalent"
+                               :system loinc-system
+                               :code "LP14449-0"}}}
+
+   {:terminology :loinc :method :get  :op :cm-translate
+    :url loinc-part-snomed-map
+    :system loinc-system :code "LP14448-2" :target snomed-system
+    :reason "PartRelatedCodeMapping.csv preserves wider equivalence"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "wider"
+                               :system snomed-system
+                               :code "38082009"}}}
+
+   {:terminology :loinc :method :get  :op :cm-translate
+    :url loinc-part-snomed-map
+    :system snomed-system :code "38082009" :target loinc-system
+    :reason "PartRelatedCodeMapping.csv inverts wider to narrower in reverse"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "narrower"
+                               :system loinc-system
+                               :code "LP14448-2"}}}
+
+   {:terminology :loinc :method :get  :op :cm-translate
+    :url loinc-ieee-map
+    :system loinc-system :code "11556-8" :target ieee-system
+    :reason "IEEE medical device mapping forward"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "equivalent"
+                               :system ieee-system
+                               :code "160116"}}}
+
+   {:terminology :loinc :method :post :op :cm-translate
+    :url loinc-ieee-map
+    :system loinc-system :code "11556-8" :target ieee-system
+    :reason "IEEE medical device mapping forward via POST Parameters"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "equivalent"
+                               :system ieee-system
+                               :code "160116"}}}
+
+   {:terminology :loinc :method :get  :op :cm-translate
+    :url loinc-rsna-rid-map
+    :system loinc-system :code "24531-6" :target radlex-system
+    :reason "RSNA playbook RID mapping forward"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "relatedto"
+                               :system radlex-system
+                               :code "RID431"}}}
+
+   {:terminology :loinc :method :get  :op :cm-translate
+    :url loinc-rsna-rpid-map
+    :system rsna-playbook-system :code "RPID2142" :target loinc-system
+    :reason "RSNA playbook RPID mapping reverse"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "relatedto"
+                               :system loinc-system
+                               :code "24531-6"}}}
+
+   {:terminology :loinc :method :get :op :cm-translate
+    :url ips-pregnancy-status-map
+    :system loinc-system :code "LA15173-0" :target snomed-system
+    :reason "tx-benchmark CM02 IPS LOINC pregnancy status map"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "equivalent"
+                               :system snomed-system
+                               :code "77386006"}}}
+
+   {:terminology :loinc :method :get :op :cm-translate
+    :url ips-smoking-status-map
+    :system loinc-system :code "LA18976-3" :target snomed-system
+    :reason "tx-benchmark CM02 IPS LOINC smoking status map"
+    :expect {:status 200 :result true
+             :translate-match {:equivalence "equivalent"
+                               :system snomed-system
+                               :code "449868002"}}}
+
+   ;; --- displayLanguage: $lookup must pick LONG_COMMON_NAME, not the
+   ;; first-by-row designation (which is CLASS — a LOINC axis). The de-DE
+   ;; designations for 718-7 are: CLASS, COMPONENT, LONG_COMMON_NAME,
+   ;; PROPERTY, SCALE_TYP, SYSTEM, TIME_ASPCT — all language-matched
+   ;; equally; the picker must rank by use_code, not insertion order.
+   {:terminology :loinc :method :get  :op :cs-lookup
+    :system loinc-system :code loinc-hgb-code
+    :extras {:displayLanguage "de-DE"}
+    :reason "displayLanguage=de-DE → German LONG_COMMON_NAME, not CLASS axis"
+    :expect {:status 200 :display-equals loinc-hgb-de-display}}
+
+   ;; --- ValueSet $expand: full-stack compose path through observation-codes.
+   ;; Both cases are designed to surface the compose-layer post-filter
+   ;; bug: cs-expand* matches on a non-English designation (en-AU
+   ;; LinguisticVariantDisplayName for "Haemoglobin", or both tokens
+   ;; across the primary display for "hemoglobin blood"), then the
+   ;; compose post-filter re-checks `str/includes?` against the English
+   ;; primary display and drops the match.
+   {:terminology :loinc :method :get  :op :vs-expand
+    :url loinc-observation-vs
+    :extras {:filter "Haemoglobin" :count "50"}
+    :reason "British 'Haemoglobin' (designation match) must survive compose"
+    :expect {:status 200 :valueset? true
+             :expansion-contains #{loinc-hgb-code}}}
+
+   {:terminology :loinc :method :get  :op :vs-expand
+    :url loinc-observation-vs
+    :extras {:filter "hemoglobin blood" :count "50"}
+    :reason "multi-token AND across display must survive compose"
+    :expect {:status 200 :valueset? true
+             :expansion-contains #{loinc-hgb-code}}}
+
+   ;; --- Implicit all-LOINC ValueSet URL. The LOINC IG defines this URL
+   ;; as the all-LOINC implicit set.
+   {:terminology :loinc :method :get  :op :vs-expand
+    :url loinc-implicit-vs
+   :extras {:filter "hemoglobin" :count "5"}
+   :reason "implicit http://loinc.org/vs must resolve to all-of-LOINC"
+   :expect {:status 200 :valueset? true
+             :expansion-total-at-least 6
+             :expansion-contains #{loinc-hgb-code}}}
+
+   {:terminology :loinc :method :post :op :vs-expand
+    :extra-params [{:name "valueSet" :resource tx-benchmark-ex07-vs}
+                   {:name "filter" :value "amphetamine"}
+                   {:name "count" :value 200}]
+    :reason "tx-benchmark EX07 preflight: ad-hoc multi-system text expansion"
+    :expect {:status 200 :valueset? true :expansion-results? true}}
+
+   {:terminology :loinc :method :post :op :vs-expand
+    :extra-params [{:name "valueSet" :resource unsupported-loinc-filter-vs}]
+    :reason "unsupported compose filters surface an error, not an empty expansion"
+    :expect {:status 422 :outcome? true :outcome-detail-code "vs-invalid"}}])
 
 (def ^:private fhir-cases
   [{:terminology :fhir :method :get  :op :cs-lookup
@@ -519,7 +882,32 @@
    {:terminology :overlay :method :get  :op :cs-validate-code
     :system overlay-cs-url :code "OV1"
     :reason "without tx-resource the overlay system is unknown — no leakage"
-    :expect {:status 200 :result false :issues? true}}])
+    :expect {:status 200 :result false :issues? true}}
+
+   {:terminology :overlay :method :post :op :vs-validate-code
+    :system case-insensitive-cs-url :code "CODE1"
+    :extra-params [{:name "valueSet" :resource case-insensitive-vs}
+                   {:name "tx-resource" :resource case-insensitive-cs}]
+    :reason "conformance case/case-insensitive-code1-*: wrong-case code validates with normalized-code"
+    :expect {:status 200
+             :result true
+             :normalized-code "code1"
+             :information? true
+             :issue-detail-code "code-rule"}}
+
+   {:terminology :overlay :method :post :op :vs-validate-code
+    :url case-insensitive-vs-url
+    :extra-params [{:name "coding"
+                    :value-key "valueCoding"
+                    :value {:system case-insensitive-cs-url :code "CODE1"}}
+                   {:name "tx-resource" :resource case-insensitive-cs}
+                   {:name "tx-resource" :resource case-insensitive-vs}]
+    :reason "tx-ecosystem case/case-insensitive-code1-2: Coding input preserves informational case issue"
+    :expect {:status 200
+             :result true
+             :normalized-code "code1"
+             :information? true
+             :issue-detail-code "code-rule"}}])
 
 (def ^:private all-cases
   (into [] cat [snomed-cases loinc-cases fhir-cases tx-resource-cases]))
