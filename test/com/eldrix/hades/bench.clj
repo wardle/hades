@@ -21,6 +21,11 @@
 (def ^:private radlex-uri "http://www.radlex.org")
 (def ^:private rsna-playbook-uri "http://www.rsna.org/RadLex_Playbook")
 
+(def ^:private loinc-lk02-pool
+  ["8867-4" "718-7" "4548-4" "11556-8" "1009-0"
+   "8310-5" "8302-2" "8480-6" "8462-4" "9279-1"
+   "29463-7" "39156-5" "2339-0" "6690-2"])
+
 ;; ─── Well-known SNOMED anchors ─────────────────────────────────────────────
 
 (def ^:private diabetes-mellitus  73211009)
@@ -60,6 +65,11 @@
    {:id :lookup/loinc :tx-bench "LK02"
     :fn (fn [svc]
           (hades/lookup svc {:system loinc-uri :code "8867-4"}))}
+   {:id :lookup/loinc-all :tx-bench "LK02"
+    :fn (fn [svc]
+          (run! (fn [code]
+                  (hades/lookup svc {:system loinc-uri :code code}))
+                loinc-lk02-pool))}
    {:id :lookup/nonexistent :tx-bench "LK05"
     :fn (fn [svc]
           (hades/lookup svc {:system snomed-uri :code "999973211009"}))}

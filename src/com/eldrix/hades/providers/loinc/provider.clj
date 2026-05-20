@@ -9,7 +9,8 @@
             [com.eldrix.hades.providers.loinc.store :as store]
             [next.jdbc :as jdbc]
             [next.jdbc.result-set :as rs])
-  (:import (java.io Closeable)))
+  (:import (java.io Closeable)
+           (java.util Locale)))
 
 (set! *warn-on-reflection* true)
 
@@ -30,6 +31,9 @@
   (or (true? v)
       (and (number? v) (not (zero? v)))))
 
+(defn- canonical-code [code]
+  (some-> code str (.toUpperCase Locale/ROOT)))
+
 (defn- meta-value [ds k]
   (:value (jdbc/execute-one! ds
                              ["SELECT value FROM meta WHERE key = ?" (name k)]
@@ -39,7 +43,7 @@
   (jdbc/execute-one! conn
                      ["SELECT *
                        FROM loinc
-                       WHERE loinc_num = ? COLLATE NOCASE"
+                       WHERE loinc_num = ?"
                       code]
                      (row-builder)))
 
@@ -407,24 +411,27 @@
   subsumption hierarchy spans both, so existence-checking subsumes
   inputs must consider both tables."
   [conn code]
-  (boolean
-    (or (jdbc/execute-one! conn
-          ["SELECT 1 FROM loinc WHERE loinc_num = ? COLLATE NOCASE" code])
-        (jdbc/execute-one! conn
-          ["SELECT 1 FROM component_hierarchy_by_system
-            WHERE code = ? OR immediate_parent = ? LIMIT 1" code code]))))
+  (let [code (canonical-code code)]
+    (boolean
+     (or (jdbc/execute-one! conn
+                            ["SELECT 1 FROM loinc WHERE loinc_num = ?" code])
+         (jdbc/execute-one! conn
+                            ["SELECT 1 FROM component_hierarchy_by_system
+                              WHERE code = ? OR immediate_parent = ? LIMIT 1" code code])))))
 
 (defn- hierarchy-related? [conn ancestor descendant include-self?]
-  (or (and include-self? (= ancestor descendant))
-      (boolean
-       (jdbc/execute-one! conn
-                          [(str "SELECT 1 FROM component_hierarchy_by_system"
-                                " WHERE code = ? AND "
-                                (hierarchy-token-clause "immediate_parent")
-                                " LIMIT 1")
-                           descendant ancestor ancestor (str ancestor ".%")
-                           (str "%." ancestor) (str "%." ancestor ".%")]
-                          (row-builder)))))
+  (let [ancestor (canonical-code ancestor)
+        descendant (canonical-code descendant)]
+    (or (and include-self? (= ancestor descendant))
+        (boolean
+         (jdbc/execute-one! conn
+                            [(str "SELECT 1 FROM component_hierarchy_by_system"
+                                  " WHERE code = ? AND "
+                                  (hierarchy-token-clause "immediate_parent")
+                                  " LIMIT 1")
+                             descendant ancestor ancestor (str ancestor ".%")
+                             (str "%." ancestor) (str "%." ancestor ".%")]
+                            (row-builder))))))
 
 (defn- wanted-properties [row part-by-type {:keys [want? want-typed?]}]
   (when want-typed?
@@ -437,7 +444,7 @@
   (jdbc/execute-one! conn
                      ["SELECT answer_string_id, display_text
                        FROM answer_list
-                       WHERE answer_string_id = ? COLLATE NOCASE
+                       WHERE answer_string_id = ?
                        LIMIT 1"
                       code]
                      (row-builder)))
@@ -446,7 +453,7 @@
   (jdbc/execute-one! conn
                      ["SELECT part_number, part_name, part_display_name, status
                        FROM part
-                       WHERE part_number = ? COLLATE NOCASE
+                       WHERE part_number = ?
                        LIMIT 1"
                       code]
                      (row-builder)))
@@ -455,7 +462,7 @@
   (jdbc/execute-one! conn
                      ["SELECT group_id, group_name, status
                        FROM loinc_group
-                       WHERE group_id = ? COLLATE NOCASE
+                       WHERE group_id = ?
                        LIMIT 1"
                       code]
                      (row-builder)))
@@ -526,59 +533,59 @@
     (if (not= loinc-url system)
       (issues/unknown-system-lookup system code)
       (with-open [conn (jdbc/get-connection ds)]
-        (if-let [row (code-row conn code)]
-          (let [{:keys [want?] :as property-filter} (property-filter/parse properties)
-                display-langs (display/parse-display-language displayLanguage)
-                variant-rows (when (or (want? "designation")
-                                       (seq display-langs))
-                               (fetch-variant-rows conn (:loinc_num row)
-                                                   (when (seq display-langs)
-                                                     (mapv :lang display-langs))))
-                designations (variant-designations variant-rows)
-                lang-display (preferred-designation designations display-langs)
-                parents (when (want? "parent")
-                          (fetch-parents conn (:loinc_num row)))
-                children (when (want? "child")
-                           (fetch-children conn (:loinc_num row)))
-                part-by-type (when (:want-typed? property-filter)
-                               (fetch-primary-parts conn row))
-                inactive? (= "DEPRECATED" (:status row))]
-            (cond-> {:name "LOINC"
-                     :version version
-                     :display (or lang-display (:long_common_name row))
-                     :system loinc-url
-                     :code (:loinc_num row)
-                     :definition (variant-value row :definition_description)
-                     :abstract false
-                     :properties (vec
-                                  (concat
-                                   (wanted-properties row part-by-type property-filter)
-                                   (when (and inactive? (want? "inactive"))
-                                     [{:code :inactive :value true}])
-                                   (map (fn [{:keys [code display]}]
-                                          {:code :parent
-                                           :value {:system loinc-url
-                                                   :code code
-                                                   :display display}})
-                                        parents)
-                                   (map (fn [{:keys [code display]}]
-                                          {:code :child
-                                           :value {:system loinc-url
-                                                   :code code
-                                                   :display display}})
-                                        children)))
-                     :designations (if (want? "designation")
-                                     designations
-                                     [])}
-             inactive? (assoc :inactive true :inactive-status "inactive")))
-          (if-let [row (answer-code-row conn code)]
-            (answer-lookup-result row version)
-            (if-let [row (part-code-row conn code)]
-              (part-lookup-result row version)
-              (if-let [row (group-code-row conn code)]
-                (group-lookup-result row version)
-                (issues/unknown-code-lookup loinc-url code))))
-          ))))
+        (let [code' (canonical-code code)]
+          (if-let [row (code-row conn code')]
+            (let [{:keys [want?] :as property-filter} (property-filter/parse properties)
+                  display-langs (display/parse-display-language displayLanguage)
+                  variant-rows (when (or (want? "designation")
+                                         (seq display-langs))
+                                 (fetch-variant-rows conn (:loinc_num row)
+                                                     (when (seq display-langs)
+                                                       (mapv :lang display-langs))))
+                  designations (variant-designations variant-rows)
+                  lang-display (preferred-designation designations display-langs)
+                  parents (when (want? "parent")
+                            (fetch-parents conn (:loinc_num row)))
+                  children (when (want? "child")
+                             (fetch-children conn (:loinc_num row)))
+                  part-by-type (when (:want-typed? property-filter)
+                                 (fetch-primary-parts conn row))
+                  inactive? (= "DEPRECATED" (:status row))]
+              (cond-> {:name "LOINC"
+                       :version version
+                       :display (or lang-display (:long_common_name row))
+                       :system loinc-url
+                       :code (:loinc_num row)
+                       :definition (variant-value row :definition_description)
+                       :abstract false
+                       :properties (vec
+                                    (concat
+                                     (wanted-properties row part-by-type property-filter)
+                                     (when (and inactive? (want? "inactive"))
+                                       [{:code :inactive :value true}])
+                                     (map (fn [{:keys [code display]}]
+                                            {:code :parent
+                                             :value {:system loinc-url
+                                                     :code code
+                                                     :display display}})
+                                          parents)
+                                     (map (fn [{:keys [code display]}]
+                                            {:code :child
+                                             :value {:system loinc-url
+                                                     :code code
+                                                     :display display}})
+                                          children)))
+                       :designations (if (want? "designation")
+                                       designations
+                                       [])}
+                inactive? (assoc :inactive true :inactive-status "inactive")))
+            (if-let [row (answer-code-row conn code')]
+              (answer-lookup-result row version)
+              (if-let [row (part-code-row conn code')]
+                (part-lookup-result row version)
+                (if-let [row (group-code-row conn code')]
+                  (group-lookup-result row version)
+                  (issues/unknown-code-lookup loinc-url code)))))))))
 
   (cs-validate-code [this {:keys [system code display displayLanguage]}]
     (if-let [r (protos/cs-lookup this {:system system :code code :displayLanguage displayLanguage
@@ -607,18 +614,20 @@
 
   (cs-subsumes [_ {:keys [codeA codeB]}]
     (with-open [conn (jdbc/get-connection ds)]
-      (cond
-        (not (code-exists? conn codeA))
-        (issues/unknown-code-subsumes loinc-url codeA "codeA")
-        (not (code-exists? conn codeB))
-        (issues/unknown-code-subsumes loinc-url codeB "codeB")
-        :else
-        {:outcome
-         (cond
-           (= codeA codeB) "equivalent"
-           (hierarchy-related? conn codeA codeB false) "subsumes"
-           (hierarchy-related? conn codeB codeA false) "subsumed-by"
-           :else "not-subsumed")})))
+      (let [codeA' (canonical-code codeA)
+            codeB' (canonical-code codeB)]
+        (cond
+          (not (code-exists? conn codeA'))
+          (issues/unknown-code-subsumes loinc-url codeA "codeA")
+          (not (code-exists? conn codeB'))
+          (issues/unknown-code-subsumes loinc-url codeB "codeB")
+          :else
+          {:outcome
+           (cond
+             (= codeA' codeB') "equivalent"
+             (hierarchy-related? conn codeA' codeB' false) "subsumes"
+             (hierarchy-related? conn codeB' codeA' false) "subsumed-by"
+             :else "not-subsumed")}))))
 
   (cs-expand* [_ {:keys [system text displayLanguage filters active-only max-hits]
                   requested-version :version}]
@@ -1239,10 +1248,11 @@
              :system system
              :code code
              :message (str "CodeSystem '" system "' is not valid for LOINC hierarchy " id)}
-            (let [result (hierarchy-related? ds id code false)]
+            (let [code' (canonical-code code)
+                  result (hierarchy-related? ds id code' false)]
               (cond-> {:result result
                        :system loinc-url
-                       :code code
+                       :code code'
                        :version version}
                 (not result) (assoc :message (str "Code '" code "' is not in LOINC hierarchy " id))))))
 
@@ -1257,8 +1267,8 @@
                                          ["SELECT loinc_number, long_common_name
                                            FROM group_loinc_term
                                            WHERE group_id = ?
-                                             AND loinc_number = ? COLLATE NOCASE"
-                                          id code]
+                                             AND loinc_number = ?"
+                                          id (canonical-code code)]
                                          (row-builder))]
               (if row
                 (validation-result loinc-url (:loinc_number row) {:display (:long_common_name row)}
@@ -1279,8 +1289,8 @@
                                             ["SELECT answer_string_id, display_text
                                               FROM answer_list
                                               WHERE answer_list_id = ?
-                                                AND answer_string_id = ? COLLATE NOCASE"
-                                             id code]
+                                                AND answer_string_id = ?"
+                                             id (canonical-code code)]
                                             (row-builder))]
               (validation-result loinc-url (:answer_string_id row) {:display (:display_text row)}
                                  version params)
@@ -1391,9 +1401,9 @@
                  ["SELECT m.map_to, t.long_common_name, t.status
                    FROM map_to m
                    LEFT JOIN loinc t ON t.loinc_num = m.map_to
-                   WHERE m.loinc = ? COLLATE NOCASE
+                   WHERE m.loinc = ?
                    ORDER BY m.map_to"
-                  code]
+                  (canonical-code code)]
                  (row-builder)))
 
 (defn- translate-map-to [ds code]
@@ -1414,9 +1424,9 @@
                     ["SELECT ext_code_id, ext_code_display_name, equivalence, ext_code_system_version
                       FROM part_related_code_mapping
                       WHERE ext_code_system = ?
-                        AND part_number = ? COLLATE NOCASE
+                        AND part_number = ?
                       ORDER BY ext_code_id"
-                     target-system code]
+                     target-system (canonical-code code)]
                     (row-builder))
      (fn [{:keys [ext_code_id ext_code_display_name equivalence ext_code_system_version]}]
        (cond-> {:equivalence equivalence
@@ -1446,9 +1456,9 @@
        (jdbc/execute! ds
                       ["SELECT ieee_cf_code10, ieee_refid, equivalence
                         FROM loinc_ieee_medical_device_mapping
-                        WHERE loinc_num = ? COLLATE NOCASE
+                        WHERE loinc_num = ?
                         ORDER BY ieee_cf_code10, ieee_refid"
-                       code]
+                       (canonical-code code)]
                       (row-builder))
        (fn [{:keys [ieee_cf_code10 ieee_refid equivalence]}]
          (cond-> {:equivalence equivalence
@@ -1477,10 +1487,10 @@
        (jdbc/execute! ds
                       ["SELECT DISTINCT rid, preferred_name
                         FROM loinc_rsna_radiology_playbook
-                        WHERE loinc_number = ? COLLATE NOCASE
+                        WHERE loinc_number = ?
                           AND rid IS NOT NULL AND rid <> ''
                         ORDER BY rid"
-                       code]
+                       (canonical-code code)]
                       (row-builder))
        (fn [{:keys [rid preferred_name]}]
          (cond-> {:equivalence "relatedto"
@@ -1508,10 +1518,10 @@
        (jdbc/execute! ds
                       ["SELECT DISTINCT rpid, long_name
                         FROM loinc_rsna_radiology_playbook
-                        WHERE loinc_number = ? COLLATE NOCASE
+                        WHERE loinc_number = ?
                           AND rpid IS NOT NULL AND rpid <> ''
                         ORDER BY rpid"
-                       code]
+                       (canonical-code code)]
                       (row-builder))
        (fn [{:keys [rpid long_name]}]
          (cond-> {:equivalence "relatedto"
