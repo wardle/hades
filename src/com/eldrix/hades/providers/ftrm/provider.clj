@@ -14,7 +14,8 @@
                                                 displayLanguage selection
     - `cs-expand*`                      — FTS + filter pushdown
     - `cs-subsumes`                          — closure-table lookup
-    - `vs-expand`, `vs-validate-code`        — delegated to compose engine
+    - `vs-expand`, `vs-validate-code`        — stored-membership fast path,
+                                                then delegated to compose engine
     - `cm-translate`                         — direct point query
 
   Behavioural fidelity still trails the in-memory provider on
@@ -851,8 +852,9 @@
     (let [entry (lookup-entry cache (:url params)
                               (or (:valueSetVersion params) (params-version params)))
           expanding (conj (or (:expanding params) #{}) (:url params))]
-      (compose/expand-compose svc (:compose entry)
-        (assoc params :expanding expanding :purpose :expand))))
+      (or (compose/stored-extensional-expand (:compose entry) params)
+          (compose/expand-compose svc (:compose entry)
+            (assoc params :expanding expanding :purpose :expand)))))
 
   (vs-validate-code [_ svc params]
     (when-let [entry (lookup-entry cache (:url params)

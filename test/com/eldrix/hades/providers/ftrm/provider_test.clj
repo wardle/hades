@@ -6,6 +6,7 @@
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.protocols.result :as result]
             [com.eldrix.hades.providers.common.fhir-loader :as loaders-fhir]
+            [com.eldrix.hades.providers.ftrm.db :as ftrm-db]
             [com.eldrix.hades.providers.ftrm.index :as ftrm-index]
             [com.eldrix.hades.providers.ftrm.provider :as ftrm-provider])
   (:import (java.io File)))
@@ -44,6 +45,23 @@
     {:loader-type "synthetic-multilang"})
   (ftrm-index/index! path))
 
+(def stored-vs-data
+  [{:type :valueset
+    :url "http://example.org/vs/stored"
+    :version "1.0"
+    :metadata {"status" "active"}
+    :compose {"include"
+              [{"system" "http://example.org/cs/external"
+                "concept" [{"code" "alpha" "display" "Alpha"}
+                           {"code" "bravo" "display" "Bravo"
+                            "designation" [{"language" "en"
+                                            "value" "Bravo stored EN"}]}
+                           {"code" "charlie" "display" "Charlie"}
+                           {"code" "delta" "display" "Delta"}]}]}}])
+
+(defn- build-stored-vs-db [path]
+  (ftrm-index/build! path stored-vs-data {:loader-type "synthetic-stored-vs"}))
+
 (deftest cs-lookup-respects-displayLanguage
   (let [path (new-temp-path)]
     (try
@@ -68,6 +86,50 @@
                     {:system "http://example.org/cs/colours" :code "red"
                      :displayLanguage "de;q=1.0,cy;q=0.5"})]
             (is (= "Coch" (:display r))))))
+      (finally (delete-quietly path)))))
+
+(deftest stored-extensional-vs-expand-uses-stored-membership
+  (let [path (new-temp-path)]
+    (try
+      (build-stored-vs-db path)
+      (let [{:keys [valueset datasource]} (ftrm-provider/open-providers path)
+            svc (composite/from-providers [valueset])]
+        (try
+          (testing "no displayLanguage pages stored membership and reports pre-page total"
+            (let [{:keys [concepts total used-codesystems compose-pins]}
+                  (protos/vs-expand valueset svc {:url "http://example.org/vs/stored"
+                                                  :offset 1
+                                                  :count 2})]
+              (is (= 4 total))
+              (is (= ["bravo" "charlie"] (mapv :code concepts)))
+              (is (= ["Bravo" "Charlie"] (mapv :display concepts)))
+              (is (= [{:uri "http://example.org/cs/external"}] used-codesystems))
+              (is (empty? compose-pins))))
+          (testing "displayLanguage is answered from embedded designations"
+            (let [{:keys [concepts display-language]}
+                  (protos/vs-expand valueset svc {:url "http://example.org/vs/stored"
+                                                  :displayLanguage "en"
+                                                  :offset 1
+                                                  :count 1})]
+              (is (= "en" display-language))
+              (is (= ["Bravo stored EN"] (mapv :display concepts)))))
+          (testing "wildcard displayLanguage does not create a display preference"
+            (let [{:keys [concepts display-language]}
+                  (protos/vs-expand valueset svc {:url "http://example.org/vs/stored"
+                                                  :displayLanguage "*"
+                                                  :offset 1
+                                                  :count 1})]
+              (is (nil? display-language))
+              (is (= ["Bravo"] (mapv :display concepts)))))
+          (testing "filter matches stored code and display before pagination"
+            (let [{:keys [concepts total]}
+                  (protos/vs-expand valueset svc {:url "http://example.org/vs/stored"
+                                                  :filter "char"
+                                                  :count 1})]
+              (is (= 1 total))
+              (is (= ["charlie"] (mapv :code concepts)))))
+          (finally
+            (ftrm-db/close! datasource))))
       (finally (delete-quietly path)))))
 
 (deftest cs-expand*-supports-code-eq-filter

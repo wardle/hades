@@ -510,7 +510,9 @@
                                   "display" "Alpha"}
                                  {"system"  "http://example.com/external-cs"
                                   "code"    "bravo"
-                                  "display" "Bravo"}
+                                  "display" "Bravo"
+                                  "designation" [{"language" "en"
+                                                  "value" "Bravo stored EN"}]}
                                  {"system"  "http://example.com/external-cs"
                                   "code"    "charlie"
                                   "display" "Charlie"}
@@ -570,4 +572,38 @@
           (protos/vs-expand vs svc {:url "http://example.com/baked-vs"
                                     :filter "alp"})]
       (is (= ["alpha"] (mapv :code concepts))
-          "filter must restrict baked entries to those whose display contains the term"))))
+          "filter must restrict baked entries to those whose display contains the term")))
+
+  (testing "filter also matches stored codes before paging"
+    (let [vs  (load-fhir/from-fhir baked-vs-map)
+          svc (composite/from-providers [vs])
+          {:keys [concepts total]}
+          (protos/vs-expand vs svc {:url "http://example.com/baked-vs"
+                                    :filter "char" :count 1})]
+      (is (= 1 total))
+      (is (= ["charlie"] (mapv :code concepts))))))
+
+(deftest expansion-only-vs-display-language-test
+  (let [vs  (load-fhir/from-fhir baked-vs-map)
+        svc (composite/from-providers [vs])]
+    (testing "displayLanguage uses stored designations without requiring the CodeSystem"
+      (let [{:keys [concepts total display-language]}
+            (protos/vs-expand vs svc {:url "http://example.com/baked-vs"
+                                      :displayLanguage "en"
+                                      :offset 1
+                                      :count 1})]
+        (is (= 5 total))
+        (is (= "en" display-language))
+        (is (= [{:code "bravo"
+                 :system "http://example.com/external-cs"
+                 :display "Bravo stored EN"
+                 :designations [{:value "Bravo stored EN" :language :en}]}]
+               concepts))))
+    (testing "wildcard displayLanguage carries no display preference"
+      (let [{:keys [concepts display-language]}
+            (protos/vs-expand vs svc {:url "http://example.com/baked-vs"
+                                      :displayLanguage "*"
+                                      :offset 1
+                                      :count 1})]
+        (is (nil? display-language))
+        (is (= ["Bravo"] (mapv :display concepts)))))))

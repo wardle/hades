@@ -6,6 +6,7 @@
             [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.providers.common.canonical :as canonical]
+            [com.eldrix.hades.providers.common.display :as display]
             [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.providers.common.fhir-loader :as loaders]
@@ -407,10 +408,13 @@
 (defn- pick-display-language
   "Effective display language: the `:display-language` flag if set
   (parsed from the `displayLanguage` operation parameter), else the
-  request's `Accept-Language` header."
+  request's `Accept-Language` header. Header wildcard-only values such
+  as `*` carry no display preference and are normalised away."
   [request flags]
   (or (:display-language flags)
-      (get-in request [:headers "accept-language"])))
+      (let [header (get-in request [:headers "accept-language"])]
+        (when (seq (display/parse-display-language header))
+          header))))
 
 (defn merge-flags
   "Merge request flags into operation params (flat). Used by every

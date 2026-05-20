@@ -189,6 +189,20 @@
       (is (= "active" (:status (composite/vs-meta svc "http://x/vs/p"))))
       (is (= "draft"  (:status (composite/vs-meta svc "http://x/vs/q")))))))
 
+(deftest find-valueset-dynamic-fallback-scans-providers-not-keys
+  (testing "a missing dynamic ValueSet URL probes each provider once, not once per registered key"
+    (let [calls    (volatile! 0)
+          provider (reify protos/ValueSet
+                     (vs-metadata [_ _]
+                       (vswap! calls inc)
+                       []))
+          svc      {:valuesets    (into {}
+                                         (map (fn [n] [(str "http://x/vs/" n) provider]))
+                                         (range 1000))
+                    :vs-providers [provider]}]
+      (is (nil? (composite/find-valueset svc "http://x/vs/missing")))
+      (is (= 1 @calls)))))
+
 (deftest cs-meta-honours-naming-system-aliases-test
   (let [base (svc-of [cs-v1])
         resolver (fn [id]

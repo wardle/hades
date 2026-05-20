@@ -573,8 +573,9 @@
   (vs-expand [_ svc params]
     (let [{:keys [url compose]} vs-data
           expanding (conj (or (:expanding params) #{}) url)]
-      (compose/expand-compose svc compose
-        (assoc params :expanding expanding :purpose :expand))))
+      (or (compose/stored-extensional-expand compose params)
+          (compose/expand-compose svc compose
+            (assoc params :expanding expanding :purpose :expand)))))
 
   (vs-validate-code [_ svc params]
     (vs-validate/validate-code svc vs-data params)))

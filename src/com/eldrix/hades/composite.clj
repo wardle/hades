@@ -78,21 +78,25 @@
           (lookup-impl nil codesystems resolved)))))
 
 (defn- dynamic-valueset
-  [valuesets key]
+  [valueset-providers key]
   (let [[url version] (canonical/parse-versioned-uri key)]
     (some (fn [vs]
             (when (seq (protos/vs-metadata vs {:url url :version version}))
               vs))
-          (distinct (vals valuesets)))))
+          valueset-providers)))
 
 (defn find-valueset
-  [{:keys [valuesets naming-systems]} key]
-  (or (lookup-impl nil valuesets key)
-      (dynamic-valueset valuesets key)
-      (let [resolved (resolve-canonical naming-systems key)]
-        (when (and resolved (not= resolved key))
-          (or (lookup-impl nil valuesets resolved)
-              (dynamic-valueset valuesets resolved))))))
+  [{:keys [valuesets vs-providers naming-systems]} key]
+  ;; `valuesets` can contain one entry per canonical ValueSet URL, while a
+  ;; catalogue provider such as FTRM can serve hundreds of thousands of URLs.
+  ;; Dynamic fallback must therefore scan providers, not valueset-map values.
+  (let [dynamic-providers (or vs-providers (distinct (vals valuesets)))]
+    (or (lookup-impl nil valuesets key)
+        (dynamic-valueset dynamic-providers key)
+        (let [resolved (resolve-canonical naming-systems key)]
+          (when (and resolved (not= resolved key))
+            (or (lookup-impl nil valuesets resolved)
+                (dynamic-valueset dynamic-providers resolved)))))))
 
 (defn available-versions
   "List all registered versions for a system URL."

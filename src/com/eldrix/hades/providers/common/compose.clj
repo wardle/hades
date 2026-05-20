@@ -71,6 +71,137 @@
   [designations s]
   (some (fn [{:keys [value]}] (safe-lowercase-includes? value s)) designations))
 
+(defn- concept-designations
+  [concept]
+  (or (:designations concept)
+      (get concept "designation")))
+
+(defn- normalise-designation
+  [designation]
+  (if (contains? designation :value)
+    designation
+    (let [use-map (get designation "use")]
+      (cond-> {:value (get designation "value")}
+        (get designation "language")
+        (assoc :language (keyword (get designation "language")))
+        use-map
+        (assoc :use (cond-> {:system (get use-map "system")
+                             :code   (get use-map "code")}
+                      (get use-map "display")
+                      (assoc :display (get use-map "display"))))))))
+
+(defn- concept-code
+  [concept]
+  (or (:code concept) (get concept "code")))
+
+(defn- concept-display
+  [concept]
+  (or (:display concept) (get concept "display")))
+
+(defn- stored-extensional-compose?
+  "True when `compose` is exactly stored membership: explicit
+  include.concept entries only, no filters, imported ValueSets, or
+  excludes. This is the safe shape where expansion can page/filter the
+  stored membership before doing any provider work."
+  [compose]
+  (let [includes (get compose "include")]
+    (and (seq includes)
+         (empty? (get compose "exclude"))
+         (every? (fn [include]
+                   (and (seq (get include "concept"))
+                        (empty? (get include "filter"))
+                        (empty? (get include "valueSet"))))
+                 includes))))
+
+(defn- stored-extensional-answerable?
+  [compose {:keys [activeOnly properties]}]
+  (and (stored-extensional-compose? compose)
+       (not activeOnly)
+       (empty? properties)
+       (every? (fn [include]
+                 (every? concept-display (get include "concept")))
+               (get compose "include"))))
+
+(defn- stored-concept-matches-filter?
+  [concept text]
+  (or (str/blank? text)
+      (safe-lowercase-includes? (concept-code concept) text)
+      (safe-lowercase-includes? (concept-display concept) text)))
+
+(defn- stored-concept-row
+  [display-langs include concept]
+  (let [designations (concept-designations concept)
+        designations (mapv normalise-designation designations)
+        display (or (when (seq display-langs)
+                      (display/find-display-for-language designations display-langs))
+                    (concept-display concept))
+        version (or (get concept "version") (get include "version"))
+        system  (or (get concept "system") (get include "system"))]
+    (cond-> {:code    (concept-code concept)
+             :system  system
+             :display display}
+      version            (assoc :version version)
+      (seq designations) (assoc :designations designations))))
+
+(defn- stored-extensional-pairs
+  [compose]
+  (mapcat (fn [include]
+            (map (fn [concept] [include concept])
+                 (get include "concept")))
+          (get compose "include")))
+
+(defn- stored-used-codesystems
+  [compose]
+  (into []
+        (comp
+         (keep (fn [include]
+                 (when-let [system (get include "system")]
+                   (let [version (get include "version")]
+                     {:uri (if version (str system "|" version) system)}))))
+         (distinct))
+        (get compose "include")))
+
+(defn- stored-compose-pins
+  [compose]
+  (into []
+        (keep (fn [include]
+                (when-let [version (get include "version")]
+                  (when-let [system (get include "system")]
+                    {:system system :version version}))))
+        (get compose "include")))
+
+(s/fdef stored-extensional-expand
+  :args (s/cat :compose map? :params ::expand-params))
+
+(defn stored-extensional-expand
+  "Expand a stored explicit-concept ValueSet directly from membership
+  data when the request can be answered without live CodeSystem
+  enrichment. Returns nil for complex/intensional cases so callers can
+  fall back to `expand-compose`."
+  [compose {:keys [offset count filter displayLanguage] :as params}]
+  (when (stored-extensional-answerable? compose params)
+    (let [display-langs (display/parse-display-language displayLanguage)
+          offset' (or offset 0)
+          pairs (stored-extensional-pairs compose)
+          filtered-pairs (if (str/blank? filter)
+                           pairs
+                           (clojure.core/filter
+                            (fn [[_ concept]]
+                              (stored-concept-matches-filter? concept filter))
+                            pairs))
+          total (clojure.core/count filtered-pairs)
+          concepts (cond->> filtered-pairs
+                     (pos? offset') (drop offset')
+                     count          (take count)
+                     true           (map (fn [[include concept]]
+                                           (stored-concept-row display-langs include concept))))]
+      (cond-> {:concepts              (vec concepts)
+               :total                 total
+               :used-codesystems      (stored-used-codesystems compose)
+               :compose-pins          (stored-compose-pins compose)
+               :multi-version-systems #{}}
+        (seq display-langs) (assoc :display-language displayLanguage)))))
+
 (defn- expand-include-concepts
   "Expand a concept-driven include (`include.concept[]`) into the
   expansion. Each candidate is looked up via `cs-lookup` to enrich

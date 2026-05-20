@@ -363,6 +363,17 @@
              :assertions [["expansion echoes displayLanguage=en-GB"
                            (expansion-display-language-equals? "en-GB")]]}}
 
+   {:name "$expand: wildcard Accept-Language carries no display preference"
+    :request {:method  :post
+              :path    "/ValueSet/$expand"
+              :headers {"Accept" "application/fhir+json" "Accept-Language" "*"}
+              :body    {:resourceType "Parameters"
+                        :parameter    [tiny-snomed-vs-param
+                                       {:name "count" :valueInteger 5}]}}
+    :expect {:status 200
+             :assertions [["expansion does not echo displayLanguage"
+                           expansion-display-language-absent?]]}}
+
    {:name "$expand: no parameter and no header → no displayLanguage echo"
     :request {:method  :post
               :path    "/ValueSet/$expand"

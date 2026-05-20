@@ -6,8 +6,10 @@
             [clojure.java.shell :as shell]
             [clojure.string :as str]
             [clojure.test :refer [deftest]]
+            [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
+            [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.providers.common.compose :as compose]
             [com.eldrix.hades.providers.loinc.model :as loinc-model]
             [com.eldrix.hades.protocols :as protos]
@@ -38,6 +40,21 @@
 (def ^:private procedure          71388002)
 
 (defn- expand-url [suffix] (str snomed-uri "?fhir_vs=" suffix))
+
+(def ^:private stored-vs-url "http://example.com/bench/stored-vs")
+
+(defonce ^:private stored-vs-svc
+  (let [vs (load-fhir/from-fhir
+            {"resourceType" "ValueSet"
+             "url" stored-vs-url
+             "status" "active"
+             "expansion" {"contains"
+                          (mapv (fn [n]
+                                  {"system" "http://example.com/bench/cs"
+                                   "code" (str "code-" n)
+                                   "display" (str "Display " n)})
+                                (range 20000))}})]
+    (composite/from-providers [vs])))
 
 ;; ─── Benchmark catalogue ───────────────────────────────────────────────────
 
@@ -272,6 +289,22 @@
           (compose/expand-compose svc
             {"include" [{"system" snomed-uri}]}
             {:filter "pain" :count 200}))}
+   {:id :expand/stored-extensional-page
+    :fn (fn [_]
+          (hades/expand stored-vs-svc {:url stored-vs-url
+                                       :offset 10000
+                                       :count 50}))}
+   {:id :expand/stored-extensional-display-language
+    :fn (fn [_]
+          (hades/expand stored-vs-svc {:url stored-vs-url
+                                       :displayLanguage "en"
+                                       :offset 10000
+                                       :count 50}))}
+   {:id :expand/stored-extensional-filter
+    :fn (fn [_]
+          (hades/expand stored-vs-svc {:url stored-vs-url
+                                       :filter "1999"
+                                       :count 50}))}
    {:id :compose/refinement-text-filter :tx-bench "EX08"
     :fn (fn [svc]
           (compose/expand-compose svc
