@@ -200,6 +200,10 @@
               [resolver]
               (:cs-meta-by-key base)
               (:vs-meta-by-key base)
+              (:cs-providers base)
+              (:vs-providers base)
+              (:cs-search-resources base)
+              (:vs-search-resources base)
               {} [])]
     (testing "alias is resolved against the precomputed map"
       (is (= "1.0" (:version (composite/cs-meta svc "urn:oid:1.2.3")))))

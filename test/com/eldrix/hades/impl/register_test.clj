@@ -328,11 +328,7 @@
                    (case id
                      "urn:oid:1.2.3" "http://example.com/r/cs"
                      nil))
-        svc (composite/from-providers [] {:naming-systems [resolver]
-                            :codesystems  (:codesystems base)
-                            :valuesets    (:valuesets base)})
-        ;; reconstruct with naming-systems by re-opening with the providers
-        ;; (open's two-arity preserves naming-systems for us)
+        ;; Reconstruct with naming-systems while preserving the base catalogues.
         svc (composite/->TerminologyService
               (:codesystems base)
               (:valuesets base)
@@ -340,6 +336,10 @@
               [resolver]
               (:cs-meta-by-key base)
               (:vs-meta-by-key base)
+              (:cs-providers base)
+              (:vs-providers base)
+              (:cs-search-resources base)
+              (:vs-search-resources base)
               {} [])]
     (testing "alias resolves to canonical when no direct match exists"
       (is (some? (composite/find-codesystem svc "urn:oid:1.2.3"))))
