@@ -105,13 +105,28 @@
     :expected {:code "LA14674-8"
                :display "6 or more times"
                :abstract false}}
+   {:label "answer list answer code lookup canonicalizes casing"
+    :input {:system "http://loinc.org" :code "la14674-8"}
+    :expected {:code "LA14674-8"
+               :display "6 or more times"
+               :abstract false}}
    {:label "part code lookup"
     :input {:system "http://loinc.org" :code "LP14449-0"}
     :expected {:code "LP14449-0"
                :display "Hemoglobin"
                :abstract false}}
+   {:label "part code lookup canonicalizes casing"
+    :input {:system "http://loinc.org" :code "lp14449-0"}
+    :expected {:code "LP14449-0"
+               :display "Hemoglobin"
+               :abstract false}}
    {:label "group code lookup"
     :input {:system "http://loinc.org" :code "LG51973-2"}
+    :expected {:code "LG51973-2"
+               :display "Cytomegalovirus DNA|IU/mL|ANYBldSerPl"
+               :abstract false}}
+   {:label "group code lookup canonicalizes casing"
+    :input {:system "http://loinc.org" :code "lg51973-2"}
     :expected {:code "LG51973-2"
                :display "Cytomegalovirus DNA|IU/mL|ANYBldSerPl"
                :abstract false}}
