@@ -351,16 +351,17 @@
                               {"system" "http://example.com/r/veg"}]}})
 
 (deftest validate-cc-cross-provider-mix-valid-and-invalid
-  (testing "CodeableConcept semantics: any valid coding makes overall result=true; invalid codings are informational issues"
+  (testing "mixed CodeableConcept validation keeps the valid display but fails overall when any coding is invalid"
     (let [svc (svc-of [cs-fruit cs-veg vs-produce])
           codings [{:system "http://example.com/r/fruit" :code "apple"}
                    {:system "http://example.com/r/veg"   :code "potato"}]
           r (composite/validate-codeable-concept svc codings
               {:url "http://example.com/r/produce"})]
-      (is (true? (:result r)))
+      (is (false? (:result r)))
       (is (= :apple (:code r))
           "valid coding's code surfaces (in-memory provider returns codes as keywords)")
       (is (= "Apple" (:display r)))
+      (is (string? (:message r)))
       (testing "the invalid coding's per-coding issue carries the demoted details-code"
         (is (some #(and (= "this-code-not-in-vs" (:details-code %))
                         (= 1 (:coding-index %))

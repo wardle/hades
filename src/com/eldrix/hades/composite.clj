@@ -660,7 +660,9 @@
                                   all-issues)]
           (if valid
             (cond-> valid
-              (seq all-issues) (update :issues (fnil into []) all-issues))
+              (seq invalid)    (assoc :result false)
+              (seq all-issues) (update :issues (fnil into []) all-issues)
+              (seq cs-error-msgs) (assoc :message (first cs-error-msgs)))
             (let [version-issue-codes #{"vs-invalid" "version-error" "version-mismatch"}
                   best-invalid (last (filter (fn [r]
                                                (and (:display r) (:system r)

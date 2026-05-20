@@ -270,13 +270,14 @@
       (is (contains? (issue-codes result) "invalid-code")))))
 
 (deftest cc-multi-coding-one-valid-test
-  (testing "two codings, one valid — result true with issues from rejected codings"
+  (testing "two codings, one valid — result false with issues and message from rejected codings"
     (let [result (hades/validate-codeable-concept *svc*
                    [{:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "MISSING"}
                     {:system "http://hl7.org/fhir/test/CodeSystem/simple" :code "code1"}]
                    {:url "http://hl7.org/fhir/test/ValueSet/simple-all"})]
-      (is (true? (:result result)))
+      (is (false? (:result result)))
       (is (some? (:display result)) "display from valid coding")
+      (is (string? (:message result)))
       (is (some #(= "invalid-code" (:details-code %)) (:issues result))
           "invalid-code issue from the bad coding"))))
 
