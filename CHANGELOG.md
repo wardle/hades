@@ -2,6 +2,11 @@
 
 This log documents significant changes for each release.
 
+## Not yet released
+
+* Improved FHIR `CodeSystem`/`ValueSet` browse performance by caching provider lists and precomputed unfiltered search resources at service construction.
+* Hades passes 493 / 600 (82.2%) non-skipped tests in the pinned HL7 FHIR Terminology Conformance suite with no regression from baseline.
+
 ## [v2.0.198] - 2026-05-09
 
 * FHIR REST search latency on the URL-by-url hot path roughly halved.
@@ -15,8 +20,9 @@ Headline: Hades is now a **multi-terminology** FHIR server. SNOMED CT,
 LOINC, and arbitrary FHIR NPM packages run side-by-side in one process,
 dispatched by canonical URL. v1.x served SNOMED only.
 
-Hades passes **493 / 603 (81.8%)** of the HL7 FHIR Terminology Ecosystem
-IG conformance tests against the pinned tx-ecosystem rev (`fb9078f6`). 
+Hades passes **493 / 600 (82.2%)** non-skipped tests in the HL7 FHIR
+Terminology Ecosystem IG conformance suite against the pinned
+tx-ecosystem rev (`fb9078f6`).
 
 The major version bump signals two things: the surface is broader (LOINC,
 FHIR packages, mixed sources on a single `serve`), and the CLI now takes
@@ -112,8 +118,8 @@ v1.x command lines need to be reworked.
 
 ## [v1.4.135] - 2026-04-23
 
-Headline: Hades passes 477 / 603 (79.1%) of the HL7 FHIR Terminology
-Ecosystem IG conformance tests, up from 473 / 603.
+Headline: Hades passes 477 / 600 (79.5%) non-skipped tests in the HL7
+FHIR Terminology Ecosystem IG conformance suite, up from 473 / 600.
 
 * Dependency refresh: Clojure 1.12.4, logback 1.5.32, nREPL 1.7.0,
   HAPI validation 6.9.7 and other minor bumps. okhttp held at 4.12.0
@@ -146,8 +152,9 @@ Ecosystem IG conformance tests, up from 473 / 603.
 
 ## [v1.4.109] - 2026-04-22
 
-Headline: Hades passes 473 / 603 (78.4%) of the HL7 FHIR Terminology
-Ecosystem IG conformance tests, up from ~50 at the v1.4.69 baseline.
+Headline: Hades passes 473 / 600 (78.8%) non-skipped tests in the HL7
+FHIR Terminology Ecosystem IG conformance suite, up from ~50 at the
+v1.4.69 baseline.
 
 * Java 21 or newer is required (Lucene 10 upgrade).
 * HAPI FHIR dependency removed; pure Pedestal + charred on the wire.
