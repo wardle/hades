@@ -9,7 +9,7 @@
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
-            [com.eldrix.hades.impl.protocols :as protos]))
+            [com.eldrix.hades.protocols :as protos]))
 
 (def ^:dynamic *svc* nil)
 (def ^:dynamic *server* nil)
@@ -93,6 +93,10 @@
 
 (defn- no-match? [body]
   (nil? (get-param body "match")))
+
+(defn- subsumes-outcome-value-code? [expected]
+  (fn [body]
+    (= expected (get (get-param body "outcome") "valueCode"))))
 
 (defn- not-parameters-with-empty-outcome? [body]
   ;; Guards against the regression where $subsumes returns
@@ -260,11 +264,10 @@
              :assertions [["result=false" result-false?]
                           ["no match part" no-match?]]}}
 
-   {:name "$translate with unknown ConceptMap url returns 404 OperationOutcome"
+   {:name "$translate with unknown ConceptMap url returns structured failure"
     :request {:path "/ConceptMap/$translate?url=http://example.com/fake&system=http://snomed.info/sct&code=225983005"}
-    :expect {:status 404
-             :assertions [["body is OperationOutcome" operation-outcome?]
-                          ["issue.code = not-found" (issue-code-equals? "not-found")]]}}
+    :expect {:status 200
+             :assertions [["result=false" result-false?]]}}
 
    {:name "unrouted path returns FHIR-shaped 404"
     :request {:path "/Observation?url=http://example.com"
@@ -286,6 +289,13 @@
                            (issue-text-matches? #"codeA.*codeB|codingA.*codingB")]
                           ["does not say 'No endpoint matches path'"
                            (issue-text-not-matches? #"No endpoint matches path")]]}}
+
+   {:name "$subsumes valid response serializes outcome as valueCode"
+    :request {:path "/CodeSystem/$subsumes?system=http://snomed.info/sct&codeA=64572001&codeB=73211009"}
+    :expect {:status 200
+             :content-type #"application/fhir\+json"
+             :assertions [["outcome valueCode=subsumes"
+                           (subsumes-outcome-value-code? "subsumes")]]}}
 
    ;; Regression: composite `cs-subsumes` returns nil when the system is
    ;; unknown; the wire layer then emits a Parameters body with an outcome

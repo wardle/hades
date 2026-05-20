@@ -12,9 +12,9 @@
   free of pinned-data prerequisites."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.fixtures :as fixtures]
-            [com.eldrix.hades.impl.composite :as composite]
+            [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
-            [com.eldrix.hades.impl.loaders.fhir :as loaders]))
+            [com.eldrix.hades.providers.common.fhir-loader :as loaders]))
 
 ;; ---------------------------------------------------------------------------
 ;; Fixtures

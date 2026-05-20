@@ -33,9 +33,9 @@
   relevant `impl` namespaces directly."
   (:require [clojure.spec.alpha :as s]
             [com.eldrix.hades.impl.paths :as paths]
-            [com.eldrix.hades.impl.composite :as composite]
-            [com.eldrix.hades.impl.protocols :as protos]
-            [com.eldrix.hades.impl.protocols.result :as result]))
+            [com.eldrix.hades.composite :as composite]
+            [com.eldrix.hades.protocols :as protos]
+            [com.eldrix.hades.protocols.result :as result]))
 
 (set! *warn-on-reflection* true)
 
@@ -66,7 +66,7 @@
   container, or a file/tree of FHIR JSON resources:
 
     (hades/open [\".hades/snomed-intl-20250201.db\"
-                 \".hades/loinc-2.81.db\"])
+                 \".hades/loinc-2.82.db\"])
 
   RF2 and LOINC release sources must be imported first. Provider-level
   construction lives in `impl` namespaces.
@@ -164,12 +164,12 @@
 
 (s/fdef translate
   :args (s/cat :svc some? :params map?)
-  :ret  (s/nilable ::translate-result))
+  :ret  ::translate-result)
 
 (defn translate
   "ConceptMap $translate. `params` may carry `:url` (canonical lookup),
   or `:system :target` (system-pair lookup), plus `:code`. Returns a
-  `::translate-result` or nil if no provider matches the request."
+  `::translate-result`."
   [svc params]
   (protos/cm-translate svc params))
 

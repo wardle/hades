@@ -4,7 +4,7 @@
             [clojure.test :refer [deftest is testing]]
             [com.eldrix.hades.fixtures :as fixtures]
             [com.eldrix.hades.impl.sources :as sources]
-            [com.eldrix.hades.impl.sqlite.db :as db]
+            [com.eldrix.hades.providers.ftrm.db :as db]
             [next.jdbc])
   (:import (java.io File)
            (java.nio.file Files)
@@ -58,11 +58,12 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest detects-loinc-fixture
-  (testing "loinc-fixture has a LoincTableCore.csv marker"
+  (testing "loinc-fixture has the native required LoincTable/Loinc.csv"
     (let [files (sources/tx-file-seq "test/resources/loinc-fixture")
           loinc (entries-by-kind files :loinc)]
       (is (= 1 (count loinc)))
-      (is (str/ends-with? (.getPath ^File (:file (first loinc))) "LoincTableCore.csv"))
+      (is (= "test/resources/loinc-fixture"
+             (.getPath ^File (:file (first loinc)))))
       (testing ":dir resolves to the release root"
         (is (= ["test/resources/loinc-fixture"]
                (dir-paths files :loinc)))))))
@@ -122,9 +123,10 @@
     (is (= [] (sources/tx-file-seq missing)))))
 
 ;; ---------------------------------------------------------------------------
-;; File-level detection: sct2_*.txt anywhere is RF2; LoincTableCore.csv
-;; anywhere is LOINC. Layout-agnostic — see the committed fixtures under
-;; test/resources/sources/ for the exact tree shapes covered.
+;; File-level detection: sct2_*.txt anywhere is RF2. LOINC is
+;; directory-level detection based on the native loader's required files.
+;; See the committed fixtures under test/resources/sources/ for the exact
+;; tree shapes covered.
 ;; ---------------------------------------------------------------------------
 
 (deftest single-rf2-file-anywhere-is-detected
@@ -150,19 +152,20 @@
       ;; subtrees → three unique parent directories.
       (is (= 3 (count (dir-paths files :rf2)))))))
 
-(deftest loinc-detected-in-flat-and-nested-layouts
-  (testing "nested release: :dir is the grandparent of LoincTableCore.csv"
+(deftest loinc-detected-from-native-required-files
+  (testing "release root is recognised by LoincTable/Loinc.csv"
     (is (= ["test/resources/loinc-fixture"]
-           (dir-paths (sources/tx-file-seq "test/resources/loinc-fixture") :loinc))))
-  (testing "flat release: :dir is the file's parent"
-    (is (= [(fixture "loinc-flat")]
+           (dir-paths (sources/tx-file-seq "test/resources/loinc-fixture") :loinc)))))
+
+(deftest core-only-loinc-layout-is-not-native-importable
+  (testing "LoincTableCore alone is not enough for the native loader"
+    (is (= []
            (dir-paths (sources/tx-file-seq (fixture "loinc-flat")) :loinc)))))
 
-(deftest finds-mixed-loinc-and-fhir-json-in-one-tree
-  (testing "LOINC release alongside a fhir-bundles dir"
+(deftest finds-fhir-json-in-tree-with-core-only-loinc-files
+  (testing "core-only LOINC marker is ignored, FHIR resources are still found"
     (let [files (sources/tx-file-seq (fixture "mixed-loinc-fhir"))]
-      (is (= [(fixture "mixed-loinc-fhir" "loinc-2.82")]
-             (dir-paths files :loinc)))
+      (is (= [] (dir-paths files :loinc)))
       (is (= [(fixture "mixed-loinc-fhir" "fhir-bundles" "cs.json")
               (fixture "mixed-loinc-fhir" "fhir-bundles" "vs.json")]
              (file-paths files :fhir-json))))))

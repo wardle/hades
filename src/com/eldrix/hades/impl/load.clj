@@ -11,8 +11,8 @@
                                     impl/load (this ns) wires
                                     them up for callers."
   (:require [clojure.spec.alpha :as s]
-            [com.eldrix.hades.impl.index.memory :as index]
-            [com.eldrix.hades.impl.loaders.fhir :as loaders]))
+            [com.eldrix.hades.providers.in-memory.index :as index]
+            [com.eldrix.hades.providers.common.fhir-loader :as loaders]))
 
 (declare from-fhir from-fhir-resources build-from-fhir-data)
 

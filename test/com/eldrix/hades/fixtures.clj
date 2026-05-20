@@ -17,7 +17,7 @@
 (def snomed-db-path    (str ".hades/snomed-intl-" snomed-version ".db"))
 (def snomed-uk-db-path ".hades/snomed-uk-monolith.db")
 
-(def loinc-version     "2.81")
+(def loinc-version     "2.82")
 (def loinc-db-path     (str ".hades/loinc-" loinc-version ".db"))
 
 (def fhir-packages-dir ".hades/fhir-packages")

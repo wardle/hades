@@ -162,6 +162,8 @@
                      (keyword? value) {"name" "value" "valueCode" (name value)}
                      (string? value)  {"name" "value" "valueString" value}
                      (number? value)  {"name" "value" "valueString" (str value)}
+                     (and (map? value) (:system value) (:code value))
+                     {"name" "value" "valueCoding" (coding-map value)}
                      :else            {"name" "value" "valueString" (str value)})]
     {"name" "property"
      "part" (cond-> [{"name" "code" "valueCode" code-str}
@@ -215,7 +217,7 @@
                version    (conj (param-string "version" version))
                display    (conj (param-string "display" display))
                system     (conj (param-uri "system" system))
-               code       (conj (param-auto "code" code))
+               code       (conj (param-code "code" code))
                definition (conj (param-string "definition" definition))
                (some? abstract) (conj (param-boolean "abstract" abstract)))
         with-props (into base (map property-param) properties)
@@ -225,7 +227,7 @@
 (defn subsumes->parameters
   "Convert a subsumes result to a FHIR Parameters map."
   [{:keys [outcome]}]
-  (parameters [(param-auto "outcome" outcome)]))
+  (parameters [(param-code "outcome" outcome)]))
 
 (defn- translate-match-param
   "Build a single $translate match entry as a Parameters.parameter part."

@@ -127,42 +127,47 @@ Source layout:
 - `src/com/eldrix/hades/core.clj` — public library API: service lifecycle
   and the FHIR terminology operations as plain Clojure functions. Read the
   ns docstring for the current surface.
-- `src/com/eldrix/hades/impl/**` — library internals. Subject to breaking
-  changes; nothing outside the project should depend on these namespaces.
-- `src/com/eldrix/hades/cmd.clj` + `impl/cli.clj` — CLI application
-  (entry point + option parsing). Not part of the library surface.
+- `src/com/eldrix/hades/composite.clj` — TerminologyService that dispatches
+  across registered providers; what `core` returns.
+- `src/com/eldrix/hades/protocols/**` — `CodeSystem`, `ValueSet`,
+  `ConceptMap` interfaces plus result/input specs. The contract between
+  composite and providers.
+- `src/com/eldrix/hades/providers/**` — one subdirectory per provider;
+  `providers/common/` holds shared provider helpers.
+- `src/com/eldrix/hades/impl/**` — transport / wire layer (HTTP, MCP,
+  CLI parsing, wire shaping, source walking). Subject to breaking change.
+- `src/com/eldrix/hades/cmd.clj` + `impl/cli.clj` — CLI application.
 
-The internal layering under `impl/` (read each file for the current
-public surface — names drift, the layering doesn't):
+Layering (read each file for the current public surface — names drift,
+the layering doesn't):
 
 ```
-impl/http.clj                  Pedestal HTTP layer — routes, interceptors,
-                               Parameters parsing, content negotiation
+impl/http.clj                            Pedestal HTTP — routes, interceptors,
+                                         Parameters parsing, content negotiation
+impl/mcp/{server,tools}.clj              MCP stdio transport + tool definitions
     │
-impl/wire.clj                  Pure FHIR JSON map builders (string-keyed)
-impl/metadata.clj
+impl/wire.clj, impl/metadata.clj         Pure FHIR JSON map builders (string-keyed)
     │
-impl/composite.clj             TerminologyService — dispatch by URL/version,
-                               cross-provider concerns (status warnings,
-                               supplements check, CodeableConcept aggregation)
+composite.clj                            TerminologyService — dispatch by URL/version,
+                                         cross-provider concerns (status warnings,
+                                         supplements check, CodeableConcept aggregation)
     │
-impl/protocols/                Abstract interfaces and result/input specs
-                               (CodeSystem, ValueSet, ConceptMap)
+protocols.clj, protocols/{input,result}  Abstract interfaces + result/input specs
     │
-impl/snomed.clj                SNOMED CT via Hermes
-impl/in_memory.clj             In-memory providers
-impl/sqlite/provider.clj       SQLite-backed catalogue providers
-impl/compose.clj               ValueSet compose engine (include/exclude, filter, etc.)
+providers/snomed/{provider,batch,        SNOMED CT via Hermes
+                  expansion}.clj
+providers/in_memory/{provider,index}.clj In-memory providers + indexer
+providers/ftrm/{provider,db,index}.clj   FTRM (SQLite-backed) provider + container + indexer
+providers/loinc/{loader,store,index,     Native LOINC provider + container + indexer
+                 import,provider,model}
+providers/common/                        Shared provider helpers: compose, vs-validate,
+                                         display, canonical, issues, property-filter,
+                                         fhir-extract, supplement, fhir-loader
+    │
+impl/sources.clj, impl/paths.clj         Walk a path, recognise terminology files,
+impl/load.clj, impl/fhir_package.clj     open them as provider bundles
 
-impl/loaders/fhir.clj          FHIR JSON → fhir-data
-impl/loaders/loinc.clj         LOINC release dir → fhir-data
-impl/index/memory.clj          fhir-data → in-memory providers
-impl/index/sqlite.clj          fhir-data → SQLite container
-impl/load.clj                  Convenience constructors over the load pipeline
-impl/sqlite/db.clj             SQLite open/create/schema/pragmas
-
-cmd.clj                        CLI entry point (-main)
-impl/cli.clj                   CLI option parsing
+cmd.clj, impl/cli.clj                    CLI entry point + option parsing
 ```
 
 ### Layering rules (strict)
@@ -179,11 +184,12 @@ impl/cli.clj                   CLI option parsing
 
 ### Layer responsibilities (strict)
 
-- **Protocol impls** (snomed.clj, in_memory.clj, sqlite/provider.clj) know
-  their domain. They return **complete, self-describing results** that match
-  the result specs under `impl/protocols/` — read those for the current
-  contract. No downstream layer should need to patch, enrich, or re-derive
-  fields.
+- **Provider impls** (`providers/snomed/provider.clj`,
+  `providers/in_memory/provider.clj`, `providers/ftrm/provider.clj`, …)
+  know their domain. They return **complete, self-describing results**
+  that match the result specs under `protocols/` — read those for the
+  current contract. No downstream layer should need to patch, enrich,
+  or re-derive fields.
 - **Composite** dispatches to the right impl by URL/version and handles
   version resolution (the version-resolution flags carried in the operation
   params). It does **not** patch results, add issues retroactively, look up
@@ -262,7 +268,7 @@ handler's params; grep `impl/http.clj` for the current names.
 - Use `clojure.spec.alpha` for all public API boundaries: protocol parameters,
   operation inputs, constructor arguments, **and protocol return values**.
 - The canonical data shapes for protocol parameters and return values live
-  under `impl/protocols/` — read those files; they are the contracts between
+  under `protocols/` — read those files; they are the contracts between
   layers, and every protocol impl must return data conforming to them.
 - Namespace specs under the relevant module.
 - Write `s/fdef` for public functions with non-trivial parameter contracts.
@@ -366,7 +372,7 @@ place and flows data correctly.
    them and what shape do they expect? Draw the path: http → composite → impl
    → composite → http → wire. If data needs to flow backwards (handler reaching
    back into impl metadata), the return value is incomplete.
-4. **Check the spec.** Does a spec exist under `impl/protocols/` for the
+4. **Check the spec.** Does a spec exist under `protocols/` for the
    return value this change produces? If not, define it before writing the
    implementation. The spec is the contract — write the contract first.
 5. **Check for secret channels.** Does this change require smuggling data through
@@ -417,7 +423,7 @@ Run after every task. All items must pass.
    methods to recover data that should be in the result, no ad-hoc keys
    smuggled through the request context.
 7. **Protocol impls return complete results.** If you changed a protocol impl,
-   its return value must conform to the result spec under `impl/protocols/`.
+   its return value must conform to the result spec under `protocols/`.
    No downstream patching needed.
 8. **Composite is not patching domain results.** If you added logic to the
    composite that modifies a result after the protocol call (adding issues,

@@ -5,12 +5,12 @@
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.core :as hades]
-            [com.eldrix.hades.impl.canonical :as canonical]
-            [com.eldrix.hades.impl.composite :as composite]
+            [com.eldrix.hades.providers.common.canonical :as canonical]
+            [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
-            [com.eldrix.hades.impl.loaders.fhir :as loaders]
+            [com.eldrix.hades.providers.common.fhir-loader :as loaders]
             [com.eldrix.hades.impl.metadata :as metadata]
-            [com.eldrix.hades.impl.protocols :as protos]
+            [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.impl.wire :as wire]
             [io.pedestal.connector :as conn]
             [io.pedestal.http.jetty :as jetty]
@@ -33,7 +33,7 @@
   ^String [data]
   (let [sw (java.io.StringWriter. 1024)]
     (write-json-fn sw data)
-    (.toString sw)))
+    (str sw)))
 
 (defn- payload-too-large [size limit]
   (ex-info (str "Request body exceeds the configured limit of " limit " bytes (got " size ")")
@@ -619,7 +619,7 @@
                   used-cs        (:used-codesystems result)
                   compose-pinned (into #{} (keep :system) (:compose-pins result))
                   vs-meta        (when-let [vs (composite/find-valueset svc url)]
-                                   (protos/vs-resource vs {}))
+                                   (protos/vs-resource vs {:url url}))
                   vs-version-uri (let [v (:version vs-meta)]
                                    (if v (str url "|" v) url))
                   version-error  (when check-system-version
@@ -713,8 +713,8 @@
   (-> (or requested default-count) (max 0) (min max-count)))
 
 (defn- split-modifier [^String k]
-  (let [idx (.indexOf k ":")]
-    (if (neg? idx) [k ""] [(subs k 0 idx) (subs k (inc idx))])))
+  (let [idx (str/index-of k ":")]
+    (if idx [(subs k 0 idx) (subs k (inc idx))] [k ""])))
 
 (defn- modifier-error [field mod]
   {:severity "error" :type "invalid"

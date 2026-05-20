@@ -10,7 +10,7 @@
             [clojure.pprint :as pp]
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
-            [com.eldrix.hades.impl.canonical :as canonical])
+            [com.eldrix.hades.providers.common.canonical :as canonical])
   (:import (java.net URI)
            (java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers)
            (java.nio.file Files StandardCopyOption)
