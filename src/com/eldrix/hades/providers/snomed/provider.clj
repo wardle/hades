@@ -438,7 +438,8 @@
           concrete     (when want-typed? (hermes/concrete-values svc code'))
           descriptions (when (want? "designation")
                          (hermes/descriptions svc code'))
-          display-ids  (-> #{code' snomed/Synonym snomed/FullySpecifiedName}
+          display-ids  (-> #{snomed/Synonym snomed/FullySpecifiedName}
+                           (conj code')
                            (into parents)
                            (into children)
                            (into (keys attrs))

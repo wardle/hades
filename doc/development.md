@@ -26,7 +26,7 @@ exist locally. Fixture paths are declared in
 | SNOMED CT UK monolith            | `.hades/snomed-uk-monolith.db`    | `uk.nhs/sct-monolith` (latest)           | TRUD                                     |
 | LOINC                            | `.hades/loinc-2.82.db`            | LOINC release `2.82`                     | loinc.org (free account)                 |
 | FHIR packages (SQLite container) | `.hades/fhir-smoke.db`            | `hl7.fhir.r4.core@4.0.1` + 5 others      | packages.fhir.org                        |
-| FHIR packages (unpacked cache)   | `.hades/fhir-packages/`           | same as above                            | packages.fhir.org                        |
+| FHIR packages (unpacked cache)   | `.hades/fhir-packages/`           | same as above + `us.nlm.vsac@0.24.0`     | packages.fhir.org                        |
 | tx-ecosystem (conformance)       | `.hades/tx-ecosystem/`            | rev pinned in `conformance_test.clj`     | `HL7/fhir-tx-ecosystem-ig` (auto-cloned) |
 
 ### SNOMED CT International (conformance pin)
@@ -93,6 +93,16 @@ This populates both the SQLite container (`fhir-smoke.db`) and the
 unpacked-tarball cache (`fhir-packages/`) — the parity test runs the
 in-memory provider over the cache and the SQLite provider over the
 container.
+
+`tx-benchmark` EX04 also needs VSAC. Keep VSAC in the unpacked package
+cache and pass that package directory directly to the benchmark server
+recipes below so the run exercises the in-memory FHIR package provider:
+
+```bash
+clj -M:run install .hades/vsac-0.24.db \
+  --dist us.nlm.vsac@0.24.0 \
+  --cache-dir .hades/fhir-packages
+```
 
 ### Use a modern Hermes build
 
@@ -179,9 +189,10 @@ These are common ways to get the wrong answer:
   (e.g. `bench-hades-native.sh`, `run-native.ts`, `report-native.ts`)
   is stale local scaffolding from a prior session, not part of the
   benchmark. Use only the recipes below.
-- **Don't pass unpacked `.hades/fhir-packages/<id>/package` directories
-  to `serve`.** The canonical FHIR fixture is `.hades/fhir-smoke.db`,
-  one positional arg.
+- **Don't pass the whole `.hades/fhir-packages/` cache directory to
+  `serve`.** The canonical FHIR fixture is `.hades/fhir-smoke.db`; the
+  tx-benchmark recipes add only the explicit VSAC package directory so
+  EX04 runs against the same in-memory package shape used upstream.
 - **Don't change the port to match `tx-benchmark/servers.json`.** That
   file is for the Docker pipeline. We pass the URL explicitly to k6,
   so port `8080` works fine.
@@ -234,6 +245,7 @@ clj -M:run serve \
   .hades/snomed-uk-monolith.db \
   .hades/loinc-2.82.db \
   .hades/fhir-smoke.db \
+  .hades/fhir-packages/us.nlm.vsac-0.24.0/package \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!
 trap 'kill $HADES_PID 2>/dev/null' EXIT
@@ -269,6 +281,7 @@ clj -M:run serve \
   .hades/snomed-uk-monolith.db \
   .hades/loinc-2.82.db \
   .hades/fhir-smoke.db \
+  .hades/fhir-packages/us.nlm.vsac-0.24.0/package \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!
 trap 'kill $HADES_PID 2>/dev/null' EXIT
@@ -343,6 +356,7 @@ java -Xmx6g -jar target/hades.jar serve \
   .hades/snomed-uk-monolith.db \
   .hades/loinc-2.82.db \
   .hades/fhir-smoke.db \
+  .hades/fhir-packages/us.nlm.vsac-0.24.0/package \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!
 trap 'kill $HADES_PID 2>/dev/null' EXIT
