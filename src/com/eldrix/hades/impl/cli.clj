@@ -27,8 +27,11 @@
     :missing "--api-key PATH is required for uk.nhs distributions"]
    cache-dir-opt])
 
+(def registry-opt
+  [nil "--registry URL" "FHIR package registry base URL (replaces the default registry chain)"])
+
 (def fhir-opts
-  [fhir-cache-dir-opt])
+  [fhir-cache-dir-opt registry-opt])
 
 (def mlds-opts
   [[nil "--username USER" "MLDS username"

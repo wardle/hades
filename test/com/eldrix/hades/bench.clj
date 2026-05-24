@@ -56,6 +56,36 @@
                                 (range 20000))}})]
     (composite/from-providers [vs])))
 
+(def ^:private missing-display-vs-url "http://example.com/bench/missing-display-snomed-vs")
+
+(def ^:private missing-display-overlay
+  "Build the missing-display cliff fixture, layered on the base `svc`.
+
+  Takes the member codes of a large SNOMED-backed VSAC set, strips their
+  displays, and re-registers them as a stored extensional ValueSet
+  overlaid on the fixture service. Because the members lack a stored
+  display, `stored-extensional-answerable?` is false and expand/validate
+  fall back to `expand-include-concepts`, which looks up EVERY member
+  against the real Hermes CodeSystem to backfill the display. Layering
+  over the live service (not a synthetic CodeSystem whose lookups miss for
+  free) is what makes those lookups cost real I/O — the genuine cliff.
+
+  Returns `{:svc overlaid-service :sample a-member-code}`. Memoised on the
+  base service so the one-time build stays out of the timed loop."
+  (memoize
+   (fn [svc]
+     (let [members (->> (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+                                           :count 100000})
+                        :concepts
+                        (mapv (fn [{:keys [system code]}] {"system" system "code" code})))
+           vs (load-fhir/from-fhir
+               {"resourceType" "ValueSet"
+                "url" missing-display-vs-url
+                "status" "active"
+                "expansion" {"contains" members}})]
+       {:svc    (composite/with-overlays svc [vs])
+        :sample (get (first members) "code")}))))
+
 ;; ─── Benchmark catalogue ───────────────────────────────────────────────────
 
 (def operations
@@ -359,7 +389,113 @@
    {:id :fs01/cs-browse :tx-bench "FS01"
     :fn (fn [svc] (hades/search-code-systems svc {}))}
    {:id :fs01/vs-browse :tx-bench "FS01"
-    :fn (fn [svc] (hades/search-value-sets svc {}))}])
+    :fn (fn [svc] (hades/search-value-sets svc {}))}
+
+   ;; --- $expand on VSAC extensional ValueSets (EX04) ---------------------
+   ;;
+   ;; Provider: FTRM (SQLite) — the fixture opens `.hades/vsac-0.24.db`.
+   ;; The local tx-benchmark recipe instead drives the in-memory provider
+   ;; (the unpacked package dir); both serve the same 9,071 ValueSets
+   ;; (guarded by vsac_parity_live_test) but differ in latency, so don't
+   ;; cross-compare these numbers with an in-memory EX04 run.
+   ;;
+   ;; Mirrors three large VSAC ValueSets from tx-benchmark's EX04 pool —
+   ;; SNOMED CT US Core Problem List (.1018.240), LOINC results
+   ;; (.1267.17), and microbiology organisms (.24.7.14). Together they
+   ;; cover the cost classes exposed by the 2026-05-20 diagnose run:
+   ;; small page, count=1000 (large extensional materialisation), and
+   ;; text filter (rare vs common pre-trim).
+   {:id :expand/vsac-snomed-small :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+                             :count 10}))}
+   {:id :expand/vsac-snomed-1000 :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+                             :count 1000}))}
+   {:id :expand/vsac-snomed-filter-rare :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+                             :filter "ergotamine" :count 20}))}
+   {:id :expand/vsac-snomed-filter-common :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+                             :filter "hypertension" :count 100}))}
+   {:id :expand/vsac-loinc-filter :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1267.17"
+                             :filter "hemoglobin" :count 100}))}
+   {:id :expand/vsac-microbiology-filter :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.114222.24.7.14"
+                             :filter "streptococcus" :count 100}))}
+
+   ;; --- $expand enrichment cliff (EX04) ----------------------------------
+   ;;
+   ;; The same two large stored-extensional VSAC ValueSets under four
+   ;; request shapes, all `count=50`. `plain` and `filter` are answerable
+   ;; from stored membership and take the `stored-extensional-expand` fast
+   ;; path (sub-ms / single-digit ms). `activeOnly` and `properties`
+   ;; request data the stored concepts don't carry, so they fall back to
+   ;; `expand-include-concepts`, which issues one `cs-lookup` PER MEMBER
+   ;; over the ENTIRE membership before paging — turning a 50-row page into
+   ;; thousands of lookups (~1–9 s). This is the enrichment cliff; Phase 1
+   ;; (restoring laziness) should collapse the fallback columns back to
+   ;; single-digit ms. The slowness here is the recorded finding, not a
+   ;; regression — these ops run for seconds on current HEAD.
+   ;;
+   ;;   .1018.240  ~6,134 SNOMED members
+   ;;   .1267.17  ~18,566 LOINC members
+   {:id :expand/cliff-snomed-plain :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+                             :count 50}))}
+   {:id :expand/cliff-snomed-filter :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+                             :filter "a" :count 50}))}
+   {:id :expand/cliff-snomed-active-only :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+                             :activeOnly true :count 50}))}
+   {:id :expand/cliff-snomed-properties :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+                             :properties ["inactive"] :count 50}))}
+   {:id :expand/cliff-loinc-plain :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1267.17"
+                             :count 50}))}
+   {:id :expand/cliff-loinc-filter :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1267.17"
+                             :filter "a" :count 50}))}
+   {:id :expand/cliff-loinc-active-only :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1267.17"
+                             :activeOnly true :count 50}))}
+   {:id :expand/cliff-loinc-properties :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1267.17"
+                             :properties ["inactive"] :count 50}))}
+   ;; Missing-display trigger (see `missing-display-overlay`). Real SNOMED
+   ;; codes with displays stripped, so even a plain page and a single-code
+   ;; validate must look every member up against Hermes to backfill the
+   ;; display. `validate-code` matters as much as `expand` here: it reuses
+   ;; the same `expand-compose` path (it does NOT narrow explicit
+   ;; `concept[]` includes), so validating one code against this set pays
+   ;; the full N-member enrichment — the Phase 3 payoff this op records.
+   {:id :expand/cliff-missing-display :tx-bench "EX04"
+    :fn (fn [svc]
+          (hades/expand (:svc (missing-display-overlay svc))
+                        {:url missing-display-vs-url :count 50}))}
+   {:id :validate-code/cliff-missing-display :tx-bench "EX04"
+    :fn (fn [svc]
+          (let [{ov :svc sample :sample} (missing-display-overlay svc)]
+            (hades/validate-code ov {:url     missing-display-vs-url
+                                     :system  snomed-uri
+                                     :code    sample
+                                     :display "deliberately drifted label"})))}])
 
 ;; ─── Test entry point (clj -M:bench) ──────────────────────────────────────
 ;;
@@ -445,6 +581,7 @@
   ([id mode]
    (let [svc (hades/open [fixtures/snomed-db-path
                           fixtures/loinc-db-path
+                          fixtures/vsac-db-path
                           fixtures/fhir-smoke-db-path])]
      (try
        (bench-operation svc id mode)
@@ -454,6 +591,7 @@
 (deftest operations-bench
   (let [svc  (hades/open [fixtures/snomed-db-path
                           fixtures/loinc-db-path
+                          fixtures/vsac-db-path
                           fixtures/fhir-smoke-db-path])
         mode (bench-mode)]
     (try

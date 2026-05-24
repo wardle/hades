@@ -20,9 +20,17 @@
 (def loinc-version     "2.82")
 (def loinc-db-path     (str ".hades/loinc-" loinc-version ".db"))
 
+(def vsac-version         "0.24")           ; SQLite container filename
+(def vsac-db-path         (str ".hades/vsac-" vsac-version ".db"))
+(def vsac-package-version "0.24.0")          ; FHIR package version (registry)
+
 (def fhir-packages-dir ".hades/fhir-packages")
 (def fhir-smoke-db-path ".hades/fhir-smoke.db")
 (def tx-ecosystem-dir  ".hades/tx-ecosystem")
+
+;; Unpacked us.nlm.vsac package — in-memory provider side of the VSAC
+;; FTRM-vs-in-memory parity test.
+(def vsac-package-dir  (str fhir-packages-dir "/us.nlm.vsac-" vsac-package-version "/package"))
 
 (def fhir-packages
   "Canonical FHIR R4 package set used by both the SQLite smoke DB
@@ -30,16 +38,17 @@
   `[id version]`; the on-disk directory under `fhir-packages-dir` is
   `<id>-<version>/package/`. Keep CI's `provision-fhir` `--dist` list
   in sync with this — both sides of the parity test must see the
-  same packages or the catalogue diff is meaningless. Mirrors
-  fhirsmith's `library.yml` minus `us.cdc.phinvads` (empty without
-  UMLS) and `us.nlm.vsac` (latest registry version drifts from
-  fhirsmith's bucket version)."
+  same packages or the catalogue diff is meaningless. Mirrors the
+  tx-benchmark upstream dataset (incl. `us.cdc.phinvads`, 1,967
+  ValueSets) minus `us.nlm.vsac` — VSAC is a separate fixture
+  (`vsac-db-path` / `vsac-package-dir`) because of its size."
   [["hl7.fhir.r4.core"     "4.0.1"]
    ["hl7.terminology.r4"   "7.0.1"]
    ["hl7.fhir.us.core"     "6.1.0"]
    ["hl7.fhir.uv.ips"      "2.0.0"]
    ["hl7.fhir.uv.ips"      "1.1.0"]
-   ["fhir.tx.support.r4"   "0.34.0"]])
+   ["fhir.tx.support.r4"   "0.34.0"]
+   ["us.cdc.phinvads"      "0.12.0"]])
 
 ;; ---------------------------------------------------------------------------
 ;; HTTP server lifecycle

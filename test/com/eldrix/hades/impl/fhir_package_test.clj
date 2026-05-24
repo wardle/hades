@@ -50,6 +50,63 @@
         (is (= "4.0.1, 5.0.0"
                (-> (fp/list-versions "x") first :fhir-version)))))))
 
+(deftest try-registries-falls-through-on-404-only
+  (testing "a 404 falls through to the next registry"
+    (is (= :second
+           (fp/try-registries
+            ["a" "b"]
+            (fn [r] (if (= r "a")
+                      (throw (ex-info "nope" {:status 404}))
+                      :second))))))
+  (testing "a non-404 failure propagates immediately, no fallthrough"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"boom"
+          (fp/try-registries
+           ["a" "b"]
+           (fn [r] (if (= r "a")
+                     (throw (ex-info "boom" {:status 500}))
+                     :should-not-reach))))))
+  (testing "404 on the final registry propagates (nothing left to try)"
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"gone"
+          (fp/try-registries
+           ["only"]
+           (fn [_] (throw (ex-info "gone" {:status 404}))))))))
+
+(deftest merge-docs-unions-versions-and-recomputes-latest
+  (testing "versions union across registries; latest is highest semver of the union"
+    (let [a {:name "x" :description "from-a"
+             :dist-tags {:latest "0.17.0"}
+             :versions {(keyword "0.16.0") {:fhirVersion "4.0.1"}
+                        (keyword "0.17.0") {:fhirVersion "4.0.1"}}}
+          b {:name "x" :description "from-b"
+             :dist-tags {:latest "0.24.0"}
+             :versions {(keyword "0.17.0") {:fhirVersion "4.0.1"}
+                        (keyword "0.24.0") {:fhirVersion "4.0.1"}}}
+          merged (fp/merge-docs [a b])]
+      (is (= #{"0.16.0" "0.17.0" "0.24.0"}
+             (set (map name (keys (:versions merged))))))
+      (is (= "0.24.0" (get-in merged [:dist-tags :latest])))
+      (is (= "from-a" (:description merged))
+          "first registry wins on shared top-level fields"))))
+
+(deftest metadata-merges-across-registries
+  (testing "metadata unions docs from every registry that carries the package"
+    (with-redefs [fp/fetch-metadata
+                  (fn [registry _id]
+                    (case registry
+                      "r1" {:dist-tags {:latest "0.17.0"}
+                            :versions {(keyword "0.17.0") {}}}
+                      "r2" {:dist-tags {:latest "0.24.0"}
+                            :versions {(keyword "0.24.0") {}}}))]
+      (let [m (fp/metadata "us.nlm.vsac" ["r1" "r2"])]
+        (is (= "0.24.0" (get-in m [:dist-tags :latest])))
+        (is (= #{"0.17.0" "0.24.0"} (set (map name (keys (:versions m))))))))))
+
+(deftest metadata-throws-when-absent-everywhere
+  (testing "metadata throws when no registry carries the package"
+    (with-redefs [fp/fetch-metadata (fn [_ _] nil)]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not found in any registry"
+            (fp/metadata "no.such.pkg" ["r1" "r2"]))))))
+
 (deftest download-blank-version-throws
   (testing "download! refuses an empty version rather than constructing nonsense paths"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"version required"

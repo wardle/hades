@@ -281,12 +281,13 @@
                         "Run `hades available` for a list."))))
 
     (cli/fhir-package? id)
-    (let [v (or version
-                (try (get-in (fhir-package/metadata id) [:dist-tags :latest])
+    (let [registries (or (:registry opts) fhir-package/default-registries)
+          v (or version
+                (try (get-in (fhir-package/metadata id registries) [:dist-tags :latest])
                      (catch ExceptionInfo _ nil))
                 (cli-error ::unknown-distribution
                            (str "Unrecognised FHIR package or no version found: " id)))]
-      (.getPath ^File (fhir-package/download! id v (:cache-dir opts))))
+      (.getPath ^File (fhir-package/download! id v (:cache-dir opts) registries)))
 
     :else
     (cli-error ::unknown-distribution
@@ -307,7 +308,7 @@
           true)
 
       (cli/fhir-package? id)
-      (do (fhir-package/print-versions id) true)
+      (do (fhir-package/print-versions id (or (:registry opts) fhir-package/default-registries)) true)
 
       :else
       (do (println (str "  ! unrecognised id: " id)) false))

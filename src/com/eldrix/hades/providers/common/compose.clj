@@ -22,6 +22,20 @@
 (s/def ::expanding (s/nilable set?))
 (s/def ::expand-params (s/keys :opt-un [::filter ::activeOnly ::offset ::count ::expanding]))
 
+(defn- distinct-by
+  "Lazily drop elements whose `(f x)` key has already been seen, keeping
+  the first occurrence. Stays lazy so a downstream `take` short-circuits
+  enrichment of the unrealised tail."
+  [f coll]
+  (letfn [(step [xs seen]
+            (lazy-seq
+             (when-let [s (seq xs)]
+               (let [x (first s) k (f x)]
+                 (if (contains? seen k)
+                   (step (rest s) seen)
+                   (cons x (step (rest s) (conj seen k))))))))]
+    (step coll #{})))
+
 (defn- resolve-effective-version
   "Determine the effective version for a system in compose expansion.
    Priority: force-system-version > include version > system-version >
@@ -177,7 +191,13 @@
   "Expand a stored explicit-concept ValueSet directly from membership
   data when the request can be answered without live CodeSystem
   enrichment. Returns nil for complex/intensional cases so callers can
-  fall back to `expand-compose`."
+  fall back to `expand-compose`.
+
+  Interim (Phase 0b): a shape-limited bypass of the general path. Since
+  `expand-compose` now pages lazily and derives metadata structurally,
+  this exists only to skip lookups entirely for the displays-present
+  stored shape; it is no longer the sole guard against the enrichment
+  cliff."
   [compose {:keys [offset count filter displayLanguage] :as params}]
   (when (stored-extensional-answerable? compose params)
     (let [display-langs (display/parse-display-language displayLanguage)
@@ -211,8 +231,9 @@
   value — the same surface a match-driven `cs-expand*` would consider —
   so concept-driven includes honour `filter` without compose having to
   post-filter the merged expansion."
-  [svc system version concepts {:keys [activeOnly displayLanguage text properties]}]
-  (keep (fn [{:strs [code] provided-display "display"}]
+  [svc system version concepts {:keys [activeOnly displayLanguage text properties max-hits]}]
+  (cond->>
+   (keep (fn [{:strs [code] provided-display "display"}]
           (let [raw       (when system
                             (protos/cs-lookup svc (cond-> {:system system :code code}
                                                     version (assoc :version version))))
@@ -248,7 +269,8 @@
                              (filterv (fn [{k :code}]
                                         (contains? want (if (keyword? k) (name k) (str k))))
                                       (:properties looked-up))))))))))
-        concepts))
+         concepts)
+    max-hits (take max-hits)))
 
 (defn- build-query
   [system version filters params]
@@ -284,7 +306,7 @@
 
 (defn- expand-include
   "Expand one element of `compose.include[]` into a sub-result
-  `{:concepts :issues :total :fully-materialised?}`. The element may
+  `{:concepts :issues :total :used-systems}`. The element may
   specify a CodeSystem (`include.system` — match-driven when no
   explicit `concept[]` is given; concept-driven when it is) and / or a
   list of imported ValueSets (`include.valueSet[]`). When both system
@@ -337,39 +359,37 @@
                bad-filter-issue      (conj bad-filter-issue)
                (seq match-issues)    (into match-issues))
      :total (:total match-result)
-     ;; True when this include's concepts are fully materialised — no
-     ;; truncation by `:count` is possible. Concept-driven includes
-     ;; ignore `max-hits`; vs-refs recurse with the same params and may
-     ;; paginate, so we conservatively flag those as unsafe.
-     :fully-materialised? (and (some? concepts) (empty? vs-urls))
+     ;; Systems (and resolved versions) this include contributes, derived
+     ;; structurally so downstream metadata never walks the lazy concept
+     ;; seq. The system include carries its resolved version; vs-refs
+     ;; expand eagerly, so reading their concepts' systems is cheap.
+     :used-systems (cond-> #{}
+                     system            (conj [system version])
+                     (seq vs-concepts) (into (map (fn [c] [(:system c) (:version c)])) vs-concepts))
      :concepts (if (and (some? system-results) (seq vs-concepts))
                  (let [vs-set (set (map concept-key vs-concepts))]
                    (filter (fn [c] (contains? vs-set (concept-key c))) system-results))
                  (concat system-results vs-concepts))}))
 
-(defn- collect-used-codesystems
-  [svc compose concepts]
-  (let [concept-pairs (into #{} (keep (fn [c] (when-let [sys (:system c)] [sys (:version c)]))) concepts)
-        concept-systems (into #{} (map first) concept-pairs)
-        include-pairs (into #{}
-                            (comp
-                             (keep (fn [inc]
-                                     (when-let [sys (get inc "system")]
-                                       (when-not (contains? concept-systems sys)
-                                         [sys (get inc "version")])))))
-                            (get compose "include"))
-        pairs (into concept-pairs include-pairs)]
-    (mapv (fn [[sys ver]]
-            (let [meta (when sys
-                         (or (when ver (composite/cs-meta svc (canonical/versioned-uri sys ver)))
-                             (composite/cs-meta svc sys)))
-                  ver' (or ver (:version meta))
-                  uri (if ver' (str sys "|" ver') sys)]
-              (cond-> {:uri uri}
+(defn- resolve-used-codesystem
+  "Resolve a `[system version]` pair to `{:system :version :entry}`,
+  fetching `cs-meta` for status / experimental / standards-status and the
+  concrete version when the include left it unpinned. `:version` is the
+  resolved concrete version (so multi-version detection sees the real
+  version an unpinned include expands to, not nil); `:entry` is the
+  `used-codesystem` wire row."
+  [svc [sys ver]]
+  (let [meta (when sys
+               (or (when ver (composite/cs-meta svc (canonical/versioned-uri sys ver)))
+                   (composite/cs-meta svc sys)))
+        ver' (or ver (:version meta))
+        uri (if ver' (str sys "|" ver') sys)]
+    {:system  sys
+     :version ver'
+     :entry   (cond-> {:uri uri}
                 (:status meta) (assoc :status (:status meta))
                 (some? (:experimental meta)) (assoc :experimental (:experimental meta))
-                (:standards-status meta) (assoc :standards-status (:standards-status meta)))))
-          pairs)))
+                (:standards-status meta) (assoc :standards-status (:standards-status meta)))}))
 
 (defn- extract-compose-pins
   [compose]
@@ -415,27 +435,32 @@
                          (assoc :max-hits (+ (:count params) (or (:offset params) 0))))
         include-results (mapv #(expand-include svc % include-params) includes)
         include-issues (mapcat :issues include-results)
-        included (into {} (map (fn [c] [(concept-key c) c]))
-                       (mapcat :concepts include-results))
         excluded (when (seq excludes)
                    (let [exclude-results (mapv #(expand-include svc % params) excludes)]
                      (set (map concept-key (mapcat :concepts exclude-results)))))
-        after-exclude (if excluded
-                        (remove (fn [[k _]] (contains? excluded k)) included)
-                        included)
-        ;; Text filtering is the provider's responsibility for
-        ;; match-driven includes (`cs-expand*` honours `:text`,
-        ;; matching display + designations via the per-terminology
-        ;; index) and `expand-include-concepts`' responsibility for
-        ;; concept-driven includes (it gates emission on display +
-        ;; designations). Compose neither re-filters nor materialises.
-        filtered (map second after-exclude)
-        used-cs (collect-used-codesystems svc compose filtered)
-        sys->versions (reduce (fn [acc c]
-                                (if-let [sys (:system c)]
-                                  (update acc sys (fnil conj #{}) (:version c))
+        ;; Lazy, first-wins dedup over the concatenated include concepts,
+        ;; then lazy exclude removal. Text filtering is the provider's job
+        ;; for match-driven includes (`cs-expand*` honours `:text`) and
+        ;; `expand-include-concepts`' job for concept-driven includes;
+        ;; compose neither re-filters nor materialises. Keeping this lazy
+        ;; lets `take count` below pull only a page's worth of enrichment.
+        deduped (distinct-by concept-key (mapcat :concepts include-results))
+        filtered (if excluded
+                   (remove (fn [c] (contains? excluded (concept-key c))) deduped)
+                   deduped)
+        ;; Expansion metadata is derived structurally from the include
+        ;; systems/versions, never by walking the lazy concept seq. Each
+        ;; pair is resolved to its concrete version so multi-version
+        ;; detection sees the version an unpinned include actually
+        ;; expands to.
+        resolved-cs (mapv #(resolve-used-codesystem svc %)
+                          (sort-by str (into #{} (mapcat :used-systems) include-results)))
+        used-cs (into [] (distinct) (map :entry resolved-cs))
+        sys->versions (reduce (fn [acc {:keys [system version]}]
+                                (if (and system version)
+                                  (update acc system (fnil conj #{}) version)
                                   acc))
-                              {} filtered)
+                              {} resolved-cs)
         multi-version (into #{} (keep (fn [[sys vers]]
                                         (when (> (count vers) 1) sys)))
                             sys->versions)
@@ -443,18 +468,19 @@
         paged (cond->> filtered
                 (pos? offset')  (drop offset')
                 (:count params) (take (:count params)))
+        ;; `:total` (FHIR `expansion.total`) is optional on the wire, so
+        ;; we supply it only when it is cheap and omit it otherwise. Cheap
+        ;; means: a single provider-backed include returns its own total
+        ;; (`singleton-total`), or a full expansion (`:count` absent)
+        ;; realises every member anyway so counting is free. With `:count`
+        ;; present, counting would force the whole — possibly
+        ;; enrichment-bound — seq, so we leave `:total` off.
         singleton-total (when (and (= 1 (count include-results)) (empty? excludes))
                           (:total (first include-results)))
-        ;; Counting `filtered` is only safe when no include can have
-        ;; been silently truncated by `:count`. That holds for include
-        ;; results explicitly flagged fully-materialised (concept-driven
-        ;; with no vs-refs) and when no paging is in effect.
-        all-materialised? (every? :fully-materialised? include-results)
         total (cond
-                singleton-total                        singleton-total
-                (or all-materialised?
-                    (nil? (:count params)))            (count filtered)
-                :else                                  nil)]
+                singleton-total        singleton-total
+                (nil? (:count params)) (count filtered)
+                :else                  nil)]
     (cond-> {:concepts              (vec paged)
              :used-codesystems      used-cs
              :compose-pins          (extract-compose-pins compose)
