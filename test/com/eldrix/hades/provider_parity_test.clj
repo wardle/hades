@@ -113,7 +113,11 @@
     :groups [{:source cs-url :target target-cs
               :elements [{:code "red"   :target [{:code "ISO-R" :equivalence "equivalent"}]}
                          {:code "green" :target [{:code "ISO-G" :equivalence "equivalent"}]}
-                         {:code "blue"  :target [{:code "ISO-B" :equivalence "equivalent"}]}]}]}])
+                         {:code "blue"  :target [{:code "ISO-B" :equivalence "equivalent"}]}
+                         ;; Explicitly-unmatched element: carries no target
+                         ;; code. Must survive indexing in both providers
+                         ;; (the FTRM target_code column is nullable).
+                         {:code "black" :target [{:equivalence "unmatched"}]}]}]}])
 
 ;; ---------------------------------------------------------------------------
 ;; Fixture
@@ -403,4 +407,7 @@
                     {:url cm-url :system cs-url :code "green"}))
     (testing "no-mapping returns result=false"
       (parity-check "cm-translate" protos/cm-translate im sq
-                    {:url cm-url :system cs-url :code "scarlet"}))))
+                    {:url cm-url :system cs-url :code "scarlet"}))
+    (testing "explicitly-unmatched element (no target code) agrees across providers"
+      (parity-check "cm-translate" protos/cm-translate im sq
+                    {:url cm-url :system cs-url :code "black" :target target-cs}))))

@@ -236,7 +236,7 @@ CREATE TABLE IF NOT EXISTS conceptmap_element (
   target_version TEXT,
   source_code    TEXT NOT NULL,
   source_display TEXT,
-  target_code    TEXT NOT NULL,
+  target_code    TEXT,                    -- NULL for equivalence='unmatched' (no target)
   target_display TEXT,
   equivalence    TEXT NOT NULL,
   comment        TEXT,
@@ -247,7 +247,7 @@ CREATE TABLE IF NOT EXISTS conceptmap_element (
 CREATE UNIQUE INDEX IF NOT EXISTS cme_uniq ON conceptmap_element(
   cm_url, cm_version, group_idx,
   COALESCE(source_system, ''), source_code,
-  COALESCE(target_system, ''), target_code,
+  COALESCE(target_system, ''), COALESCE(target_code, ''),
   equivalence
 );
 CREATE INDEX IF NOT EXISTS cme_fwd

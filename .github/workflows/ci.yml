@@ -293,7 +293,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v3
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v4
 
       - name: Provision pinned FHIR packages (in-memory + SQLite)
         id: provision
@@ -315,7 +315,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v3
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v4
 
   # VSAC extensional ValueSets for the bench suite (clj -M:bench) and
   # tx-benchmark EX04. us.nlm.vsac 0.24.0 is absent from packages.fhir.org
@@ -358,7 +358,7 @@ jobs:
           path: |
             .hades/vsac-0.24.db
             .hades/fhir-packages/us.nlm.vsac-0.24.0
-          key: vsac-0.24.0-v1
+          key: vsac-0.24.0-v2
 
       - name: Provision VSAC (SQLite container + unpacked package)
         id: provision
@@ -374,7 +374,7 @@ jobs:
           path: |
             .hades/vsac-0.24.db
             .hades/fhir-packages/us.nlm.vsac-0.24.0
-          key: vsac-0.24.0-v1
+          key: vsac-0.24.0-v2
 
   # ---------------------------------------------------------------------------
   # Test + conformance: each restores only the caches it actually consumes.
@@ -433,7 +433,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v3
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v4
           fail-on-cache-miss: true
 
       # VSAC SQLite container + unpacked package — both sides of the
@@ -443,7 +443,7 @@ jobs:
           path: |
             .hades/vsac-0.24.db
             .hades/fhir-packages/us.nlm.vsac-0.24.0
-          key: vsac-0.24.0-v1
+          key: vsac-0.24.0-v2
           fail-on-cache-miss: true
 
       - name: Compile check
@@ -579,7 +579,7 @@ jobs:
           path: |
             .hades/fhir-packages
             .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v3
+          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v4
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
@@ -587,7 +587,7 @@ jobs:
           path: |
             .hades/vsac-0.24.db
             .hades/fhir-packages/us.nlm.vsac-0.24.0
-          key: vsac-0.24.0-v1
+          key: vsac-0.24.0-v2
           fail-on-cache-miss: true
 
       - id: pin
