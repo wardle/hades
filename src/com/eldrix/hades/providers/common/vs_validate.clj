@@ -43,21 +43,31 @@
   [include code]
   (update include "filter" (fnil conj []) (code-filter code)))
 
-(defn- narrow-match-driven-includes
+(defn- narrow-concept-driven-include
+  "Filter a concept-driven include's `concept[]` to entries whose code
+  matches `code` case-insensitively. Keeping case variants preserves the
+  case-insensitive match `find-best-match` performs downstream."
+  [include code]
+  (let [target (str/lower-case code)]
+    (update include "concept"
+            (fn [concepts]
+              (filterv #(some-> (get % "code") str/lower-case (= target)) concepts)))))
+
+(defn- narrow-includes-to-code
   "For ValueSet validation we only need to know whether one coding is in
-  the compose. Match-driven includes such as `{system: http://loinc.org}`
-  can be too large for provider-default expansion windows, so push the
-  exact code predicate into matching includes/excludes before expanding.
-  Explicit `concept[]` includes are already bounded and are left intact."
+  the compose, so narrow every include/exclude to just the caller's code
+  before expanding — turning a whole-membership enrichment into a single
+  candidate lookup. Match-driven includes (e.g. `{system: http://loinc.org}`)
+  get the exact code predicate pushed into their filters; concept-driven
+  includes have their `concept[]` filtered to the matching code. Includes
+  that are neither (e.g. valueSet-only) are left intact."
   [compose-def system code]
-  (if (and system code
-           (some #(match-driven-system-include? % system)
-                 (concat (get compose-def "include")
-                         (get compose-def "exclude"))))
+  (if (and code (seq compose-def))
     (let [narrow (fn [include]
-                   (if (match-driven-system-include? include system)
-                     (add-code-filter include code)
-                     include))]
+                   (cond
+                     (match-driven-system-include? include system) (add-code-filter include code)
+                     (seq (get include "concept"))                 (narrow-concept-driven-include include code)
+                     :else                                         include))]
       (cond-> compose-def
         (contains? compose-def "include") (update "include" #(mapv narrow %))
         (contains? compose-def "exclude") (update "exclude" #(mapv narrow %))))
@@ -368,7 +378,7 @@
   [svc {:keys [url version compose]} params]
   (let [expanding (conj (or (:expanding params) #{}) url)
         {:keys [code system display]} params
-        validation-compose (narrow-match-driven-includes compose system code)
+        validation-compose (narrow-includes-to-code compose system code)
         ;; Forward request flags (force-/system-/check-system-version) to
         ;; compose so version overrides apply during the validation expand.
         compose-params (-> (select-keys params [:force-system-version :system-version

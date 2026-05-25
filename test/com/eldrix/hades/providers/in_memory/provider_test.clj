@@ -416,6 +416,42 @@
         (is (true? (:result result)))
         (is (some? (:message result)))))))
 
+;; Stored-extensional validate-code must determine membership directly
+;; from the stored concept[], not by enriching the whole membership.
+;; These cases lock the case-insensitive matching the narrowing relies on.
+(def ci-cs-map
+  {"resourceType" "CodeSystem"
+   "url"          "http://example.com/ci-cs"
+   "version"      "1.0"
+   "status"       "active"
+   "content"      "complete"
+   "caseSensitive" false
+   "concept"      [{"code" "ABC" "display" "Alpha"}
+                   {"code" "DEF" "display" "Delta"}]})
+
+(def ci-vs-map
+  {"resourceType" "ValueSet"
+   "url"          "http://example.com/ci-vs"
+   "status"       "active"
+   "compose"      {"include" [{"system" "http://example.com/ci-cs"
+                               "concept" [{"code" "ABC"}]}]}})
+
+(deftest extensional-validate-code-case-insensitive-test
+  (let [svc (composite/from-providers [(load-fhir/from-fhir ci-cs-map)])
+        vs  (load-fhir/from-fhir ci-vs-map)]
+    (testing "exact-case member validates true"
+      (let [r (protos/vs-validate-code vs svc {:code "ABC" :system "http://example.com/ci-cs"})]
+        (is (true? (:result r)))
+        (is (= "Alpha" (:display r)))))
+    (testing "case-insensitive member validates true with normalized-code"
+      (let [r (protos/vs-validate-code vs svc {:code "abc" :system "http://example.com/ci-cs"})]
+        (is (true? (:result r)))
+        (is (= :ABC (:normalized-code r)))))
+    (testing "member of CS but not of the value set fails"
+      (let [r (protos/vs-validate-code vs svc {:code "DEF" :system "http://example.com/ci-cs"})]
+        (is (false? (:result r)))
+        (is (= "not-in-vs" (:details-code (first (:issues r)))))))))
+
 ;; ---------------------------------------------------------------------------
 ;; Supplement wrapper — observable behaviour
 ;;

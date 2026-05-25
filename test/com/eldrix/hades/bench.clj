@@ -479,12 +479,11 @@
           (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1267.17"
                              :properties ["inactive"] :count 50}))}
    ;; Missing-display trigger (see `missing-display-overlay`). Real SNOMED
-   ;; codes with displays stripped, so even a plain page and a single-code
-   ;; validate must look every member up against Hermes to backfill the
-   ;; display. `validate-code` matters as much as `expand` here: it reuses
-   ;; the same `expand-compose` path (it does NOT narrow explicit
-   ;; `concept[]` includes), so validating one code against this set pays
-   ;; the full N-member enrichment — the Phase 3 payoff this op records.
+   ;; codes with displays stripped, so a plain expand page must look every
+   ;; member up against Hermes to backfill the display. `validate-code`
+   ;; narrows the stored `concept[]` to the caller's code before expanding
+   ;; (Phase 3), so it enriches a single candidate rather than the whole
+   ;; membership — this op records that single-candidate latency.
    {:id :expand/cliff-missing-display :tx-bench "EX04"
     :fn (fn [svc]
           (hades/expand (:svc (missing-display-overlay svc))
