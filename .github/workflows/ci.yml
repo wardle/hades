@@ -584,7 +584,9 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/vsac-0.24.db
+          path: |
+            .hades/vsac-0.24.db
+            .hades/fhir-packages/us.nlm.vsac-0.24.0
           key: vsac-0.24.0-v1
           fail-on-cache-miss: true
 
