@@ -76,6 +76,27 @@ concurrency. Server-class hardware with more cores scales higher.
 See [Performance](doc/performance.md) for the methodology, tail
 latencies and the full per-operation breakdown.
 
+### In-memory vs SQLite container
+
+FHIR-package terminologies (`CodeSystem` / `ValueSet` / `ConceptMap`
+resources, as opposed to SNOMED CT and LOINC, which have their own
+backends) can be served two ways. Both serve identical content — a
+provider-parity test guarantees it — so the choice is purely a
+memory/latency tradeoff:
+
+- **SQLite ([FTRM](doc/ftrm.md)) container** — build the package(s) into
+  a `.db` (`hades import fhir.db <pkg>…`) and `serve fhir.db`. The
+  database is memory-mapped, so the package data stays off the JVM heap —
+  resident memory tracks the working set rather than the size of the
+  corpus — and the indexed / full-text query paths make free-text search
+  and intensional `$expand` faster. **This is the recommended default**,
+  especially for memory-constrained deployments.
+- **In-memory** — `serve` an unpacked package directory directly. Every
+  resource is parsed into the heap, so lookups are hashmap hits, but a
+  full package set costs several GB of heap. Worth it only on large-RAM
+  hosts. Request-scoped overlay resources (`tx-resource` parameters on an
+  operation) are always served in-memory regardless of this choice.
+
 ## Documentation
 
 | Guide | Description |
