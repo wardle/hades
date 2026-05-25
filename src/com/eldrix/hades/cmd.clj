@@ -354,10 +354,15 @@
   (run! compact-one (files-or-throw paths)))
 
 (defn- log-catalogue-summary [svc]
-  (log/info "service catalogue"
-            {:codesystem-count (count (vec (protos/cs-metadata svc {})))
-             :valueset-count   (count (vec (protos/vs-metadata svc {})))
-             :conceptmap-count (count (vec (protos/cm-metadata svc {})))}))
+  ;; Count distinct url|version, not raw rows: a resource served by more
+  ;; than one provider (e.g. a CodeSystem present in two FTRM containers)
+  ;; appears once per provider in the metadata listing, which would
+  ;; otherwise inflate the tally above the deduplicated served catalogue.
+  (let [distinct-count (fn [ms] (count (into #{} (map (juxt :url :version)) ms)))]
+    (log/info "service catalogue"
+              {:codesystem-count (distinct-count (protos/cs-metadata svc {}))
+               :valueset-count   (distinct-count (protos/vs-metadata svc {}))
+               :conceptmap-count (distinct-count (protos/cm-metadata svc {}))})))
 
 (defn- build-svc
   "Open CLI positional paths as a Hades service."
