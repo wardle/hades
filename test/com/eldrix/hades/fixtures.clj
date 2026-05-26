@@ -1,8 +1,10 @@
 (ns com.eldrix.hades.fixtures
   "Shared test fixtures: pinned fixture paths, HTTP server lifecycle, and
-  a request helper. Tests open Hades directly; if a fixture is missing,
-  `hades/open` throws on the path."
+  a request helper. SNOMED/LOINC/FTRM databases must be pre-provisioned
+  (`hades/open` throws if a path is missing); FHIR package tarballs
+  self-provision via `download!` (see `fhir-archive`)."
   (:require [clojure.data.json :as json]
+            [com.eldrix.hades.impl.fhir-package :as fhir-package]
             [com.eldrix.hades.impl.http :as http])
   (:import (java.net ServerSocket URI)
            (java.net.http HttpClient HttpRequest HttpRequest$Builder
@@ -20,35 +22,37 @@
 (def loinc-version     "2.82")
 (def loinc-db-path     (str ".hades/loinc-" loinc-version ".db"))
 
-(def vsac-version         "0.24")           ; SQLite container filename
-(def vsac-db-path         (str ".hades/vsac-" vsac-version ".db"))
-(def vsac-package-version "0.24.0")          ; FHIR package version (registry)
-
-(def fhir-packages-dir ".hades/fhir-packages")
-(def fhir-smoke-db-path ".hades/fhir-smoke.db")
+(def fhir-cache-dir    ".hades/fhir-cache")  ; download cache of FHIR package .tgz tarballs
+(def fhir-tx-db-path   ".hades/fhir-tx.db")  ; single combined FTRM container (all FHIR packages incl VSAC)
 (def tx-ecosystem-dir  ".hades/tx-ecosystem")
 
-;; Unpacked us.nlm.vsac package — in-memory provider side of the VSAC
-;; FTRM-vs-in-memory parity test.
-(def vsac-package-dir  (str fhir-packages-dir "/us.nlm.vsac-" vsac-package-version "/package"))
-
 (def fhir-packages
-  "Canonical FHIR R4 package set used by both the SQLite smoke DB
-  (`fhir-smoke-db-path`) and the in-memory parity test. Each entry is
-  `[id version]`; the on-disk directory under `fhir-packages-dir` is
-  `<id>-<version>/package/`. Keep CI's `provision-fhir` `--dist` list
-  in sync with this — both sides of the parity test must see the
-  same packages or the catalogue diff is meaningless. Mirrors the
-  tx-benchmark upstream dataset (incl. `us.cdc.phinvads`, 1,967
-  ValueSets) minus `us.nlm.vsac` — VSAC is a separate fixture
-  (`vsac-db-path` / `vsac-package-dir`) because of its size."
+  "Canonical FHIR R4 package set, installed into both the combined FTRM
+  container (`fhir-tx-db-path`) and the download cache (`fhir-cache-dir`,
+  one `.tgz` per package). Keep in sync with CI's `--dist` provisioning, or
+  the two parity sides see different packages and the catalogue diff is
+  meaningless. Mirrors the tx-benchmark upstream dataset, including
+  `us.cdc.phinvads` (1,967 ValueSets) and `us.nlm.vsac` (9,071 ValueSets)."
   [["hl7.fhir.r4.core"     "4.0.1"]
    ["hl7.terminology.r4"   "7.0.1"]
    ["hl7.fhir.us.core"     "6.1.0"]
    ["hl7.fhir.uv.ips"      "2.0.0"]
    ["hl7.fhir.uv.ips"      "1.1.0"]
    ["fhir.tx.support.r4"   "0.34.0"]
-   ["us.cdc.phinvads"      "0.12.0"]])
+   ["us.cdc.phinvads"      "0.12.0"]
+   ["us.nlm.vsac"          "0.24.0"]])
+
+(defn fhir-archive
+  "Local tarball path for a FHIR package, via the same `download!` the
+  install CLI uses: restores from `fhir-cache-dir` when present, otherwise
+  fetches from the registry."
+  [id version]
+  (.getPath (fhir-package/download! id version fhir-cache-dir)))
+
+(defn fhir-package-archives
+  "Local tarball paths for the canonical `fhir-packages` set."
+  []
+  (mapv (fn [[id version]] (fhir-archive id version)) fhir-packages))
 
 ;; ---------------------------------------------------------------------------
 ;; HTTP server lifecycle

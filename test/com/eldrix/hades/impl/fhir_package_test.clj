@@ -4,6 +4,7 @@
   branches of `download!`. The HTTP+tar happy path is exercised
   end-to-end by the CI `build-data` job."
   (:require [clojure.java.io :as io]
+            [clojure.java.shell :as sh]
             [clojure.test :refer [deftest is testing]]
             [com.eldrix.hades.impl.fhir-package :as fp])
   (:import (java.io File)
@@ -112,36 +113,41 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"version required"
           (fp/download! "hl7.test.dummy" "" "/tmp/__fp-test-never-created")))))
 
-(deftest download-idempotent-when-already-extracted
-  (testing "if both <id>-<ver>.tgz and <id>-<ver>/ already exist, download! returns the package dir without HTTP or tar"
+(defn- make-package-tgz
+  "Build a cached `<dir>/<tag>.tgz` containing one FHIR JSON resource under
+  the usual `package/` layout."
+  [^File dir tag]
+  (let [staging (io/file dir "staging")
+        pkg     (io/file staging "package")]
+    (.mkdirs pkg)
+    (spit (io/file pkg "CodeSystem-x.json") "{\"resourceType\":\"CodeSystem\"}")
+    (let [{:keys [exit err]} (sh/sh "tar" "czf" (str tag ".tgz")
+                                    "-C" (.getPath staging) "package"
+                                    :dir (.getPath dir))]
+      (when (not= 0 exit) (throw (ex-info (str "fixture tar failed: " err) {:exit exit}))))
+    (delete-tree staging)))
+
+(deftest download-caches-and-returns-tgz
+  (testing "download! returns the cached tarball and does not extract it"
     (let [tmp (make-temp-dir)
-          id  "hl7.test.dummy"
-          ver "1.2.3"
-          tag (str id "-" ver)
-          tgz (io/file tmp (str tag ".tgz"))
-          dst (io/file tmp tag)
-          pkg (io/file dst "package")]
+          tag "hl7.test.dummy-1.0.0"]
       (try
-        (spit tgz "")
-        (.mkdirs pkg)
-        (let [result (fp/download! id ver tmp)]
-          (is (= (.getCanonicalPath pkg) (.getCanonicalPath result))
-              "returns the inner /package directory when present"))
+        (make-package-tgz tmp tag)
+        (let [^File result (fp/download! "hl7.test.dummy" "1.0.0" tmp)]
+          (is (= (str tag ".tgz") (.getName result)))
+          (is (.isFile result))
+          (is (not (.exists (io/file tmp tag)))
+              "the download cache holds only the tarball, no extracted directory"))
         (finally
           (delete-tree tmp))))))
 
-(deftest download-returns-extract-root-when-no-package-subdir
-  (testing "if the extract has no inner /package dir, the extract root is returned"
+(deftest download-skips-network-when-tgz-cached
+  (testing "a cached tgz is returned without any network download"
     (let [tmp (make-temp-dir)
-          id  "hl7.test.dummy"
-          ver "9.9.9"
-          tag (str id "-" ver)
-          tgz (io/file tmp (str tag ".tgz"))
-          dst (io/file tmp tag)]
+          tag "hl7.test.dummy-1.0.0"]
       (try
-        (spit tgz "")
-        (.mkdirs dst)
-        (let [result (fp/download! id ver tmp)]
-          (is (= (.getCanonicalPath dst) (.getCanonicalPath result))))
+        (make-package-tgz tmp tag)
+        (with-redefs [fp/try-registries (fn [& _] (throw (ex-info "network must not be touched" {})))]
+          (is (.isFile ^File (fp/download! "hl7.test.dummy" "1.0.0" tmp))))
         (finally
           (delete-tree tmp))))))

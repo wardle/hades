@@ -15,8 +15,10 @@
   precisely to prevent that.
 
   Tagged `^:live` — needs `.hades/snomed-intl-20250201.db`,
-  `.hades/loinc-2.82.db`, the SQLite container `.hades/vsac-0.24.db`, and
-  the unpacked package `.hades/fhir-packages/us.nlm.vsac-0.24.0/package`."
+  `.hades/loinc-2.82.db`, the combined FTRM container `.hades/fhir-tx.db`
+  (which includes VSAC), and the cached VSAC tarball under
+  `.hades/fhir-cache` (extracted on open). The `cts.nlm.nih.gov` URL filter
+  restricts this comparison to VSAC ValueSets."
   (:require [clojure.set :as set]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
@@ -28,8 +30,8 @@
 
 (defn parity-fixture [f]
   (let [base [fixtures/snomed-db-path fixtures/loinc-db-path]
-        mem  (hades/open (conj base fixtures/vsac-package-dir))
-        sql  (hades/open (conj base fixtures/vsac-db-path))]
+        mem  (hades/open (conj base (fixtures/fhir-archive "us.nlm.vsac" "0.24.0")))
+        sql  (hades/open (conj base fixtures/fhir-tx-db-path))]
     (binding [*mem* mem *sql* sql]
       (try (f)
            (finally

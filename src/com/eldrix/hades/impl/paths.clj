@@ -3,6 +3,7 @@
   (:require [clojure.spec.alpha :as s]
             [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.composite :as composite]
+            [com.eldrix.hades.impl.archive :as archive]
             [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.providers.common.fhir-loader :as fhir-loader]
             [com.eldrix.hades.providers.snomed.provider :as snomed]
@@ -137,19 +138,29 @@
 (defn open-paths
   "Open a Hades service from built terminology artefact paths.
 
+  Any `paths` that are archive files (`.tgz`/`.tar.gz`/`.tar`/`.zip`) are
+  extracted to temporary directories, opened, and the directories deleted
+  before returning. FHIR JSON is read into memory while opening, so the
+  extracted files aren't needed afterwards — archived sources must be
+  release/JSON sources, not databases opened in place.
+
   Options match `com.eldrix.hades.core/open`; any `:supplements`,
   `:naming-systems` or `:closers` supplied by the caller are appended to
   those discovered from the paths. `:default-locale` is forwarded to
   `hermes/open` for SNOMED entries."
   ([paths] (open-paths paths {}))
   ([paths opts]
-   (let [bundle (bundle-for-paths paths (select-keys opts [:default-locale]))
-         opts'  (-> opts
-                    (update :supplements (fnil into []) (:supplements bundle))
-                    (update :naming-systems (fnil into []) (:naming-systems bundle))
-                    (update :closers (fnil into []) (:closers bundle)))]
+   (let [{:keys [paths temp-dirs]} (archive/resolve-sources paths)]
      (try
-       (composite/from-providers (:providers bundle) opts')
-       (catch Throwable t
-         (close-bundle! bundle)
-         (throw t))))))
+       (let [bundle (bundle-for-paths paths (select-keys opts [:default-locale]))
+             opts'  (-> opts
+                        (update :supplements (fnil into []) (:supplements bundle))
+                        (update :naming-systems (fnil into []) (:naming-systems bundle))
+                        (update :closers (fnil into []) (:closers bundle)))]
+         (try
+           (composite/from-providers (:providers bundle) opts')
+           (catch Throwable t
+             (close-bundle! bundle)
+             (throw t))))
+       (finally
+         (run! archive/delete-recursively temp-dirs))))))

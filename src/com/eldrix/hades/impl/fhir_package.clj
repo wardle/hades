@@ -12,7 +12,6 @@
   outage is not masked as not-found)."
   (:require [clojure.data.json :as json]
             [clojure.java.io :as io]
-            [clojure.java.shell :as sh]
             [clojure.pprint :as pp]
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
@@ -156,21 +155,20 @@
   (str registry "/" id "/" version))
 
 (defn download!
-  "Download and extract `id`@`version` into `dest-dir/<id>-<version>/`.
-  Returns the path to the extracted package directory (the directory
-  that contains FHIR JSON resources — typically `<dir>/package`).
-  Idempotent: skips download/extract when the targets already exist."
+  "Download `id`@`version` into the cache at `dest-dir/<id>-<version>.tgz`
+  and return that tarball `File`, restoring from the cache (no network)
+  when it is already present. The tarball is the cache of record;
+  extraction happens on demand when `import`/`serve` consume it (see
+  `impl/archive`)."
   ([id version dest-dir] (download! id version dest-dir default-registries))
   ([id version dest-dir registries]
    (when (str/blank? version)
      (throw (ex-info "Package version required (use id@version or specify --version)"
                      {:id id})))
-   (let [tag (str id "-" version)
-         dest (io/file dest-dir tag)
-         tgz  (io/file dest-dir (str tag ".tgz"))]
+   (let [tgz (io/file dest-dir (str id "-" version ".tgz"))]
      (.mkdirs (io/file dest-dir))
      (when-not (.exists tgz)
-       (let [tmp (io/file dest-dir (str tag ".tgz.part"))]
+       (let [tmp (io/file dest-dir (str id "-" version ".tgz.part"))]
          (try-registries registries
            (fn [registry]
              (log/info "fetching FHIR package" {:id id :version version :url (tarball-url id version registry)})
@@ -187,15 +185,7 @@
              (Files/move (.toPath tmp) (.toPath tgz)
                          (into-array java.nio.file.CopyOption
                                      [StandardCopyOption/REPLACE_EXISTING]))))))
-     (when-not (.exists dest)
-       (log/info "extracting FHIR package" {:tgz (.getPath tgz) :into (.getPath dest)})
-       (.mkdirs dest)
-       (let [{:keys [exit err]} (sh/sh "tar" "xzf" (.getPath tgz) "-C" (.getPath dest))]
-         (when (not= 0 exit)
-           (throw (ex-info (str "tar extract failed: " err)
-                           {:tgz (.getPath tgz) :dest (.getPath dest) :exit exit})))))
-     (let [pkg-dir (io/file dest "package")]
-       (if (.isDirectory pkg-dir) pkg-dir dest)))))
+     tgz)))
 
 ;; ---------------------------------------------------------------------------
 ;; Presentation

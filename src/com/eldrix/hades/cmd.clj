@@ -6,6 +6,7 @@
             [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
+            [com.eldrix.hades.impl.archive :as archive]
             [com.eldrix.hades.impl.cli :as cli]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.impl.http :as http]
@@ -135,42 +136,48 @@
 (defn- import-into!
   "Import release sources into the destination database `file`.
 
-  Each input path is walked for recognisable files: RF2 components,
-  LOINC table-core markers, FHIR JSON resources. A TRUD bundle with
+  Each input path that is an archive file (`.tgz`/`.tar.gz`/`.tar`/`.zip`)
+  is extracted to a temporary directory first, then walked like any other
+  source path. Each input path is walked for recognisable files: RF2
+  components, LOINC table-core markers, FHIR JSON resources. A TRUD bundle with
   several sibling RF2 trees yields RF2 entries across all of them
   (Hermes recurses from each unique parent dir, so non-standard
   layouts work). RF2 (Hermes LMDB+Lucene) and FHIR-data (FTRM SQLite)
   are different storage formats and cannot share one `file`."
   [file paths]
-  (let [files     (files-or-throw paths)
-        ;; database-only = built artefact, can't be an import source
-        unimport  (filter #(and (:database? %) (not (:importable? %))) files)
-        rf2-dirs  (->> files (filter #(= :rf2 (:kind %))) (map :dir) distinct
-                       (mapv #(.getPath ^File %)))
-        loinc-dirs (->> files (filter #(= :loinc (:kind %))) (map :dir) distinct
-                        (mapv #(.getPath ^File %)))
-        fhir-json-files (->> files (filter #(= :fhir-json (:kind %))) (mapv :file))]
-    (when (seq unimport)
-      (cli-error ::unimportable-kind
-                 (str "Cannot import already-built artefacts: "
-                      (str/join ", " (map #(.getPath ^File (:file %)) unimport))
-                      ". Use `serve` to open them directly.")
-                 {:paths (mapv #(.getPath ^File (:file %)) unimport)}))
-    (when (and (seq rf2-dirs) (or (seq loinc-dirs) (seq fhir-json-files)))
-      (cli-error ::mixed-sources
-                 (str "Cannot mix SNOMED RF2 with LOINC / FHIR JSON in one "
-                      "import — they target different database formats.")
-                 {:rf2 rf2-dirs :loinc loinc-dirs
-                  :fhir-json (mapv #(.getPath ^File %) fhir-json-files)}))
-    (when (and (seq loinc-dirs) (seq fhir-json-files))
-      (cli-error ::mixed-sources
-                 (str "Cannot mix LOINC releases with FHIR JSON in one import "
-                      "— they target different database formats.")
-                 {:loinc loinc-dirs
-                  :fhir-json (mapv #(.getPath ^File %) fhir-json-files)}))
-    (when (seq rf2-dirs)        (import-rf2!       file rf2-dirs))
-    (when (seq loinc-dirs)      (import-loinc!     file loinc-dirs))
-    (when (seq fhir-json-files) (import-fhir-json! file fhir-json-files))))
+  (let [{:keys [paths temp-dirs]} (archive/resolve-sources paths)]
+    (try
+      (let [files     (files-or-throw paths)
+            ;; database-only = built artefact, can't be an import source
+            unimport  (filter #(and (:database? %) (not (:importable? %))) files)
+            rf2-dirs  (->> files (filter #(= :rf2 (:kind %))) (map :dir) distinct
+                           (mapv #(.getPath ^File %)))
+            loinc-dirs (->> files (filter #(= :loinc (:kind %))) (map :dir) distinct
+                            (mapv #(.getPath ^File %)))
+            fhir-json-files (->> files (filter #(= :fhir-json (:kind %))) (mapv :file))]
+        (when (seq unimport)
+          (cli-error ::unimportable-kind
+                     (str "Cannot import already-built artefacts: "
+                          (str/join ", " (map #(.getPath ^File (:file %)) unimport))
+                          ". Use `serve` to open them directly.")
+                     {:paths (mapv #(.getPath ^File (:file %)) unimport)}))
+        (when (and (seq rf2-dirs) (or (seq loinc-dirs) (seq fhir-json-files)))
+          (cli-error ::mixed-sources
+                     (str "Cannot mix SNOMED RF2 with LOINC / FHIR JSON in one "
+                          "import — they target different database formats.")
+                     {:rf2 rf2-dirs :loinc loinc-dirs
+                      :fhir-json (mapv #(.getPath ^File %) fhir-json-files)}))
+        (when (and (seq loinc-dirs) (seq fhir-json-files))
+          (cli-error ::mixed-sources
+                     (str "Cannot mix LOINC releases with FHIR JSON in one import "
+                          "— they target different database formats.")
+                     {:loinc loinc-dirs
+                      :fhir-json (mapv #(.getPath ^File %) fhir-json-files)}))
+        (when (seq rf2-dirs)        (import-rf2!       file rf2-dirs))
+        (when (seq loinc-dirs)      (import-loinc!     file loinc-dirs))
+        (when (seq fhir-json-files) (import-fhir-json! file fhir-json-files)))
+      (finally
+        (run! archive/delete-recursively temp-dirs)))))
 
 (defn- import-from
   "`import <dest-db> <sources...>` — first positional is destination."
@@ -266,8 +273,9 @@
   (run! list-under args))
 
 (defn- fetch-source!
-  "Resolve a parsed `--dist` value to a local directory of importable resources.
-  SNOMED → RF2 release dir via Hermes; FHIR package → unpacked tarball."
+  "Resolve a parsed `--dist` value to a local importable source path.
+  SNOMED → RF2 release dir via Hermes; FHIR package → cached `.tgz`
+  tarball (extracted on demand by the importer)."
   [opts {:keys [id version]}]
   (cond
     (cli/snomed-distribution? id)

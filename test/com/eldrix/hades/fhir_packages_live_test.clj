@@ -4,56 +4,25 @@
   assert that both engines enumerate, lookup, validate and expand
   identically.
 
-  Tagged `^:live` — needs `.hades/fhir-packages/` (extracted FHIR JSON)
-  and `.hades/fhir-smoke.db` (SQLite container of the same packages).
-  Provision once via the install CLI:
-
-    clj -M:run install .hades/fhir-smoke.db \\
-      --dist hl7.terminology.r4@7.0.1 \\
-      --dist hl7.fhir.us.core@6.1.0 \\
-      --dist hl7.fhir.uv.ips@2.0.0 \\
-      --cache-dir .hades/fhir-packages"
-  (:require [clojure.java.io :as io]
-            [clojure.set :as set]
+  Tagged `^:live` — needs `.hades/fhir-cache/` (cached package tarballs)
+  and `.hades/fhir-tx.db` (the combined FTRM container of the same
+  packages). Both are provisioned by the FHIR-packages recipe in
+  `doc/development.md`; the `--dist` set must match `fixtures/fhir-packages`."
+  (:require [clojure.set :as set]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.fixtures :as fixtures]
             [com.eldrix.hades.composite :as composite]
-            [com.eldrix.hades.impl.load :as load-fhir]
-            [com.eldrix.hades.providers.common.fhir-loader :as fhir-loader]
-            [com.eldrix.hades.protocols :as protos]
-            [com.eldrix.hades.providers.ftrm.provider :as ftrm-provider])
-  (:import (java.io File)))
+            [com.eldrix.hades.protocols :as protos]))
 
 (def ^:dynamic *mem-svc* nil)
 (def ^:dynamic *sql-svc* nil)
 
-(defn- package-dirs
-  "Resolve the canonical `fixtures/fhir-packages` list to the on-disk
-  `<id>-<version>/package/` directories produced by `clojure -M:run install
-  --cache-dir .hades/fhir-packages`. Driving from the explicit list (rather
-  than walking `fhir-packages-dir`) keeps the in-memory side aligned with
-  the SQLite smoke DB even when the cache directory has stale extracts
-  from earlier installs."
-  []
-  (mapv (fn [[id version]]
-          (let [base (io/file fixtures/fhir-packages-dir (str id "-" version))
-                pkg  (io/file base "package")]
-            (when-not (.isDirectory base)
-              (throw (ex-info (str "missing FHIR package extract: " base)
-                              {:id id :version version :path (.getPath base)})))
-            (if (.isDirectory pkg) pkg base)))
-        fixtures/fhir-packages))
-
 (defn parity-fixture [f]
-  (let [data (mapcat #(fhir-loader/load-paths (str %)) (package-dirs))
-        {:keys [providers supplements]} (load-fhir/build-from-fhir-data data)
-        mem-svc (composite/from-providers providers {:supplements supplements})
-        {:keys [datasource codesystem valueset conceptmap]}
-        (ftrm-provider/open-providers fixtures/fhir-smoke-db-path)
-        sql-svc (composite/from-providers (filterv some? [codesystem valueset conceptmap])
-                            {:closers [#(when (instance? java.io.Closeable datasource)
-                                          (.close ^java.io.Closeable datasource))]})]
+  ;; In-memory side opens the cached package tarballs (extracted on open);
+  ;; SQLite side opens the combined FTRM container built from the same set.
+  (let [mem-svc (hades/open (fixtures/fhir-package-archives))
+        sql-svc (hades/open [fixtures/fhir-tx-db-path])]
     (binding [*mem-svc* mem-svc *sql-svc* sql-svc]
       (try (f)
           (finally

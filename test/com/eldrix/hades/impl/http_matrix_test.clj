@@ -932,15 +932,14 @@
              (hades/close svc))))))
 
 (defn- in-memory-fixture [f]
-  (with-server [fixtures/snomed-db-path
-                fixtures/loinc-db-path
-                fixtures/fhir-packages-dir]
+  (with-server (into [fixtures/snomed-db-path fixtures/loinc-db-path]
+                     (fixtures/fhir-package-archives))
     f))
 
 (defn- sqlite-fixture [f]
   (with-server [fixtures/snomed-db-path
                 fixtures/loinc-db-path
-                fixtures/fhir-smoke-db-path]
+                fixtures/fhir-tx-db-path]
     f))
 
 ;; The two test vars install their own once-only fixture so the JVM

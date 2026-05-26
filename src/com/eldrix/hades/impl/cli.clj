@@ -154,9 +154,11 @@
             ["Import one or more local terminology sources into a destination"
              "database. The first positional argument is the destination path;"
              "subsequent positionals are sources. Source kind is auto-detected"
-             "(SNOMED RF2, LOINC release, or FHIR JSON / extracted FHIR package)."
-             "Existing Hades databases (Hermes, FHIR-tx) are not importable —"
-             "use `serve` directly."
+             "(SNOMED RF2, LOINC release, or FHIR JSON / FHIR package)."
+             "Archive sources (.tgz/.tar.gz/.tar/.zip) are extracted to a"
+             "temporary directory and imported from there. Existing Hades"
+             "databases (Hermes, FHIR-tx) are not importable — use `serve`"
+             "directly."
              ""
              "Auto-indexes the destination after import — the resulting DB is"
              "queryable by `serve` immediately. Pass `--no-index` to skip when"
@@ -168,6 +170,7 @@
              "  hades import snomed.db /path/to/snomed-rf2/"
              "  hades import loinc.db /path/to/Loinc_2.81/"
              "  hades import fhir.db  packages/hl7.fhir.r4.core-4.0.1/package"
+             "  hades import fhir.db  .hades/fhir-cache/hl7.fhir.r4.core-4.0.1.tgz"
              "  hades import --no-index snomed.db /path/to/intl-rf2/"])
     :opts [(option :no-index) (option :help)]}
    {:cmd  "available" :usage "available [--dist <id>...]"
@@ -271,6 +274,10 @@
              "  FHIR-tx SQLite container            -> CodeSystem/ValueSet/CM"
              "  Directory of FHIR JSON resources    -> in-memory provider"
              "  Extracted FHIR package (.../package)-> in-memory provider"
+             "  FHIR package archive (.tgz/.zip)    -> in-memory provider"
+             ""
+             "Archive paths (.tgz/.tar.gz/.tar/.zip) are extracted to a"
+             "temporary directory, read into memory, then removed."
              ""
              "Multiple paths combine — the composite dispatches by canonical URL."
              "Use --default URL=VERSION when multiple providers serve the same"
@@ -279,7 +286,8 @@
              "Examples:"
              "  hades serve snomed.db --port 8080"
              "  hades serve intl.db uk.db --default http://snomed.info/sct=http://snomed.info/sct/900000000000207008/version/20250201"
-             "  hades serve snomed.db loinc.db packages/hl7.fhir.r4.core/package"])
+             "  hades serve snomed.db loinc.db packages/hl7.fhir.r4.core/package"
+             "  hades serve snomed.db .hades/fhir-cache/hl7.fhir.r4.core-4.0.1.tgz"])
     :opts [(option :metadata-out)
            (option :port) (option :bind-address) (option :locale)
            (option :default) (option :help)]}
