@@ -20,14 +20,24 @@ All tests, conformance and benchmark runs read fixtures from `.hades/`
 exist locally. Fixture paths are declared in
 [`test/com/eldrix/hades/fixtures.clj`](../test/com/eldrix/hades/fixtures.clj).
 
-| Fixture                          | Path                              | Pinned to                                | Source                                   |
-|----------------------------------|-----------------------------------|------------------------------------------|------------------------------------------|
-| SNOMED CT International          | `.hades/snomed-intl-20250201.db`  | `ihtsdo.mlds/167@2025-02-01`             | MLDS                                     |
-| SNOMED CT UK monolith            | `.hades/snomed-uk-monolith.db`    | `uk.nhs/sct-monolith` (latest)           | TRUD                                     |
-| LOINC                            | `.hades/loinc-2.82.db`            | LOINC release `2.82`                     | loinc.org (free account)                 |
-| FHIR packages (SQLite container) | `.hades/fhir-smoke.db`            | `hl7.fhir.r4.core@4.0.1` + 5 others      | packages.fhir.org                        |
-| FHIR packages (unpacked cache)   | `.hades/fhir-packages/`           | same as above + `us.nlm.vsac@0.24.0`     | packages.fhir.org                        |
-| tx-ecosystem (conformance)       | `.hades/tx-ecosystem/`            | rev pinned in `conformance_test.clj`     | `HL7/fhir-tx-ecosystem-ig` (auto-cloned) |
+| Fixture                          | Path                              | Provider exercised        | Pinned to                                | Source                                   |
+|----------------------------------|-----------------------------------|---------------------------|------------------------------------------|------------------------------------------|
+| SNOMED CT International          | `.hades/snomed-intl-20250201.db`  | Hermes (LMDB + Lucene)    | `ihtsdo.mlds/167@2025-02-01`             | MLDS                                     |
+| SNOMED CT UK monolith            | `.hades/snomed-uk-monolith.db`    | Hermes (LMDB + Lucene)    | `uk.nhs/sct-monolith` (latest)           | TRUD                                     |
+| LOINC                            | `.hades/loinc-2.82.db`            | native LOINC              | LOINC release `2.82`                     | loinc.org (free account)                 |
+| FHIR packages (combined container) | `.hades/fhir-tx.db`             | FTRM (SQLite)             | `hl7.fhir.r4.core@4.0.1` + 7 others (incl. `us.cdc.phinvads@0.12.0`, `us.nlm.vsac@0.24.0`) | packages.fhir.org / packages2.fhir.org |
+| FHIR packages (tarball cache)    | `.hades/fhir-cache/`           | in-memory (fhir-json)     | same package set as above                | packages.fhir.org / packages2.fhir.org   |
+| tx-ecosystem (conformance)       | `.hades/tx-ecosystem/`            | — (test data)             | rev pinned in `conformance_test.clj`     | `HL7/fhir-tx-ecosystem-ig` (auto-cloned) |
+
+> **Same data, two providers.** The full FHIR package set (including
+> VSAC's 9,071 ValueSets and phinvads' 1,967) loads as a single FTRM
+> SQLite container (`fhir-tx.db`) and, for the parity tests, as the
+> cached package tarballs under `fhir-cache/` (extracted on open) via the
+> in-memory provider.
+> Both serve the **same** resources and expand identically — guarded by
+> `fhir_packages_live_test` and `vsac_parity_live_test`. They differ only
+> in latency/footprint, so a benchmark number is only comparable to
+> another run **using the same provider**.
 
 ### SNOMED CT International (conformance pin)
 
@@ -78,31 +88,32 @@ SQLite store from the release CSVs.
 
 ### FHIR packages
 
+All FHIR packages — including VSAC — load into a **single** FTRM
+container, `fhir-tx.db`. One `install compact` chain builds it (install,
+index, VACUUM):
+
 ```bash
-clj -M:run install compact .hades/fhir-smoke.db \
+clj -M:run install compact .hades/fhir-tx.db \
   --dist hl7.fhir.r4.core@4.0.1 \
   --dist hl7.terminology.r4@7.0.1 \
   --dist hl7.fhir.us.core@6.1.0 \
   --dist hl7.fhir.uv.ips@2.0.0 \
   --dist hl7.fhir.uv.ips@1.1.0 \
   --dist fhir.tx.support.r4@0.34.0 \
-  --cache-dir .hades/fhir-packages
-```
-
-This populates both the SQLite container (`fhir-smoke.db`) and the
-unpacked-tarball cache (`fhir-packages/`) — the parity test runs the
-in-memory provider over the cache and the SQLite provider over the
-container.
-
-`tx-benchmark` EX04 also needs VSAC. Keep VSAC in the unpacked package
-cache and pass that package directory directly to the benchmark server
-recipes below so the run exercises the in-memory FHIR package provider:
-
-```bash
-clj -M:run install .hades/vsac-0.24.db \
+  --dist us.cdc.phinvads@0.12.0 \
   --dist us.nlm.vsac@0.24.0 \
-  --cache-dir .hades/fhir-packages
+  --cache-dir .hades/fhir-cache
 ```
+
+The `--dist` set must match `fhir-packages` in
+[`fixtures.clj`](../test/com/eldrix/hades/fixtures.clj). This populates
+both the SQLite container (`fhir-tx.db`) and the package tarball cache
+(`fhir-cache/`, holding the downloaded `.tgz` files) — the parity tests
+run the in-memory provider over the cached tarballs (extracted on open)
+and the FTRM provider over the container. `us.nlm.vsac@0.24.0` is
+absent from packages.fhir.org (which stops at 0.17.0) but present on
+packages2; the install CLI tries both registries in turn, so no extra
+flag is needed.
 
 ### Use a modern Hermes build
 
@@ -163,259 +174,7 @@ SNOMED edition) is a deliberate act:
 
 ## Run tx-benchmark
 
-[tx-benchmark](https://github.com/HealthSamurai/tx-benchmark) from
-HealthSamurai drives a suite of k6 load tests against a running FHIR
-terminology server. Hades' fork — `wardle/tx-benchmark` — pins a small
-patch series until it lands upstream.
+Running tx-benchmark (flavors, the no-Docker sweep, and comparing
+against the published round-0 baseline) lives in its own doc:
+[`doc/tx-benchmark.md`](tx-benchmark.md).
 
-When asked to "run tx-benchmark", pick a flavor:
-
-| Flavor      | Time      | What it runs                                                            | Use when                                            |
-|-------------|-----------|-------------------------------------------------------------------------|-----------------------------------------------------|
-| `preflight` | ~1 min    | Correctness check across every op (no perf numbers)                     | After a code change, before quoting any numbers     |
-| `quick`     | ~5 min    | Preflight + every passing test at **1 VU / 10 s** each                  | Broad regression sweep at low load; before/after    |
-| `full`      | ~30+ min  | Preflight + warmup + bench at VUs 1 / 10 / 50 across all tests          | Cross-server comparison or release-note numbers     |
-
-For ad-hoc spot-checking of a single test, run `k6` directly (see
-[Spot-check one test](#spot-check-one-test) below) — that's one
-command, no flavor needed.
-
-### Don't do these
-
-These are common ways to get the wrong answer:
-
-- **Don't read or run scripts under `~/Dev/tx-benchmark/scripts/`
-  unless they exist at the pinned SHA.** Anything *untracked* there
-  (e.g. `bench-hades-native.sh`, `run-native.ts`, `report-native.ts`)
-  is stale local scaffolding from a prior session, not part of the
-  benchmark. Use only the recipes below.
-- **Don't pass the whole `.hades/fhir-packages/` cache directory to
-  `serve`.** The canonical FHIR fixture is `.hades/fhir-smoke.db`; the
-  tx-benchmark recipes add only the explicit VSAC package directory so
-  EX04 runs against the same in-memory package shape used upstream.
-- **Don't change the port to match `tx-benchmark/servers.json`.** That
-  file is for the Docker pipeline. We pass the URL explicitly to k6,
-  so port `8080` works fine.
-- **Don't `Monitor` hades startup.** Startup is one-shot. Use a
-  Bash `until` poll on `/fhir/metadata` (recipes below do this).
-
-### 1. Sync tx-benchmark to the pinned SHA
-
-```bash
-# First time only:
-git clone https://github.com/wardle/tx-benchmark.git ~/Dev/tx-benchmark
-
-# Every time — check out the pinned rev and verify clean:
-cd ~/Dev/tx-benchmark
-git fetch --all
-git checkout "$(cat ~/Dev/hades/test/resources/tx-benchmark-pin.txt)"
-git status   # must be clean
-```
-
-The pinned SHA lives in
-[`test/resources/tx-benchmark-pin.txt`](../test/resources/tx-benchmark-pin.txt).
-Local edits drift silently from CI and from the published methodology.
-
-### 2. Run a flavor
-
-Each block is self-contained: it boots hades against the canonical
-fixture set, waits for readiness, runs the chosen flavor, and shuts
-hades down. Run the entire block as one shell script (or pipe through
-`bash -e`); each step depends on the one before it.
-
-Each recipe computes a unique `RUN_ID` so every run lands under its own
-directory and history is preserved. The format is
-`<utc-date>T<hhmm>-<hades-version>-<sha>[-dirty]`, e.g.
-`2026-05-07T2015-2.0.189-e2587dc-dirty`. The `-dirty` suffix appears
-whenever `src/`, `test/`, `deps.edn`, or `build.clj` carry uncommitted
-changes — without it, comparison would silently lie about what code
-produced the numbers.
-
-For `full` runs, build an uberjar first and substitute
-`java -Xmx6g -jar target/hades.jar serve …` for the `clj -M:run serve …`
-line — better startup, lower JVM noise. (`clj -T:build uber`.)
-
-#### `preflight`
-
-```bash
-set -e
-cd ~/Dev/hades
-RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
-clj -M:run serve \
-  .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.82.db \
-  .hades/fhir-smoke.db \
-  .hades/fhir-packages/us.nlm.vsac-0.24.0/package \
-  --port 8080 > /tmp/hades.log 2>&1 &
-HADES_PID=$!
-trap 'kill $HADES_PID 2>/dev/null' EXIT
-
-until curl -fsS http://localhost:8080/fhir/metadata >/dev/null 2>&1; do sleep 1; done
-
-cd ~/Dev/tx-benchmark
-mkdir -p "results/$RUN_ID/hades" && \
-k6 run \
-  --env BASE_URL=http://localhost:8080/fhir \
-  --env SERVER_NAME=hades \
-  --env RUN_ID="$RUN_ID" \
-  preflight/run.js
-
-jq '.tests | with_entries(select(.value.status != "pass"))' \
-   "results/$RUN_ID/hades/preflight.json"
-```
-
-`pass` / `skip` are both fine. `skip` means the operation is not
-claimed by hades and the benchmark phase skips it. `fail` is a bug.
-
-#### `quick`
-
-Preflight + every passing test at 1 VU / 10 s. Same shape as `full`,
-but at the lowest VU level only and a short duration — broad
-regression sweep across the entire benchmark surface.
-
-```bash
-set -e
-cd ~/Dev/hades
-RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
-clj -M:run serve \
-  .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.82.db \
-  .hades/fhir-smoke.db \
-  .hades/fhir-packages/us.nlm.vsac-0.24.0/package \
-  --port 8080 > /tmp/hades.log 2>&1 &
-HADES_PID=$!
-trap 'kill $HADES_PID 2>/dev/null' EXIT
-
-until curl -fsS http://localhost:8080/fhir/metadata >/dev/null 2>&1; do sleep 1; done
-
-cd ~/Dev/tx-benchmark
-mkdir -p "results/$RUN_ID/hades/benchmark"
-
-# 1. Preflight (records which tests pass, gates the bench loop below)
-k6 run \
-  --env BASE_URL=http://localhost:8080/fhir \
-  --env SERVER_NAME=hades \
-  --env RUN_ID="$RUN_ID" \
-  preflight/run.js
-
-# 2. Per-test bench at 1 VU / 10 s for every test that passed preflight
-for test in $(jq -r '.tests | to_entries[] | select(.value.status=="pass") | .key' \
-                  "results/$RUN_ID/hades/preflight.json"); do
-  cat="${test:0:2}"   # FS / LK / VC / EX / SS / CM
-  echo "─── $test ───"
-  k6 run --vus 1 --duration 10s \
-    --env BASE_URL=http://localhost:8080/fhir \
-    --env SERVER_NAME=hades \
-    --env RUN_ID="$RUN_ID" \
-    --env TEST_ID="$test" \
-    --env VUS=1 \
-    "k6/${cat}/${test}.js"
-done
-```
-
-Per-test summaries land under `results/$RUN_ID/hades/benchmark/`. For a
-cross-test comparison table, see `full` (which produces the same
-layout at three VU levels).
-
-#### Spot-check one test
-
-For iterating on a single hot path, no flavor needed — just run k6
-directly against an already-running hades. Test ids: `FS01`,
-`LK01`–`LK05`, `VC01`–`VC03`, `EX01`–`EX08`, `SS01`, `CM01`–`CM02`.
-
-Spot-checks are the one place a scratch run-id is appropriate: you're
-iterating, the numbers aren't comparable across iterations anyway, and
-preserving each one would just litter `results/`. Pick a memorable tag
-(`probe`, `lk02-async`, your branch name) so you can tell it apart from
-the dated runs.
-
-```bash
-cd ~/Dev/tx-benchmark
-RUN_ID=probe                         # or any short scratch label
-mkdir -p "results/$RUN_ID/hades/benchmark"
-k6 run --vus 10 --duration 10s \
-  --env BASE_URL=http://localhost:8080/fhir \
-  --env SERVER_NAME=hades \
-  --env RUN_ID="$RUN_ID" \
-  --env TEST_ID=EX01 \
-  --env VUS=10 \
-  k6/EX/EX01.js
-```
-
-#### `full`
-
-The full sweep with metrics pushed to a local Prometheus / Pushgateway
-and visible in Grafana. Prerequisites: `bun`, `docker`, `k6`.
-
-```bash
-set -e
-cd ~/Dev/hades
-RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
-clj -T:build uber
-java -Xmx6g -jar target/hades.jar serve \
-  .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.82.db \
-  .hades/fhir-smoke.db \
-  .hades/fhir-packages/us.nlm.vsac-0.24.0/package \
-  --port 8080 > /tmp/hades.log 2>&1 &
-HADES_PID=$!
-trap 'kill $HADES_PID 2>/dev/null' EXIT
-
-until curl -fsS http://localhost:8080/fhir/metadata >/dev/null 2>&1; do sleep 1; done
-
-cd ~/Dev/tx-benchmark
-( cd observability && docker compose up -d )
-bun scripts/run.ts hades http://localhost:8080/fhir "$RUN_ID"
-```
-
-Results land in `results/$RUN_ID/hades/` (`preflight.json` + a
-`benchmark/` tree, one file per test × VU level). Grafana on
-[http://localhost:3000](http://localhost:3000).
-
-### Updating the pin
-
-When upstream tx-benchmark adds tests or changes pool data we want to
-pick up:
-
-1. `cd ~/Dev/tx-benchmark && git fetch --all && git checkout <new-sha>`
-2. Run `preflight`; fix any newly-failing tests in hades.
-3. Update `test/resources/tx-benchmark-pin.txt` to the new SHA.
-4. Commit. CI runs `preflight` at the new pin and gates on no failures.
-
-### Edits to tx-benchmark — work via the fork, never against a dirty tree
-
-Discouraged in everyday work. The pin determines what CI runs and what
-gets published; a dirty working tree silently drifts from both. If you
-do need to change tx-benchmark itself (a new hades-specific test, a
-pool fix, an overly-strict check):
-
-1. **Branch from the pinned SHA in `wardle/tx-benchmark`.**
-   ```bash
-   cd ~/Dev/tx-benchmark
-   git fetch --all
-   git checkout "$(cat ~/Dev/hades/test/resources/tx-benchmark-pin.txt)"
-   git checkout -b <topic-branch>
-   ```
-2. **Make the change, commit, push to the fork.**
-   ```bash
-   git push -u fork <topic-branch>
-   ```
-3. **Open a PR upstream** (`HealthSamurai/tx-benchmark`).
-4. **Bump the pin to the fork commit immediately** — don't wait for the
-   PR to merge. Both CI (which checks out `wardle/tx-benchmark`) and
-   local devs follow the pin file, so pinning to the fork branch's
-   commit gets the fix in front of every consumer right away.
-   ```
-   # test/resources/tx-benchmark-pin.txt
-   <fork-commit-sha>
-   ```
-5. **When the PR merges upstream**, fetch origin, pick the merged-into-
-   master SHA, and bump the pin again.
-   ```bash
-   git -C ~/Dev/tx-benchmark fetch --all
-   # update test/resources/tx-benchmark-pin.txt to the merged SHA
-   ```
-
-Don't force-push the topic branch on the fork while the pin references
-it — that invalidates the pinned SHA for everyone (cache misses in CI,
-broken local checkouts).

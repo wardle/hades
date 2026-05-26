@@ -32,7 +32,7 @@ compilation, no JVM flags required.
 
 Download the latest `hades.jar` from the
 [releases page](https://github.com/wardle/hades/releases), then
-install a FHIR R4 conformance package and serve it:
+install a FHIR R4 package and serve it:
 
 ```shell
 java -jar hades.jar install fhir.db --dist hl7.fhir.r4.core@4.0.1
@@ -46,7 +46,7 @@ curl -sG 'http://localhost:8080/fhir/ValueSet/$expand' \
   --data-urlencode 'url=http://hl7.org/fhir/ValueSet/administrative-gender' | jq .
 ```
 
-That's the lowest-friction path: a FHIR conformance package with no
+That's the lowest-friction path: a FHIR package with no
 licence, no API key, no registration. SNOMED CT and LOINC need a free
 licence — see [Installation](doc/installation.md) for the
 multi-terminology walkthrough.
@@ -76,26 +76,7 @@ concurrency. Server-class hardware with more cores scales higher.
 See [Performance](doc/performance.md) for the methodology, tail
 latencies and the full per-operation breakdown.
 
-### In-memory vs SQLite container
-
-FHIR-package terminologies (`CodeSystem` / `ValueSet` / `ConceptMap`
-resources, as opposed to SNOMED CT and LOINC, which have their own
-backends) can be served two ways. Both serve identical content — a
-provider-parity test guarantees it — so the choice is purely a
-memory/latency tradeoff:
-
-- **SQLite ([FTRM](doc/ftrm.md)) container** — build the package(s) into
-  a `.db` (`hades import fhir.db <pkg>…`) and `serve fhir.db`. The
-  database is memory-mapped, so the package data stays off the JVM heap —
-  resident memory tracks the working set rather than the size of the
-  corpus — and the indexed / full-text query paths make free-text search
-  and intensional `$expand` faster. **This is the recommended default**,
-  especially for memory-constrained deployments.
-- **In-memory** — `serve` an unpacked package directory directly. Every
-  resource is parsed into the heap, so lookups are hashmap hits, but a
-  full package set costs several GB of heap. Worth it only on large-RAM
-  hosts. Request-scoped overlay resources (`tx-resource` parameters on an
-  operation) are always served in-memory regardless of this choice.
+Hades is one of the best performing terminology servers available while being very lightweight.
 
 ## Documentation
 
@@ -121,27 +102,17 @@ memory/latency tradeoff:
   and highly optimised SNOMED database.
 - It defines an open specification for a generic SQLite-based container
   of FHIR terminology data: [FTRM](doc/ftrm.md).
-- It can install LOINC and HL7 FHIR terminologies (usually distributed
+- It can install HL7 FHIR terminologies (usually distributed
   as JSON via npm packages) into those containers.
 - It can serve multiple SNOMED databases, multiple FTRM databases and
   on-disk JSON directly with high conformance to the FHIR terminology
   conformance suite.
+- It supports LOINC.
 - It provides an [MCP server](doc/mcp.md) exposing the canonical FHIR
   terminology operation surface
   (`$lookup` / `$validate-code` / `$expand` / `$translate` / `$subsumes`)
   shaped as MCP tools across SNOMED CT, LOINC and arbitrary FHIR
   packages.
-
-## Roadmap
-
-Planned work, in rough priority order:
-
-- **Resource read and search** — `GET /fhir/CodeSystem/{id}`,
-  `GET /fhir/ValueSet?url=…`, and search by common parameters.
-- **Conformance coverage** — improve HL7 FHIR Terminology Ecosystem IG
-  conformance test pass rate.
-- **Health endpoint and tagged releases** — a `/health` endpoint for
-  orchestration, and tagged releases that publish the uberjar.
 
 ## Acknowledgements
 

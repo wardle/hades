@@ -251,11 +251,12 @@ jobs:
           path: .hades/loinc-2.82.db
           key: loinc-2.82-native-v1
 
-  # The install CLI downloads + extracts + imports in one shot:
-  #   --cache-dir lands extracted JSON at <cache>/<id>-<version>/package/
-  #   <dest>      builds the SQLite container from the same JSON
-  # Both artefacts feed the parity test in the test job (in-memory vs
-  # SQLite, same data, two engines).
+  # The install CLI downloads + imports in one shot:
+  #   --cache-dir lands the package tarball at <cache>/<id>-<version>.tgz
+  #   <dest>      builds the SQLite container from the same packages
+  # Both artefacts feed the parity test in the test job: the in-memory side
+  # re-opens the cached tarballs (via download!, restoring from the cache),
+  # the SQLite side opens the container — same data, two engines.
   provision-fhir:
     needs: prepare-deps
     runs-on: ubuntu-latest
@@ -291,15 +292,15 @@ jobs:
         id: cache
         with:
           path: |
-            .hades/fhir-packages
-            .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v4
+            .hades/fhir-cache
+            .hades/fhir-tx.db
+          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v2
 
-      - name: Provision pinned FHIR packages (in-memory + SQLite)
+      - name: Provision FHIR packages — combined FTRM container + tarball cache
         id: provision
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          clojure -M:run install compact .hades/fhir-smoke.db \
+          clojure -M:run install compact .hades/fhir-tx.db \
             --dist hl7.fhir.r4.core@4.0.1 \
             --dist hl7.terminology.r4@7.0.1 \
             --dist hl7.fhir.us.core@6.1.0 \
@@ -307,81 +308,23 @@ jobs:
             --dist hl7.fhir.uv.ips@1.1.0 \
             --dist fhir.tx.support.r4@0.34.0 \
             --dist us.cdc.phinvads@0.12.0 \
-            --cache-dir .hades/fhir-packages
-
-      - uses: actions/cache/save@v5
-        if: always() && steps.provision.outcome == 'success'
-        with:
-          path: |
-            .hades/fhir-packages
-            .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v4
-
-  # VSAC extensional ValueSets for the bench suite (clj -M:bench) and
-  # tx-benchmark EX04. us.nlm.vsac 0.24.0 is absent from packages.fhir.org
-  # (stops at 0.17.0) but present on packages2 — the install CLI's registry
-  # chain falls through automatically, so no --registry flag is needed.
-  provision-vsac:
-    needs: prepare-deps
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - uses: DeLaGuardo/setup-clojure@13.6.0
-        with:
-          cli: latest
-
-      - uses: actions/cache/restore@v5
-        with:
-          path: |
-            ~/.m2/repository
-            ~/.gitlibs
-            ~/.deps.clj
-          key: deps-${{ hashFiles('deps.edn') }}
-          restore-keys: deps-
-          fail-on-cache-miss: true
-
-      # Keyed on the pinned package version (matches `vsac-version` in
-      # test/com/eldrix/hades/fixtures.clj). Bump the suffix on a version roll.
-      # Caches both the SQLite container (FTRM provider) and the unpacked
-      # package (in-memory provider) — the VSAC FTRM-vs-in-memory parity
-      # test consumes both.
-      - uses: actions/cache/restore@v5
-        id: cache
-        with:
-          path: |
-            .hades/vsac-0.24.db
-            .hades/fhir-packages/us.nlm.vsac-0.24.0
-          key: vsac-0.24.0-v2
-
-      - name: Provision VSAC (SQLite container + unpacked package)
-        id: provision
-        if: steps.cache.outputs.cache-hit != 'true'
-        run: |
-          clojure -M:run install compact .hades/vsac-0.24.db \
             --dist us.nlm.vsac@0.24.0 \
-            --cache-dir .hades/fhir-packages
+            --cache-dir .hades/fhir-cache
 
       - uses: actions/cache/save@v5
         if: always() && steps.provision.outcome == 'success'
         with:
           path: |
-            .hades/vsac-0.24.db
-            .hades/fhir-packages/us.nlm.vsac-0.24.0
-          key: vsac-0.24.0-v2
+            .hades/fhir-cache
+            .hades/fhir-tx.db
+          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v2
 
   # ---------------------------------------------------------------------------
   # Test + conformance: each restores only the caches it actually consumes.
   # ---------------------------------------------------------------------------
 
   test:
-    needs: [provision-snomed-intl, provision-snomed-uk, provision-loinc, provision-fhir, provision-vsac]
+    needs: [provision-snomed-intl, provision-snomed-uk, provision-loinc, provision-fhir]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -428,22 +371,15 @@ jobs:
           key: loinc-2.82-native-v1
           fail-on-cache-miss: true
 
+      # Combined FTRM container + package tarball cache — both sides of the
+      # FHIR-package and VSAC FTRM-vs-in-memory parity tests. The in-memory
+      # side extracts the cached `.tgz` tarballs on open.
       - uses: actions/cache/restore@v5
         with:
           path: |
-            .hades/fhir-packages
-            .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v4
-          fail-on-cache-miss: true
-
-      # VSAC SQLite container + unpacked package — both sides of the
-      # FTRM-vs-in-memory VSAC parity test (vsac_parity_live_test).
-      - uses: actions/cache/restore@v5
-        with:
-          path: |
-            .hades/vsac-0.24.db
-            .hades/fhir-packages/us.nlm.vsac-0.24.0
-          key: vsac-0.24.0-v2
+            .hades/fhir-cache
+            .hades/fhir-tx.db
+          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v2
           fail-on-cache-miss: true
 
       - name: Compile check
@@ -529,15 +465,14 @@ jobs:
   # have status `fail`. `skip` is fine — it means the operation is not
   # claimed by hades and tx-benchmark excludes it from the benchmark phase.
   #
-  # The pinned tx-benchmark commit lives in test/resources/tx-benchmark-pin.txt
-  # so the workflow checkout matches local dev. Bumping is a deliberate act,
-  # mirroring tx-ecosystem-pinned-rev. The repo is wardle/tx-benchmark (our
-  # fork) until the supported() heuristic patch lands upstream — then move
-  # back to HealthSamurai/tx-benchmark and bump the pin.
+  # The workflow tracks the head of wardle/tx-benchmark (our fork) — there
+  # is no pinned commit, so CI and local dev follow the same default branch.
+  # The fork carries the supported() heuristic patch until it lands upstream,
+  # at which point move back to HealthSamurai/tx-benchmark.
   # ---------------------------------------------------------------------------
 
   preflight:
-    needs: [provision-snomed-intl, provision-loinc, provision-fhir, provision-vsac]
+    needs: [provision-snomed-intl, provision-loinc, provision-fhir]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -577,27 +512,14 @@ jobs:
       - uses: actions/cache/restore@v5
         with:
           path: |
-            .hades/fhir-packages
-            .hades/fhir-smoke.db
-          key: fhir-pkgs-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-v4
+            .hades/fhir-cache
+            .hades/fhir-tx.db
+          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v2
           fail-on-cache-miss: true
-
-      - uses: actions/cache/restore@v5
-        with:
-          path: |
-            .hades/vsac-0.24.db
-            .hades/fhir-packages/us.nlm.vsac-0.24.0
-          key: vsac-0.24.0-v2
-          fail-on-cache-miss: true
-
-      - id: pin
-        name: Read pinned tx-benchmark SHA
-        run: echo "sha=$(cat test/resources/tx-benchmark-pin.txt)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v6
         with:
           repository: wardle/tx-benchmark
-          ref: ${{ steps.pin.outputs.sha }}
           path: tx-benchmark
 
       - uses: grafana/setup-k6-action@v1
@@ -607,8 +529,7 @@ jobs:
           clojure -M:run serve \
             .hades/snomed-intl-20250201.db \
             .hades/loinc-2.82.db \
-            .hades/fhir-smoke.db \
-            .hades/vsac-0.24.db \
+            .hades/fhir-tx.db \
             --port 8080 &
           echo $! > hades.pid
           for _ in $(seq 1 60); do

@@ -4,7 +4,9 @@ This log documents significant changes for each release.
 
 ## Not yet released
 
+* `import` and `serve` now accept archive files (`.tgz`/`.tar.gz`/`.tar`/`.zip`) as positional sources; each is extracted to a temporary directory, walked like any other source, and removed afterwards (#19). FHIR package installs keep the download cache to just the `.tgz` tarballs — no unpacked extracts.
 * Improved FHIR `CodeSystem`/`ValueSet` browse performance by caching provider lists and precomputed unfiltered search resources at service construction.
+* Performance enhancements for valueset expansion.
 * Hades passes 493 / 600 (82.2%) non-skipped tests in the pinned HL7 FHIR Terminology Conformance suite with no regression from baseline.
 
 ## [v2.0.198] - 2026-05-09

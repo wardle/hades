@@ -73,7 +73,7 @@ java -jar hades.jar install fhir.db \
 
 Packages are pulled from `packages.fhir.org` and loaded into a SQLite
 container. No credentials needed. To serve in-memory instead —
-faster lookups, larger heap — add `--cache-dir packages/` and `serve`
+faster simple lookups, larger heap — add `--cache-dir packages/` and `serve`
 the extracted directories directly (see
 [In-memory vs SQLite container](#in-memory-vs-sqlite-container) below).
 
@@ -272,7 +272,7 @@ java -jar hades.jar install fhir.db \
     --dist hl7.terminology.r4@7.0.1 \
     --cache-dir packages
 
-# Serve in-memory (faster lookups, larger heap)
+# Serve in-memory (faster simple lookups, larger heap)
 java -jar hades.jar serve --port 8080 \
     snomed.db loinc.db \
     packages/hl7.fhir.r4.core-4.0.1/package \
@@ -282,13 +282,19 @@ java -jar hades.jar serve --port 8080 \
 java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
 ```
 
-| | FHIR JSON dir (in-memory) | `.db` (SQLite container) |
-| --- | --- | --- |
-| Boot time | Slower — parses every JSON at start (~15 s for 6 HL7 packages) | Fast — opens the file |
-| Per-request latency | Hashmap lookup, nanoseconds | JDBC + prepared statement, tens of µs |
-| Memory | Whole corpus in heap (~600 MB live for the 6 HL7 packages above) | ~80 MB regardless of package count |
-| Best for | Latency-sensitive use; small-to-medium catalogues; hosts with ample RAM | Memory-constrained hosts; very large corpora |
+Both modes serve identical content — a provider-parity test guarantees
+it — so the choice is purely a boot-time / memory / latency tradeoff:
 
-In-memory is the default; switch to SQLite with
-`import <out.db> <pkg-dir>` when RAM is constrained. See
-[FTRM](ftrm.md) for the container schema.
+| | `.db` (SQLite container) | FHIR JSON dir (in-memory) |
+| --- | --- | --- |
+| Boot time | Fast — opens the file | Slower — parses every JSON at start (~15 s for 6 HL7 packages) |
+| Memory | ~80 MB regardless of package count — memory-mapped, off-heap | Whole corpus in heap (~600 MB live for the 6 HL7 packages above) |
+| Simple `$lookup` | JDBC + prepared statement, tens of µs | Hashmap lookup, nanoseconds |
+| Free-text search, intensional `$expand` | Faster — indexed / full-text query paths | Slower — scans the in-heap corpus |
+| Best for | Most deployments, especially memory-constrained hosts and large corpora | Latency-sensitive simple lookups on small catalogues with ample RAM |
+
+The SQLite container is `install`'s default and the recommended way to
+serve. Reach for in-memory only when simple-`$lookup` latency on a small
+catalogue matters more than boot time and memory; `serve` a package
+directory or archive (`.tgz`/`.zip`) directly. `tx-resource` overlays
+are always in-memory. See [FTRM](ftrm.md) for the container schema.

@@ -20,26 +20,26 @@ For the worked examples below, use this pinned fixture set. It matches
 the live test configuration and keeps examples reproducible:
 
 ```shell
-# SNOMED CT International, via MLDS credentials.
+# install SNOMED CT International, via MLDS credentials.
 clojure -M:run install compact .hades/snomed-intl-20250201.db \
   --dist ihtsdo.mlds/167@2025-02-01 \
   --username "$MLDS_USERNAME" \
   --password .hades/mlds-password.txt
 
-# LOINC 2.82, from the unzipped LOINC Table File CSV archive.
+# install LOINC 2.82, from the unzipped LOINC Table File CSV archive.
 clojure -M:run import .hades/loinc-2.82.db /path/to/Loinc_2.82/
 
-# FHIR R4 core terminology, HL7 terminology, US Core, IPS 1.1 + 2.0,
-# and tx support resources. IPS 1.1 carries useful LOINC-answer
-# ConceptMaps; IPS 2.0 carries the SNOMED-based IPS ValueSets.
-clojure -M:run install compact .hades/fhir-smoke.db \
+# install a number of FHIR R4 terminology packages into .hades/fhir-tx.db:
+clojure -M:run install compact .hades/fhir-tx.db \
   --dist hl7.fhir.r4.core@4.0.1 \
   --dist hl7.terminology.r4@7.0.1 \
   --dist hl7.fhir.us.core@6.1.0 \
   --dist hl7.fhir.uv.ips@2.0.0 \
   --dist hl7.fhir.uv.ips@1.1.0 \
   --dist fhir.tx.support.r4@0.34.0 \
-  --cache-dir .hades/fhir-packages
+  --dist us.cdc.phinvads@0.12.0 \
+  --dist us.nlm.vsac@0.24.0 \
+  --cache-dir .hades/fhir-cache
 ```
 
 Then run MCP against those three stores:
@@ -48,88 +48,45 @@ Then run MCP against those three stores:
 clojure -M:run mcp \
   .hades/snomed-intl-20250201.db \
   .hades/loinc-2.82.db \
-  .hades/fhir-smoke.db
+  .hades/fhir-tx.db
 ```
 
 ## Setup
 
-The recommended setup runs Hades from a source checkout via the
-Clojure CLI. Restarting the MCP picks up source changes immediately —
-no jar rebuild, no stable-name dance, no chance of running yesterday's
-binary by accident. Prerequisites: a hades source clone and the
-`clojure` CLI (`brew install clojure/tools/clojure` on macOS).
+Run the MCP server from a packaged jar or a source checkout (shown
+below). Source needs a hades clone and the `clojure` CLI
+(`brew install clojure/tools/clojure` on macOS).
 
-### Claude Desktop
+### Register the server
 
-Add to your `claude_desktop_config.json`:
+Register Hades with Claude Code using `claude mcp add`:
 
-```json
-{
-  "mcpServers": {
-    "hades": {
-      "command": "clojure",
-      "args": [
-        "-M:run", "mcp",
-        "/path/to/.hades/snomed-intl-20250201.db",
-        "/path/to/.hades/loinc-2.82.db",
-        "/path/to/.hades/fhir-smoke.db"
-      ],
-      "cwd": "/path/to/hades-source"
-    }
-  }
-}
+**From a packaged jar** — recommended for regular use; location
+independent:
+
+```shell
+claude mcp add hades -- \
+  java -jar /path/to/hades.jar mcp \
+    /path/to/.hades/snomed-intl-20250201.db \
+    /path/to/.hades/loinc-2.82.db \
+    /path/to/.hades/fhir-tx.db
+```
+
+**From a source checkout** — picks up code changes on restart; good for
+development. `clojure -M:run` must run in the hades source directory
+(where `deps.edn` lives), so wrap it to `cd` there first:
+
+```shell
+claude mcp add hades -- bash -c 'cd /path/to/hades-source && exec clojure -M:run mcp /path/to/.hades/snomed-intl-20250201.db /path/to/.hades/loinc-2.82.db /path/to/.hades/fhir-tx.db'
 ```
 
 Each positional path after `mcp` is a terminology source (auto-detected):
-mix and match SNOMED, FHIR-tx SQLite, LOINC, or directories of FHIR JSON.
+mix and match SNOMED, FHIR-tx SQLite, LOINC, or directories of FHIR JSON, or FHIR package tarballs.
 
-### Claude Code
-
-Same shape. `claude mcp add-json` accepts the JSON object directly:
-
-```shell
-claude mcp add-json --scope user hades '{
-  "command": "clojure",
-  "args": [
-    "-M:run", "mcp",
-    "/path/to/.hades/snomed-intl-20250201.db",
-    "/path/to/.hades/loinc-2.82.db",
-    "/path/to/.hades/fhir-smoke.db"
-  ],
-  "cwd": "/path/to/hades-source"
-}'
-```
-
-Use `--scope project` to scope to one project, or `--scope local` for a
-local-only configuration. To verify:
+Verify the registration:
 
 ```shell
 claude mcp list
-```
-
-### Running from a packaged jar
-
-If you don't want a source checkout — a deployment scenario, or a
-locked-down host — point at the uberjar instead. Build it with
-`clojure -T:build uber`, which writes `target/hades-<version>.jar`. The
-`release` task additionally copies that to `target/hades.jar` (a
-versionless mirror) but only as part of publishing a GitHub release; for
-local use you'll typically reference the versioned filename directly:
-
-```json
-{
-  "mcpServers": {
-    "hades": {
-      "command": "java",
-      "args": [
-        "-jar", "/path/to/hades-2.0.207.jar", "mcp",
-        "/path/to/.hades/snomed-intl-20250201.db",
-        "/path/to/.hades/loinc-2.82.db",
-        "/path/to/.hades/fhir-smoke.db"
-      ]
-    }
-  }
-}
 ```
 
 ### Options

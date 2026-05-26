@@ -72,21 +72,35 @@ Build takes ~2 minutes and produces a ~2.2 GB Hermes DB. CI caches the
 built DB keyed on the pinned version. Tests and conformance fail fast with
 a clear message if the DB is missing — they never auto-build.
 
-### Interactive development via nREPL
+### Interactive development via nREPL (the default workflow)
 
-Start an nREPL server (includes test paths):
+**Default to the REPL for any iterative or exploratory work** — running a
+function, checking its output, microbenchmarking, probing a service,
+reproducing a bug. Start the nREPL server once and evaluate forms one by
+one with `clj-nrepl-eval` against the live, stateful REPL: open a service,
+hold it in a `def`, call operations against it, edit code, reload the
+namespace, re-evaluate. This is faster than any batch invocation and keeps
+expensive state (an open Hermes DB) warm across iterations.
+
 ```bash
 clj -M:nrepl                    # without conformance deps
 clj -M:nrepl:conformance        # with conformance deps (for REPL-driven conformance testing)
 ```
 
-Then use `clj-nrepl-eval` to drive Hades interactively. The two public
-namespaces you need are `com.eldrix.hades.core` (open / close service,
-in-process operation calls) and `com.eldrix.hades.impl.http` (HTTP server
-lifecycle). Open them to see the current public functions and call them
-from the REPL — that is the source of truth and won't drift. The
-conformance-test REPL helpers below are usually a faster on-ramp than
-hand-wiring a server.
+**Do not reach for batch workarounds.** `clj -M:<alias> -e <form>` does
+not work when the alias sets `:main-opts` (the form is swallowed as an arg
+to the alias's main). Do not respond by hand-assembling a classpath and
+launching `clojure.main`, and do not write throwaway `-main` namespaces or
+temporary files to run a few forms. If you find yourself doing any of
+those, stop and use the REPL — that is what it is for.
+
+The two public namespaces you need are `com.eldrix.hades.core` (open /
+close service, in-process operation calls) and `com.eldrix.hades.impl.http`
+(HTTP server lifecycle). Open them to see the current public functions and
+call them from the REPL — that is the source of truth and won't drift. For
+benchmarks, require the bench namespace and use its REPL helpers (see
+*Benchmarking*). The conformance-test REPL helpers below are usually a
+faster on-ramp than hand-wiring a server.
 
 ### REPL-driven conformance testing (the default workflow)
 
@@ -291,10 +305,17 @@ handler's params; grep `impl/http.clj` for the current names.
 
 ### Benchmarking (criterium)
 
-`clj -M:bench` runs Criterium micro-benchmarks against `core` operation
-functions (HTTP bypassed). Use these to bisect the impact of perf
-changes on the hot paths — faster iteration than tx-benchmark's HTTP/k6
-loop.
+Criterium micro-benchmarks run against `core` operation functions (HTTP
+bypassed). Use these to bisect the impact of perf changes on the hot
+paths — faster iteration than tx-benchmark's HTTP/k6 loop.
+
+**Iterate from the REPL.** Start `clj -M:nrepl`, require the bench
+namespace, and run individual operations through its REPL helpers — open
+the fixture service once and bench one op at a time, optionally in the
+namespace's fast "smoke" mode while wiring a new op. `clj -M:bench` runs
+the whole catalogue as a deftest and is the batch/CI form, not the
+iteration loop; reserve it for a full sweep. Don't `clj -M:bench -e`
+(the `:main-opts` swallows the form).
 
 Bench files live under `test/` and are discovered by the `.*-bench$`
 regex; `clj -M:test` ignores them. Open the bench namespace to see how to
@@ -308,7 +329,7 @@ via the steps in `Conformance / integration test data` above.
 
 When the user says **"run tx-benchmark"** — with or without a flavor —
 they mean one of three pre-defined recipes documented in
-[`doc/development.md`](doc/development.md) § *Run tx-benchmark*:
+[`doc/tx-benchmark.md`](doc/tx-benchmark.md):
 
 - **`preflight`** — correctness check across every op (~1 min)
 - **`quick`** — preflight + every passing test at 1 VU / 10 s (broad regression sweep, ~5 min)
@@ -318,7 +339,7 @@ If the user doesn't name a flavor, ask which one — don't invent a new
 shape. Each flavor in the doc is a single self-contained shell block
 that boots hades, waits, runs, and tears down — execute it as written.
 Don't read or run scripts under `~/Dev/tx-benchmark/scripts/` that
-aren't present at the pinned SHA (untracked local additions like
+aren't tracked in the repo (untracked local additions like
 `run-native.ts`, `bench-hades-native.sh` are stale scaffolding from
 prior sessions).
 
