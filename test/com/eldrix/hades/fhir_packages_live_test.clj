@@ -1,13 +1,25 @@
 (ns com.eldrix.hades.fhir-packages-live-test
-  "Live parity tests for real FHIR packages: load the same set of
-  packages into the in-memory provider and the SQLite container and
-  assert that both engines enumerate, lookup, validate and expand
-  identically.
+  "Live FTRM-vs-in-memory parity for real FHIR packages.
 
-  Tagged `^:live` — needs `.hades/fhir-cache/` (cached package tarballs)
-  and `.hades/fhir-tx.db` (the combined FTRM container of the same
-  packages). Both are provisioned by the FHIR-packages recipe in
-  `doc/development.md`; the `--dist` set must match `fixtures/fhir-packages`."
+  One pair of services over identical data sources — the in-memory side
+  opens the cached package tarballs (extracted on open), the FTRM side
+  opens the combined SQLite container built from the same packages — with
+  SNOMED CT International and LOINC mounted on both so that
+  SNOMED/LOINC-referencing ValueSets expand to real concept sets rather
+  than passing vacuously empty-vs-empty. Every test asserts the two
+  engines enumerate, lookup, validate, translate and expand identically.
+
+  The `us.nlm.vsac` package physically ships ~7,600 ValueSets twice (once
+  at the package top level, once under `$root/`/`other/` subdirectories),
+  so its raw file count (~16,700) is nearly double the distinct
+  `(url, version)` count (9,071). `vs-metadata-parity` proves both engines
+  collapse the duplicates to the same catalogue.
+
+  Tagged `^:live` — needs `.hades/snomed-intl-20250201.db`,
+  `.hades/loinc-2.82.db`, the cached package tarballs under
+  `.hades/fhir-cache`, and the combined FTRM container `.hades/fhir-tx.db`.
+  All are provisioned by the recipe in `doc/development.md`; the `--dist`
+  set must match `fixtures/fhir-packages`."
   (:require [clojure.set :as set]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [com.eldrix.hades.core :as hades]
@@ -15,19 +27,18 @@
             [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.protocols :as protos]))
 
-(def ^:dynamic *mem-svc* nil)
-(def ^:dynamic *sql-svc* nil)
+(def ^:dynamic *mem* nil)
+(def ^:dynamic *sql* nil)
 
 (defn parity-fixture [f]
-  ;; In-memory side opens the cached package tarballs (extracted on open);
-  ;; SQLite side opens the combined FTRM container built from the same set.
-  (let [mem-svc (hades/open (fixtures/fhir-package-archives))
-        sql-svc (hades/open [fixtures/fhir-tx-db-path])]
-    (binding [*mem-svc* mem-svc *sql-svc* sql-svc]
+  (let [base [fixtures/snomed-db-path fixtures/loinc-db-path]
+        mem  (hades/open (into base (fixtures/fhir-package-archives)))
+        sql  (hades/open (conj base fixtures/fhir-tx-db-path))]
+    (binding [*mem* mem *sql* sql]
       (try (f)
-          (finally
-            (hades/close mem-svc)
-            (hades/close sql-svc))))))
+           (finally
+             (hades/close mem)
+             (hades/close sql))))))
 
 (use-fixtures :once parity-fixture)
 
@@ -48,29 +59,29 @@
         :concepts first :code)))
 
 (deftest ^:live cs-metadata-parity
-  (testing "in-memory and SQLite engines list the same CodeSystems"
-    (let [mem-cs (url-version-set (protos/cs-metadata *mem-svc* {}))
-          sql-cs (url-version-set (protos/cs-metadata *sql-svc* {}))]
+  (testing "in-memory and FTRM engines list the same CodeSystems"
+    (let [mem-cs (url-version-set (protos/cs-metadata *mem* {}))
+          sql-cs (url-version-set (protos/cs-metadata *sql* {}))]
       (is (pos? (count mem-cs)) "expected non-empty CodeSystem catalogue")
       (is (= mem-cs sql-cs)
           (str "Engines disagree on CodeSystem catalogue. "
                "in-memory only: " (pr-str (set/difference mem-cs sql-cs))
-               "; sqlite only: "  (pr-str (set/difference sql-cs mem-cs)))))))
+               "; ftrm only: "    (pr-str (set/difference sql-cs mem-cs)))))))
 
 (deftest ^:live vs-metadata-parity
-  (testing "in-memory and SQLite engines list the same ValueSets"
-    (let [mem-vs (url-version-set (protos/vs-metadata *mem-svc* {}))
-          sql-vs (url-version-set (protos/vs-metadata *sql-svc* {}))]
+  (testing "in-memory and FTRM engines list the same ValueSets"
+    (let [mem-vs (url-version-set (protos/vs-metadata *mem* {}))
+          sql-vs (url-version-set (protos/vs-metadata *sql* {}))]
       (is (pos? (count mem-vs)) "expected non-empty ValueSet catalogue")
       (is (= mem-vs sql-vs)
           (str "Engines disagree on ValueSet catalogue. "
-               "in-memory only: " (pr-str (set/difference mem-vs sql-vs))
-               "; sqlite only: "  (pr-str (set/difference sql-vs mem-vs)))))))
+               "in-memory only: " (pr-str (take 5 (set/difference mem-vs sql-vs)))
+               "; ftrm only: "    (pr-str (take 5 (set/difference sql-vs mem-vs))))))))
 
 (deftest ^:live cm-metadata-parity
-  (testing "in-memory and SQLite engines list the same ConceptMaps"
-    (is (= (url-version-set (protos/cm-metadata *mem-svc* {}))
-           (url-version-set (protos/cm-metadata *sql-svc* {}))))))
+  (testing "in-memory and FTRM engines list the same ConceptMaps"
+    (is (= (url-version-set (protos/cm-metadata *mem* {}))
+           (url-version-set (protos/cm-metadata *sql* {}))))))
 
 (deftest ^:live cm-translate-by-system-target
   (let [cases [{:label "administrative gender to v3 by target CodeSystem"
@@ -105,11 +116,11 @@
                 :code "449868002"}]]
     (doseq [{:keys [label params code]} cases]
       (testing (str label " (in-memory)")
-        (let [result (hades/translate *mem-svc* params)]
+        (let [result (hades/translate *mem* params)]
           (is (true? (:result result)) (pr-str result))
           (is (match-code? result code) (pr-str (:matches result)))))
-      (testing (str label " (SQLite)")
-        (let [result (hades/translate *sql-svc* params)]
+      (testing (str label " (FTRM)")
+        (let [result (hades/translate *sql* params)]
           (is (true? (:result result)) (pr-str result))
           (is (match-code? result code) (pr-str (:matches result))))))))
 
@@ -119,17 +130,17 @@
     ;; Skip empty / not-present CSes — there's nothing to lookup. We rely
     ;; on metadata-parity above to prove the catalogue itself matches;
     ;; here we exercise the read path.
-    (let [samples (->> (protos/cs-metadata *mem-svc* {})
+    (let [samples (->> (protos/cs-metadata *mem* {})
                        (keep (fn [{:keys [url version]}]
-                               (when-let [code (first-code-from-cs *mem-svc* url)]
+                               (when-let [code (first-code-from-cs *mem* url)]
                                  [url version code])))
                        (take 10))]
       (is (pos? (count samples))
           "expected at least one CodeSystem with concepts to sample")
       (doseq [[system version code] samples]
         (let [params {:system system :version version :code code}
-              m (hades/lookup *mem-svc* params)
-              s (hades/lookup *sql-svc* params)]
+              m (hades/lookup *mem* params)
+              s (hades/lookup *sql* params)]
           (is (= (:display m) (:display s))
               (str "display mismatch for " system "|" version " #" code
                    ": mem=" (pr-str (:display m)) " sql=" (pr-str (:display s))))
@@ -138,16 +149,83 @@
 
 (deftest ^:live cs-validate-code-parity-sampled
   (testing "$validate-code agrees on a sample of known-good codes"
-    (let [samples (->> (protos/cs-metadata *mem-svc* {})
+    (let [samples (->> (protos/cs-metadata *mem* {})
                        (keep (fn [{:keys [url version]}]
-                               (when-let [code (first-code-from-cs *mem-svc* url)]
+                               (when-let [code (first-code-from-cs *mem* url)]
                                  [url version code])))
                        (take 10))]
       (doseq [[system version code] samples]
         (let [params {:system system :version version :code code}
-              m (hades/validate-code *mem-svc* params)
-              s (hades/validate-code *sql-svc* params)]
+              m (hades/validate-code *mem* params)
+              s (hades/validate-code *sql* params)]
           (is (= (boolean (:result m)) (boolean (:result s)))
               (str "result mismatch for " system "|" version " #" code))
           (is (= (:display m) (:display s))
               (str "display mismatch for " system "|" version " #" code)))))))
+
+(defn- vsac-url? [url] (and url (.contains ^String url "cts.nlm.nih.gov")))
+
+(defn- vsac-urls
+  "Sorted distinct VSAC ValueSet URLs visible to `svc`. VSAC supplies the
+  large extensional/intensional, cross-terminology ValueSets that make
+  expansion parity non-trivial."
+  [svc]
+  (->> (protos/vs-metadata svc {})
+       (map :url)
+       (filter vsac-url?)
+       distinct sort))
+
+(defn- expansion
+  ([svc url] (expansion svc url nil))
+  ([svc url params]
+   (let [r (hades/expand svc (merge {:url url :count 1000000} params))]
+     {:total (:total r)
+      :codes (set (map (juxt :system :code) (:concepts r)))})))
+
+(deftest ^:live vs-expansion-parity-sampled
+  (testing "both engines expand a sample of VSAC ValueSets to identical totals and concept sets"
+    (let [urls    (->> (vsac-urls *mem*) (take-nth 100) (take 50))
+          results (for [u urls]
+                    (let [a (expansion *mem* u)
+                          b (expansion *sql* u)]
+                      {:url u :a a :b b
+                       :match (and (= (:total a) (:total b))
+                                   (= (:codes a) (:codes b)))}))
+          nonempty (filter #(pos? (or (get-in % [:a :total]) 0)) results)
+          mismatches (remove :match results)]
+      (is (pos? (count urls)) "expected VSAC ValueSets to sample")
+      (is (>= (count nonempty) 5)
+          (str "guard against a vacuous pass: fewer than 5 non-empty expansions "
+               "in the sample (" (count nonempty) "/" (count results) "). "
+               "Are SNOMED/LOINC fixtures loaded?"))
+      (is (empty? mismatches)
+          (str "Engines disagree on expansion for: "
+               (pr-str (for [m (take 10 mismatches)]
+                         [(:url m) :mem-total (get-in m [:a :total])
+                          :sql-total (get-in m [:b :total])])))))))
+
+(deftest ^:live vs-enrichment-parity-sampled
+  (testing "both engines agree under activeOnly / properties — the lazy
+            enrichment path (`expand-include-concepts`), which the
+            stored-extensional fast path deliberately does not serve"
+    (let [urls (->> (vsac-urls *mem*) (take-nth 200) (take 12))]
+      (doseq [params [{:activeOnly true} {:properties ["inactive"]}]]
+        (let [results    (for [u urls]
+                           (let [a (expansion *mem* u params)
+                                 b (expansion *sql* u params)]
+                             {:url u :a a :b b
+                              :match (and (= (:total a) (:total b))
+                                          (= (:codes a) (:codes b)))}))
+              ;; `:total` is omitted on this path, so the vacuous-pass
+              ;; guard keys off the concept set, not the total.
+              nonempty   (filter #(seq (get-in % [:a :codes])) results)
+              mismatches (remove :match results)]
+          (is (>= (count nonempty) 3)
+              (str "guard against a vacuous pass under " (pr-str params)
+                   ": fewer than 3 non-empty expansions ("
+                   (count nonempty) "/" (count results) ")"))
+          (is (empty? mismatches)
+              (str "Engines disagree under " (pr-str params) " for: "
+                   (pr-str (for [m (take 10 mismatches)]
+                             [(:url m) :mem-codes (count (get-in m [:a :codes]))
+                              :sql-codes (count (get-in m [:b :codes]))])))))))))
