@@ -101,26 +101,19 @@ between versions of the same `url` is the caller's responsibility
 
 ## 5. Schema
 
-All DDL in this section is the normative form. The reference DDL
-file in the implementation repository is a verbatim copy.
+The authoritative DDL is the reference file named in §1 —
+[`schema-v1.sql`](../resources/com/eldrix/hades/providers/ftrm/schema-v1.sql).
+This section is the normative description of what each table and column
+*means* — the behavioural contract, constraints that matter to readers,
+and round-trip rules. For exact column types, check constraints, and
+index definitions, consult the reference DDL; where prose and DDL ever
+disagree, the DDL is authoritative. Table and column names below refer
+to that file.
 
 ### 5.1 File-level metadata
 
-```sql
-CREATE TABLE tx_meta (
-  key   TEXT PRIMARY KEY,
-  value TEXT
-);
-
-CREATE TABLE tx_resource (
-  resource_type TEXT NOT NULL CHECK (resource_type IN ('CodeSystem','ValueSet','ConceptMap')),
-  url           TEXT NOT NULL,
-  version       TEXT NOT NULL DEFAULT '',
-  concept_count INTEGER,
-  imported_at   TEXT NOT NULL,
-  PRIMARY KEY (resource_type, url, version)
-);
-```
+Two tables: `tx_meta` (free-form `key`/`value` map) and `tx_resource`
+(the resource catalogue, keyed by `(resource_type, url, version)`).
 
 `tx_meta` is a free-form key/value map. Writers **MAY** record loader
 provenance, build timestamp, source SHA, the schema version (echoed
@@ -133,28 +126,7 @@ Implementations enumerate this table at boot to register providers.
 
 ### 5.2 CodeSystem
 
-```sql
-CREATE TABLE codesystem_meta (
-  url               TEXT NOT NULL,
-  version           TEXT NOT NULL DEFAULT '',
-  case_sensitive    INTEGER CHECK (case_sensitive IN (0,1)),
-  hierarchy_meaning TEXT,
-  content           TEXT,             -- 'complete'|'fragment'|'supplement'|'example'|'not-present'
-  supplements       TEXT,             -- canonical of base CS when content='supplement'
-  status            TEXT,
-  experimental      INTEGER CHECK (experimental IN (0,1)),
-  name              TEXT,
-  title             TEXT,
-  description       TEXT,
-  publisher         TEXT,
-  jurisdiction      TEXT,
-  standards_status  TEXT,
-  property_defs     TEXT,             -- JSON: CodeSystem.property[*]
-  filter_defs       TEXT,             -- JSON: CodeSystem.filter[*]
-  metadata          TEXT,             -- JSON pass-through
-  PRIMARY KEY (url, version)
-) WITHOUT ROWID;
-```
+`codesystem_meta` carries one row per CodeSystem `(url, version)`.
 
 Behavioural fields (`case_sensitive`, `hierarchy_meaning`, `content`,
 `supplements`, `status`, `experimental`, `publisher`, `jurisdiction`)
@@ -163,21 +135,7 @@ round-trips as raw FHIR JSON (copyright, contact, useContext,
 identifier, language extensions, …) lives in `metadata` as a
 string-keyed JSON document.
 
-```sql
-CREATE TABLE concept (
-  cs_url          TEXT NOT NULL,
-  cs_version      TEXT NOT NULL DEFAULT '',
-  code            TEXT NOT NULL,
-  display         TEXT,
-  definition      TEXT,
-  inactive        INTEGER CHECK (inactive IN (0,1)),
-  abstract        INTEGER CHECK (abstract IN (0,1)),
-  not_selectable  INTEGER CHECK (not_selectable IN (0,1)),
-  status          TEXT,
-  FOREIGN KEY (cs_url, cs_version) REFERENCES codesystem_meta(url, version)
-);
-CREATE UNIQUE INDEX concept_pk ON concept(cs_url, cs_version, code);
-```
+`concept` holds one row per code, keyed by `(cs_url, cs_version, code)`.
 
 The four well-known property codes (`inactive`, `abstract`,
 `notSelectable`, `status`) are projected onto `concept` columns at
@@ -188,87 +146,19 @@ lookup; readers **SHOULD** prefer the column when both are present.
 `concept` is a rowid-bearing table (no `WITHOUT ROWID`) so the FTS5
 virtual table can use external content with `content_rowid='rowid'`.
 
-```sql
-CREATE TABLE concept_parent (
-  cs_url      TEXT NOT NULL,
-  cs_version  TEXT NOT NULL DEFAULT '',
-  code        TEXT NOT NULL,
-  parent_code TEXT NOT NULL,
-  PRIMARY KEY (cs_url, cs_version, code, parent_code)
-) WITHOUT ROWID;
-CREATE INDEX concept_parent_rev
-  ON concept_parent(cs_url, cs_version, parent_code);
-```
-
-One row per `(child, parent)` edge. Polyhierarchy is supported
-natively. Single-parent CodeSystems (LOINC, ICD-10) are the
+`concept_parent` holds one row per `(child, parent)` edge. Polyhierarchy
+is supported natively. Single-parent CodeSystems (LOINC, ICD-10) are the
 degenerate case.
 
-```sql
-CREATE TABLE concept_property (
-  cs_url      TEXT NOT NULL,
-  cs_version  TEXT NOT NULL DEFAULT '',
-  code        TEXT NOT NULL,
-  prop_code   TEXT NOT NULL,
-  value_type  TEXT NOT NULL CHECK (value_type IN
-                ('string','code','integer','boolean','decimal','dateTime','Coding','Quantity')),
-  value_str            TEXT,
-  value_int            INTEGER,
-  value_bool           INTEGER CHECK (value_bool IN (0,1)),
-  value_dec            REAL,
-  value_coding_system  TEXT,
-  value_coding_code    TEXT,
-  value_coding_display TEXT,
-  value_quantity       TEXT,        -- JSON: {value, unit, system, code, comparator}
-  FOREIGN KEY (cs_url, cs_version, code) REFERENCES concept(cs_url, cs_version, code)
-);
-CREATE UNIQUE INDEX cp_uniq ON concept_property(
-  cs_url, cs_version, code, prop_code, value_type,
-  COALESCE(value_str, ''),  COALESCE(value_int, 0),
-  COALESCE(value_bool, -1), COALESCE(value_dec, 0.0),
-  COALESCE(value_coding_system, ''), COALESCE(value_coding_code, ''));
-CREATE INDEX cp_pushdown
-  ON concept_property(cs_url, cs_version, prop_code, value_str);
-```
+`concept_property` carries each concept's properties. Polymorphic
+`value_*` columns mirror FHIR's `value[x]` convention. Its unique index
+uses `COALESCE` because SQLite treats `NULL ≠ NULL` in unique indexes by
+default, which would otherwise defeat de-duplication across the
+polymorphic NULLs; `cp_pushdown` indexes `(cs_url, cs_version, prop_code,
+value_str)` for filter pushdown.
 
-Polymorphic value columns mirror FHIR's `value[x]` convention. The
-unique index uses `COALESCE` because SQLite treats `NULL ≠ NULL` in
-unique indexes by default, which would otherwise defeat de-duplication
-across the polymorphic NULLs.
-
-```sql
-CREATE TABLE concept_designation (
-  cs_url      TEXT NOT NULL,
-  cs_version  TEXT NOT NULL DEFAULT '',
-  code        TEXT NOT NULL,
-  language    TEXT,
-  use_system  TEXT,
-  use_code    TEXT,
-  use_display TEXT,
-  value       TEXT NOT NULL,
-  extension   TEXT,                -- JSON, when round-trip is needed
-  FOREIGN KEY (cs_url, cs_version, code) REFERENCES concept(cs_url, cs_version, code)
-);
-CREATE UNIQUE INDEX cd_uniq ON concept_designation(
-  cs_url, cs_version, code,
-  COALESCE(language, ''), COALESCE(use_system, ''),
-  COALESCE(use_code, ''), value);
-CREATE INDEX cd_language ON concept_designation(cs_url, cs_version, language);
-CREATE INDEX cd_use      ON concept_designation(cs_url, cs_version, use_code);
-```
-
-```sql
-CREATE TABLE concept_ancestor (
-  cs_url          TEXT NOT NULL,
-  cs_version      TEXT NOT NULL DEFAULT '',
-  ancestor_code   TEXT NOT NULL,
-  descendent_code TEXT NOT NULL,
-  depth           INTEGER NOT NULL,
-  PRIMARY KEY (cs_url, cs_version, ancestor_code, descendent_code)
-) WITHOUT ROWID;
-CREATE INDEX ca_descendent
-  ON concept_ancestor(cs_url, cs_version, descendent_code);
-```
+`concept_designation` holds alternate displays/synonyms, with a
+`COALESCE`-based unique index and indexes on `language` and `use_code`.
 
 `concept_ancestor` is the transitive closure of `concept_parent`.
 `depth` is the **shortest path** — in a polyhierarchy a `(ancestor,
@@ -281,24 +171,15 @@ semantics without re-deriving it from `concept_parent`.
 
 ### 5.3 Full-text search
 
-```sql
-CREATE VIRTUAL TABLE concept_fts USING fts5(
-  display, definition,
-  content='concept', content_rowid='rowid',
-  tokenize='unicode61 remove_diacritics 2');
-
-CREATE VIRTUAL TABLE designation_fts USING fts5(
-  value, language UNINDEXED, use_code UNINDEXED,
-  content='concept_designation', content_rowid='rowid',
-  tokenize='unicode61 remove_diacritics 2');
-```
-
-External-content FTS5 indexes over `concept` and
-`concept_designation`. Writers **MUST** populate them by issuing
-`INSERT INTO <table> (<table>) VALUES('rebuild')` after the source
-rows land; per-row triggers are too expensive during bulk load.
-Diacritic folding (`remove_diacritics 2`) is part of the contract,
-so `cafe` matches `café` regardless of where the file was built.
+External-content FTS5 indexes (`tokenize='unicode61 remove_diacritics
+2'`): `concept_fts` over `concept` (display, definition),
+`designation_fts` over `concept_designation` (value), and
+`valueset_member_fts` over `valueset_member` (see §5.4). Writers
+**MUST** populate each by issuing `INSERT INTO <table> (<table>)
+VALUES('rebuild')` after the source rows land; per-row triggers are too
+expensive during bulk load. Diacritic folding (`remove_diacritics 2`) is
+part of the contract, so `cafe` matches `café` regardless of where the
+file was built.
 
 Readers performing text search **SHOULD** join FTS via:
 
@@ -314,30 +195,34 @@ ORDER BY f.rank LIMIT ?
 
 ### 5.4 ValueSet
 
-```sql
-CREATE TABLE valueset (
-  url           TEXT NOT NULL,
-  version       TEXT NOT NULL DEFAULT '',
-  name          TEXT,
-  title         TEXT,
-  status        TEXT,
-  experimental  INTEGER CHECK (experimental IN (0,1)),
-  publisher     TEXT,
-  jurisdiction  TEXT,
-  description   TEXT,
-  metadata      TEXT,                  -- JSON pass-through
-  compose       TEXT,                  -- JSON: ValueSet.compose
-  PRIMARY KEY (url, version)
-) WITHOUT ROWID;
-```
+A ValueSet is stored across three tables, keyed by `(url, version)`:
 
-`compose` is the raw FHIR JSON `ValueSet.compose`; readers expand it
-at request time.
+- **`valueset`** — the narrow resolution row: descriptive columns
+  (`name`, `title`, `status`, …) plus the materialised-membership
+  summary `member_count`, `member_systems`, `member_id_lo`,
+  `member_id_hi`. A non-NULL `member_count` means the membership is
+  materialised in `valueset_member`. Every column here is small, so
+  rows never overflow and the table is a dense, cache-resident B-tree
+  that the hot resolution path (`$expand`/`$validate-code`) reads on
+  every request.
+- **`valueset_resource`** — the large JSON blobs, `compose` (raw FHIR
+  `ValueSet.compose`) and `metadata` (pass-through), one row per
+  ValueSet. Split out of `valueset` so those multi-KB blobs never sit
+  on the resolution path's pages; read only when the full resource or
+  its compose is needed. `compose` is authoritative for intensional
+  expansion — readers expand it at request time.
+- **`valueset_member`** — for stored-extensional ValueSets, one row per
+  enumerated member (`system`, `code`, `display`, `designations`,
+  `ord`), giving `$expand` LIMIT/OFFSET paging and cheap counts without
+  parsing `compose`. `ord` preserves authored include order; the stable
+  `id` defines the `[member_id_lo, member_id_hi]` range recorded on
+  `valueset`. `valueset_member_fts` (§5.3) indexes member displays for
+  filtered expansion.
 
 #### Baked expansions in source resources
 
 A FHIR ValueSet may carry a baked `expansion.contains` block instead
-of (or in addition to) `compose`. FTRM stores only `compose`, so
+of (or in addition to) `compose`. FTRM always stores `compose`, so
 writers ingesting an expansion-only resource **MUST** synthesise an
 equivalent `compose` from the baked entries: group `contains` by
 `(system, version)` and emit one `include` per group with the
@@ -354,53 +239,10 @@ the IG-shipped snapshot when a provider for the system is loaded.
 
 ### 5.5 ConceptMap
 
-```sql
-CREATE TABLE conceptmap (
-  url            TEXT NOT NULL,
-  version        TEXT NOT NULL DEFAULT '',
-  name           TEXT,
-  title          TEXT,
-  status         TEXT,
-  experimental   INTEGER CHECK (experimental IN (0,1)),
-  source_uri     TEXT,
-  source_version TEXT,
-  target_uri     TEXT,
-  target_version TEXT,
-  unmapped_mode  TEXT CHECK (unmapped_mode IS NULL
-                             OR unmapped_mode IN ('provided','fixed','other-map')),
-  unmapped_code  TEXT,
-  unmapped_url   TEXT,
-  metadata       TEXT,                 -- JSON pass-through
-  PRIMARY KEY (url, version)
-) WITHOUT ROWID;
-
-CREATE TABLE conceptmap_element (
-  cm_url         TEXT NOT NULL,
-  cm_version     TEXT NOT NULL DEFAULT '',
-  group_idx      INTEGER NOT NULL,
-  source_system  TEXT,
-  source_version TEXT,
-  target_system  TEXT,
-  target_version TEXT,
-  source_code    TEXT NOT NULL,
-  source_display TEXT,
-  target_code    TEXT NOT NULL,
-  target_display TEXT,
-  equivalence    TEXT NOT NULL,
-  comment        TEXT,
-  depends_on     TEXT,                 -- JSON
-  product        TEXT,                 -- JSON
-  FOREIGN KEY (cm_url, cm_version) REFERENCES conceptmap(url, version)
-);
-CREATE UNIQUE INDEX cme_uniq ON conceptmap_element(
-  cm_url, cm_version, group_idx,
-  COALESCE(source_system, ''), source_code,
-  COALESCE(target_system, ''), target_code, equivalence);
-CREATE INDEX cme_fwd
-  ON conceptmap_element(cm_url, cm_version, source_system, source_code);
-CREATE INDEX cme_rev
-  ON conceptmap_element(cm_url, cm_version, target_system, target_code);
-```
+`conceptmap` holds the map header `(url, version)`; `conceptmap_element`
+holds one row per mapping, with `cme_fwd` / `cme_rev` indexes for
+forward `(source_system, source_code)` and reverse `(target_system,
+target_code)` translation.
 
 `equivalence` carries the FHIR R4 `ConceptMapEquivalence` code. R5
 servers reading a v1 file **MAY** translate to the newer
@@ -413,25 +255,10 @@ that does not need the group structure **MAY** ignore `group_idx`.
 
 ### 5.6 NamingSystem
 
-```sql
-CREATE TABLE naming_system (
-  url      TEXT NOT NULL PRIMARY KEY,
-  name     TEXT,
-  status   TEXT,
-  kind     TEXT,                       -- 'codesystem'|'identifier'|'root'
-  metadata TEXT
-) WITHOUT ROWID;
-
-CREATE TABLE naming_system_id (
-  ns_url          TEXT NOT NULL,
-  identifier_type TEXT NOT NULL CHECK (identifier_type IN ('oid','uri','uuid','other')),
-  value           TEXT NOT NULL,
-  preferred       INTEGER CHECK (preferred IN (0,1)),
-  PRIMARY KEY (ns_url, identifier_type, value),
-  FOREIGN KEY (ns_url) REFERENCES naming_system(url)
-) WITHOUT ROWID;
-CREATE INDEX nsi_value ON naming_system_id(identifier_type, value);
-```
+`naming_system` holds one row per system (keyed by `url`, with `kind` ∈
+`codesystem`/`identifier`/`root`); `naming_system_id` holds its
+identifiers (`oid`/`uri`/`uuid`/`other`), with `nsi_value` indexing
+`(identifier_type, value)` for alias resolution (lookup contract below).
 
 Servers use `naming_system_id` to resolve OID, URN and URI aliases
 to a canonical CodeSystem URL. The required lookup contract is:
@@ -512,7 +339,10 @@ An implementation is a conforming FTRM v1 **reader** if:
 6. `cs-expand*` (or the implementation's equivalent) uses
    `concept_fts` / `designation_fts` for text and
    `cp_pushdown` / `concept_ancestor` for filter pushdown.
-7. `vs-expand` parses `valueset.compose`.
+7. `vs-expand` pages a stored-extensional ValueSet from
+   `valueset_member` (using `member_count` / `member_id_lo|hi` and
+   `valueset_member_fts` for filters) and otherwise expands
+   `valueset_resource.compose`.
 8. `cm-translate` honours `(cm_url, cm_version, source_system,
    source_code)` for the forward direction and `(cm_url, cm_version,
    target_system, target_code)` for the reverse.

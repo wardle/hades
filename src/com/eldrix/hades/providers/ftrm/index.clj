@@ -37,6 +37,7 @@
   retained in `concept_property` for round-trip lookup."
   (:require [clojure.data.json :as json]
             [clojure.core.async :as async]
+            [com.eldrix.hades.providers.common.compose :as compose]
             [com.eldrix.hades.providers.ftrm.db :as db]
             [next.jdbc :as jdbc]
             [next.jdbc.prepare :as prep])
@@ -164,6 +165,10 @@
   (jdbc/execute! conn ["DELETE FROM tx_resource WHERE resource_type=? AND url=? AND version=?"
                        rt url version]))
 
+(defn- clear-valueset-members! [^Connection conn url version]
+  (jdbc/execute! conn ["DELETE FROM valueset_member WHERE vs_url=? AND vs_version=?"
+                       url version]))
+
 ;; ---------------------------------------------------------------------------
 ;; Row builders — pure fns from a fhir-data entry to the params vector(s)
 ;; matching each prepared statement's placeholders.
@@ -250,7 +255,21 @@
   (when (and code parent (not= code parent))
     [(v system) (v version) code parent]))
 
-(defn- valueset-row [vs]
+(defn- member-systems-json
+  "Distinct `{system, version?}` of `members`, as a JSON string for the
+  `valueset.member_systems` column — lets `$expand` report
+  used-codesystems / compose-pins without a DISTINCT scan over members.
+  nil when no member carries a system."
+  [members]
+  (let [systems (->> members
+                     (keep (fn [{:keys [system version]}]
+                             (when system
+                               (cond-> {"system" system} version (assoc "version" version)))))
+                     distinct
+                     seq)]
+    (when systems (json/write-str systems))))
+
+(defn- valueset-row [vs member-count member-systems]
   (let [md (:metadata vs)]
     [(v (:url vs)) (v (:version vs))
      (get md "name")
@@ -260,8 +279,24 @@
      (get md "publisher")
      (when-let [j (get md "jurisdiction")] (json/write-str j))
      (get md "description")
-     (when md (json/write-str md))
-     (when-let [c (:compose vs)]  (json/write-str c))]))
+     member-count
+     member-systems]))
+
+(defn- valueset-resource-row [vs]
+  [(v (:url vs)) (v (:version vs))
+   (when-let [md (:metadata vs)] (json/write-str md))
+   (when-let [c (:compose vs)]   (json/write-str c))])
+
+(defn- valueset-member-rows
+  "Explode `members` (from `compose/extensional-members`) into
+  `valueset_member` rows for ValueSet `vs`, numbered by authored order."
+  [vs members]
+  (map-indexed
+    (fn [i {:keys [system version code display designations]}]
+      [(v (:url vs)) (v (:version vs)) (long i)
+       system version code display
+       (when (seq designations) (json/write-str designations))])
+    members))
 
 (defn- conceptmap-row [cm]
   (let [md (:metadata cm)
@@ -364,8 +399,17 @@
 (def ^:private valueset-sql
   "INSERT OR REPLACE INTO valueset
      (url, version, name, title, status, experimental,
-      publisher, jurisdiction, description, metadata, compose)
+      publisher, jurisdiction, description, member_count, member_systems)
    VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+
+(def ^:private valueset-resource-sql
+  "INSERT OR REPLACE INTO valueset_resource (url, version, metadata, compose)
+   VALUES (?,?,?,?)")
+
+(def ^:private valueset-member-sql
+  "INSERT OR REPLACE INTO valueset_member
+     (vs_url, vs_version, ord, system, system_version, code, display, designations)
+   VALUES (?,?,?,?,?,?,?,?)")
 
 (def ^:private conceptmap-sql
   "INSERT OR REPLACE INTO conceptmap
@@ -418,6 +462,8 @@
               ^PreparedStatement ps-cpp  (jdbc/prepare conn [concept-property-sql])
               ^PreparedStatement ps-cd   (jdbc/prepare conn [concept-designation-sql])
               ^PreparedStatement ps-vs   (jdbc/prepare conn [valueset-sql])
+              ^PreparedStatement ps-vsr  (jdbc/prepare conn [valueset-resource-sql])
+              ^PreparedStatement ps-vsm  (jdbc/prepare conn [valueset-member-sql])
               ^PreparedStatement ps-cm   (jdbc/prepare conn [conceptmap-sql])
               ^PreparedStatement ps-cme  (jdbc/prepare conn [conceptmap-element-sql])]
     (let [b-cs   (ArrayList.)
@@ -426,19 +472,27 @@
           b-cpp  (ArrayList.)
           b-cd   (ArrayList.)
           b-vs   (ArrayList.)
+          b-vsr  (ArrayList.)
+          b-vsm  (ArrayList.)
           b-cm   (ArrayList.)
           b-cme  (ArrayList.)
           targets   (HashMap.)        ; "rt|url|version" string → [rt url version]
           ;; Mark a (resource-type, url, version) as touched by this
           ;; import. First observation also clears any prior
           ;; tx_resource catalogue row so the post-import write isn't
-          ;; rejected by the PK on (resource_type, url, version). Data
-          ;; rows themselves overwrite via INSERT OR REPLACE — no
-          ;; whole-CS DELETE phase.
+          ;; rejected by the PK on (resource_type, url, version).
+          ;; Code-keyed data rows (concept, conceptmap_element, …) overwrite
+          ;; via INSERT OR REPLACE — no whole-resource DELETE. `valueset_member`
+          ;; is the exception: it is keyed positionally (ord), so a re-import
+          ;; whose membership shrank would leave stale high-ord rows that leak
+          ;; phantom codes into $expand. Clear its prior definition on first
+          ;; touch so each re-import is a wholesale replace.
           ensure! (fn [rt url version]
                     (let [k (str rt "|" url "|" version)]
                       (when-not (.containsKey targets k)
                         (clear-tx-resource! conn rt url version)
+                        (when (= "ValueSet" rt)
+                          (clear-valueset-members! conn url version))
                         (.put targets k [rt url version]))))]
       (loop []
         (when-let [item (take-fhir-data!)]
@@ -478,9 +532,16 @@
                   (add-row! conn ps-cp b-cp r)))
 
               :valueset
-              (let [url (v (:url fd)) version (v (:version fd))]
+              (let [url (v (:url fd)) version (v (:version fd))
+                    members (compose/extensional-members (:compose fd))]
                 (ensure! "ValueSet" url version)
-                (add-row! conn ps-vs b-vs (valueset-row fd)))
+                (add-row! conn ps-vs b-vs
+                          (valueset-row fd
+                                        (when (seq members) (count members))
+                                        (member-systems-json members)))
+                (add-row! conn ps-vsr b-vsr (valueset-resource-row fd))
+                (doseq [r (valueset-member-rows fd members)]
+                  (add-row! conn ps-vsm b-vsm r)))
 
               :conceptmap
               (let [url (v (:url fd)) version (v (:version fd))]
@@ -499,6 +560,8 @@
       (flush-batch! conn ps-cpp  b-cpp)
       (flush-batch! conn ps-cd   b-cd)
       (flush-batch! conn ps-vs   b-vs)
+      (flush-batch! conn ps-vsr  b-vsr)
+      (flush-batch! conn ps-vsm  b-vsm)
       (flush-batch! conn ps-cm   b-cm)
       (flush-batch! conn ps-cme  b-cme)
       {:targets (into #{} (.values targets))})))
@@ -572,7 +635,9 @@
     (doseq [[rt url version] target-set]
       (let [cnt (case rt
                   "CodeSystem" (count-rows conn "concept" "cs_url" "cs_version" url version)
-                  "ValueSet"   nil
+                  "ValueSet"   (let [n (count-rows conn "valueset_member"
+                                                   "vs_url" "vs_version" url version)]
+                                 (when (pos? n) n))
                   "ConceptMap" (let [n (count-rows conn "conceptmap_element"
                                                    "cm_url" "cm_version" url version)]
                                  (when (pos? n) n))
@@ -642,7 +707,25 @@
   ;; 'rebuild' command against them. Cheaper than per-row triggers
   ;; during bulk load.
   (jdbc/execute! conn ["INSERT INTO concept_fts(concept_fts) VALUES('rebuild')"])
-  (jdbc/execute! conn ["INSERT INTO designation_fts(designation_fts) VALUES('rebuild')"]))
+  (jdbc/execute! conn ["INSERT INTO designation_fts(designation_fts) VALUES('rebuild')"])
+  (jdbc/execute! conn ["INSERT INTO valueset_member_fts(valueset_member_fts) VALUES('rebuild')"]))
+
+(defn- record-member-id-ranges!
+  "Record each materialised ValueSet's `MIN`/`MAX` `valueset_member.id`.
+  `id` is an INTEGER PRIMARY KEY, so VACUUM never renumbers it and the
+  stored bounds stay valid. A filtered $expand bounds the FTS scan to
+  `[member_id_lo, member_id_hi]` via `rowid BETWEEN`; the range covers every
+  member (never under-returns) and the query's (vs_url, vs_version) filter
+  discards any foreign rows in the range, so correctness is independent of
+  whether the ids are contiguous."
+  [^Connection conn]
+  (jdbc/execute! conn
+    ["UPDATE valueset
+        SET member_id_lo = (SELECT MIN(m.id) FROM valueset_member m
+                            WHERE m.vs_url = valueset.url AND m.vs_version = valueset.version),
+            member_id_hi = (SELECT MAX(m.id) FROM valueset_member m
+                            WHERE m.vs_url = valueset.url AND m.vs_version = valueset.version)
+      WHERE member_count IS NOT NULL"]))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API
@@ -766,7 +849,8 @@
             (jdbc/with-transaction [tx conn]
               (doseq [[url version] (list-codesystem-targets tx)]
                 (rebuild-closure-for! tx url version))
-              (rebuild-fts! tx))))
+              (rebuild-fts! tx)
+              (record-member-id-ranges! tx))))
         (jdbc/execute! conn ["ANALYZE"]))
       {:db-path db-path}
       (finally

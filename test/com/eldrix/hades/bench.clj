@@ -393,11 +393,11 @@
 
    ;; --- $expand on VSAC extensional ValueSets (EX04) ---------------------
    ;;
-   ;; Provider: FTRM (SQLite) — the fixture opens `.hades/vsac-0.24.db`.
-   ;; The local tx-benchmark recipe instead drives the in-memory provider
-   ;; (the unpacked package dir); both serve the same 9,071 ValueSets
-   ;; (guarded by vsac_parity_live_test) but differ in latency, so don't
-   ;; cross-compare these numbers with an in-memory EX04 run.
+   ;; Provider: FTRM (SQLite) — the fixture opens the combined
+   ;; `.hades/fhir-tx.db`, which holds VSAC alongside every other FHIR
+   ;; package. The in-memory provider over the unpacked package dir serves
+   ;; the same 9,071 ValueSets (guarded by vsac_parity_live_test) but
+   ;; differs in latency, so don't cross-compare with an in-memory run.
    ;;
    ;; Mirrors three large VSAC ValueSets from tx-benchmark's EX04 pool —
    ;; SNOMED CT US Core Problem List (.1018.240), LOINC results
@@ -580,8 +580,7 @@
   ([id mode]
    (let [svc (hades/open [fixtures/snomed-db-path
                           fixtures/loinc-db-path
-                          fixtures/vsac-db-path
-                          fixtures/fhir-smoke-db-path])]
+                          fixtures/fhir-tx-db-path])]
      (try
        (bench-operation svc id mode)
        (finally
@@ -590,8 +589,7 @@
 (deftest operations-bench
   (let [svc  (hades/open [fixtures/snomed-db-path
                           fixtures/loinc-db-path
-                          fixtures/vsac-db-path
-                          fixtures/fhir-smoke-db-path])
+                          fixtures/fhir-tx-db-path])
         mode (bench-mode)]
     (try
       (let [results (mapv (fn [{:keys [id fn] :as entry}]

@@ -187,6 +187,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS designation_fts USING fts5(
 -- ValueSet
 -- ---------------------------------------------------------------------------
 
+-- Narrow resolution row: every column is small, so rows never overflow
+-- and the whole table is a dense, cache-resident B-tree. The hot path
+-- (`resolve_vs` → `$expand`) reads here on every request and never has
+-- to traverse a compose/metadata blob to reach `member_count` et al. The
+-- multi-KB JSON blobs live in `valueset_resource`, read only by the
+-- full-resource path (`vs-resource` / `load-vs-entry`).
 CREATE TABLE IF NOT EXISTS valueset (
   url           TEXT NOT NULL,
   version       TEXT NOT NULL DEFAULT '',
@@ -197,12 +203,76 @@ CREATE TABLE IF NOT EXISTS valueset (
   publisher     TEXT,
   jurisdiction  TEXT,
   description   TEXT,
-  metadata      TEXT,                       -- JSON pass-through
-  compose       TEXT,                       -- JSON
+  member_count  INTEGER,                    -- non-NULL ⇒ membership materialised in valueset_member
+  member_systems TEXT,                      -- JSON [{system, version?}] — distinct systems of materialised members
+  member_id_lo  INTEGER,                    -- MIN(valueset_member.id) for this VS
+  member_id_hi  INTEGER,                    -- MAX(valueset_member.id) for this VS
   PRIMARY KEY (url, version)
 ) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS vs_status    ON valueset(status);
 CREATE INDEX IF NOT EXISTS vs_publisher ON valueset(publisher);
+
+-- Full-resource JSON blobs, split out of `valueset` so the hot
+-- resolution path never drags these multi-KB overflow pages through the
+-- valueset B-tree. One row per stored ValueSet; read only when the full
+-- resource or its compose is needed.
+CREATE TABLE IF NOT EXISTS valueset_resource (
+  url       TEXT NOT NULL,
+  version   TEXT NOT NULL DEFAULT '',
+  metadata  TEXT,                           -- JSON pass-through
+  compose   TEXT,                           -- JSON
+  PRIMARY KEY (url, version)
+) WITHOUT ROWID;
+
+-- Materialised membership for stored-extensional ValueSets: one row per
+-- enumerated `include.concept` entry. Lets `$expand` page with
+-- LIMIT/OFFSET and count cheaply, instead of parsing the (potentially
+-- multi-MB) `valueset.compose` blob per request. Only populated when the
+-- compose is purely stored-extensional with a display on every concept
+-- (`compose/extensional-members`); intensional ValueSets keep `compose`
+-- and `member_count = NULL`. `ord` preserves authored include order.
+--
+-- `id` is an explicit INTEGER PRIMARY KEY (a stable rowid alias — VACUUM
+-- never renumbers it, unlike an implicit rowid). The valueset table records
+-- this VS's actual `[member_id_lo, member_id_hi]` = MIN/MAX member id; a
+-- filtered $expand bounds the FTS scan to that range via `rowid BETWEEN`
+-- (FTS5 pushes rowid constraints into the doclist walk). The range always
+-- *covers* every member (so it never under-returns), and the query also
+-- filters by (vs_url, vs_version), so any foreign rows that fall in the
+-- range — were the ids ever non-contiguous — are discarded: correctness
+-- doesn't depend on contiguity, only the scan's tightness does. Members are
+-- in fact inserted consecutively, so the range is normally gap-free. The
+-- unique index on (vs_url, vs_version, ord) serves ordered paging.
+CREATE TABLE IF NOT EXISTS valueset_member (
+  id             INTEGER PRIMARY KEY,
+  vs_url         TEXT NOT NULL,
+  vs_version     TEXT NOT NULL DEFAULT '',
+  ord            INTEGER NOT NULL,
+  system         TEXT,
+  system_version TEXT,
+  code           TEXT NOT NULL,
+  display        TEXT,
+  designations   TEXT                        -- JSON (raw FHIR designation array), NULL when none
+);
+CREATE UNIQUE INDEX IF NOT EXISTS valueset_member_pk
+  ON valueset_member(vs_url, vs_version, ord);
+
+-- Token-prefix filtering for $expand `filter`: the `unicode61` tokenizer
+-- (same as `concept_fts`) gives autocomplete-style word matching, queried
+-- with prefix terms (`"acut"* "ast"*`) — the semantic the SNOMED provider
+-- and FHIR's `filter` 'left matching' example use. Index-backed, so a
+-- filtered expand of a large materialised ValueSet no longer scans every
+-- member row; combined with the `rowid BETWEEN` member-id range, the scan
+-- is bounded to the target ValueSet's rows. External-content over
+-- `valueset_member` (content_rowid is the stable `id`); `index!` populates
+-- it via the FTS5 'rebuild' command after member rows land.
+CREATE VIRTUAL TABLE IF NOT EXISTS valueset_member_fts USING fts5(
+  code,
+  display,
+  content='valueset_member',
+  content_rowid='id',
+  tokenize='unicode61 remove_diacritics 2'
+);
 
 -- ---------------------------------------------------------------------------
 -- ConceptMap

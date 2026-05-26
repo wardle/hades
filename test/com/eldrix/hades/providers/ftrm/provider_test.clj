@@ -60,7 +60,8 @@
                            {"code" "delta" "display" "Delta"}]}]}}])
 
 (defn- build-stored-vs-db [path]
-  (ftrm-index/build! path stored-vs-data {:loader-type "synthetic-stored-vs"}))
+  (ftrm-index/build! path stored-vs-data {:loader-type "synthetic-stored-vs"})
+  (ftrm-index/index! path))
 
 (deftest cs-lookup-respects-displayLanguage
   (let [path (new-temp-path)]

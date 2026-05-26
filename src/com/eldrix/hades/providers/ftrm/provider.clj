@@ -78,10 +78,10 @@
    :metadata          (parse-json (:codesystem_meta/metadata      row))})
 
 (defn- valueset-row->entry [row]
-  {:url      (:valueset/url row)
-   :version  (system-version-or-nil (:valueset/version row))
-   :metadata (parse-json (:valueset/metadata row))
-   :compose  (parse-json (:valueset/compose  row))})
+  {:url      (:valueset_resource/url row)
+   :version  (system-version-or-nil (:valueset_resource/version row))
+   :metadata (parse-json (:valueset_resource/metadata row))
+   :compose  (parse-json (:valueset_resource/compose  row))})
 
 (defn- conceptmap-row->entry [row]
   {:url            (:conceptmap/url row)
@@ -98,13 +98,6 @@
                [(key-for (:codesystem_meta/url row) (:codesystem_meta/version row))
                 (codesystem-row->entry row)]))
         (jdbc/execute! ds ["SELECT * FROM codesystem_meta"])))
-
-(defn- load-valueset-cache [ds]
-  (into {}
-        (map (fn [row]
-               [(key-for (:valueset/url row) (:valueset/version row))
-                (valueset-row->entry row)]))
-        (jdbc/execute! ds ["SELECT url, version, metadata, compose FROM valueset"])))
 
 (defn- load-conceptmap-cache [ds]
   (let [pairs-by-key
@@ -283,19 +276,20 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- fts-query
-  "Translate a free-text query into FTS5 syntax. Splits on whitespace,
-  drops tokens that contain only non-word characters, and double-quotes
-  each remaining token (with embedded `\"` doubled per FTS5's literal
-  rule). Tokens are implicitly AND-ed by FTS5. Returns nil for blank
-  input or input that produces no usable tokens."
+  "Translate a free-text filter into an FTS5 query for the unicode61
+  indexes: split into Unicode word tokens and emit each as a quoted prefix
+  term (`\"token\"*`), implicitly AND-ed. This is autocomplete-style
+  token-prefix matching (\"acut ast\" matches \"acute asthma\") — the same
+  semantic the SNOMED provider uses, shared here by `cs-expand*` (concept /
+  designation FTS) and materialised ValueSet membership. Quoting makes a
+  token that happens to be an FTS5 keyword (and/or/not/near) a literal.
+  Returns nil for input that yields no usable tokens."
   [^String text]
   (when-not (str/blank? text)
-    (let [tokens (->> (str/split text #"\s+")
-                      (map #(str/replace % #"[\"]" ""))
-                      (map #(str/replace % #"[^\p{L}\p{Nd}_-]" ""))
+    (let [tokens (->> (str/split text #"[^\p{L}\p{Nd}]+")
                       (remove str/blank?))]
       (when (seq tokens)
-        (str/join " " (map (fn [t] (str \" t \")) tokens))))))
+        (str/join " " (map (fn [t] (str \" t \" \*)) tokens))))))
 
 (def ^:private searchable-designation-clause
   "WHERE-clause excerpt restricting a `concept_designation` row to one
@@ -830,36 +824,168 @@
       (some? experimental)         (assoc :experimental (boolean experimental))
       (map? compose)               (assoc :compose compose))))
 
-(deftype FtrmValueSetCatalogue [_ds cache]
+(defn- resolve-vs-version
+  "Choose the stored version to serve for a ValueSet `url`, given the
+  caller's requested `version` and the URL's `versions` actually stored.
+  Mirrors the precedence the cache `lookup-entry` enforced: an exact
+  requested version, else the unversioned (`\"\"`) entry, else the
+  SemVer-latest stored version (healthcare safety: rank explicitly, never
+  rely on storage order)."
+  [versions version]
+  (cond
+    (and (not (str/blank? version)) (some #{version} versions)) version
+    (some #{""} versions)                                       ""
+    :else (reduce (fn [best v]
+                    (if (or (nil? best) (pos? (canonical/semver-compare v best))) v best))
+                  nil versions)))
+
+(defn- resolve-vs
+  "Resolve the concrete stored version to serve for ValueSet `url` and, when
+  its membership is materialised, the precomputed `member_count` and
+  `member_systems` needed to answer `$expand` without scanning member rows.
+  Returns `{:version :member-count :member-systems}` or nil for an unknown
+  URL — one PK-indexed query, no compose blob read. A non-nil
+  `:member-count` means membership lives in `valueset_member`."
+  [ds url version]
+  (when url
+    (let [rows (jdbc/execute! ds ["SELECT version, member_count, member_systems, member_id_lo, member_id_hi
+                                   FROM valueset WHERE url = ?" url])]
+      (when (seq rows)
+        (let [chosen (resolve-vs-version (map :valueset/version rows) version)
+              row    (some #(when (= chosen (:valueset/version %)) %) rows)]
+          {:version        chosen
+           :member-count   (:valueset/member_count row)
+           :member-systems (some-> (:valueset/member_systems row) parse-json)
+           :member-id-lo   (:valueset/member_id_lo row)
+           :member-id-hi   (:valueset/member_id_hi row)})))))
+
+(defn- load-vs-entry
+  "Point-read a ValueSet's full entry (metadata / compose JSON parsed) for
+  an already-resolved concrete `version`."
+  [ds url version]
+  (some-> (jdbc/execute-one! ds
+            ["SELECT url, version, metadata, compose FROM valueset_resource WHERE url = ? AND version = ?"
+             url version])
+          valueset-row->entry))
+
+(defn- limit-offset-sql [cnt offset]
+  (cond
+    (and cnt (pos? (or offset 0))) (str " LIMIT " (long cnt) " OFFSET " (long offset))
+    cnt                            (str " LIMIT " (long cnt))
+    (pos? (or offset 0))           (str " LIMIT -1 OFFSET " (long offset))
+    :else                          ""))
+
+(defn- member-row->concept [display-langs row]
+  (let [designations (some->> (:valueset_member/designations row)
+                              parse-json
+                              (mapv compose/normalise-designation))
+        lang-display (when (seq display-langs)
+                       (display/find-display-for-language designations display-langs))]
+    (cond-> {:code    (:valueset_member/code row)
+             :system  (:valueset_member/system row)
+             :display (or lang-display (:valueset_member/display row))}
+      (:valueset_member/system_version row) (assoc :version (:valueset_member/system_version row))
+      (seq designations)                    (assoc :designations designations))))
+
+(defn- expand-from-members
+  "Expand a materialised ValueSet straight from `valueset_member`, paging in
+  SQL with no compose parse. Produces the same result shape as
+  `compose/stored-extensional-expand`.
+
+  Unfiltered: `:total` is the precomputed `member-count` (no scan) and the
+  page is a clustered index range. Filtered: a single windowed
+  (`count(*) OVER ()`) query over `valueset_member_fts` — autocomplete-style
+  token-prefix matching (`fts-query`), bounded to this ValueSet's member-id
+  range via `rowid BETWEEN` (when known) so the FTS scan touches only its
+  rows. The range covers every member and the `vs_url` filter discards any
+  foreign rows in it, so correctness doesn't rely on the ids being
+  contiguous. used-codesystems / compose-pins come from the precomputed
+  `member-systems`."
+  [ds
+   {:keys [version member-count member-systems member-id-lo member-id-hi]}
+   {:keys [url offset filter displayLanguage] cnt :count}]
+  (let [display-langs (display/parse-display-language displayLanguage)
+        lim   (limit-offset-sql cnt offset)
+        fts-q (fts-query filter)
+        [total rows]
+        (cond
+          (str/blank? filter)
+          [member-count
+           (jdbc/execute! ds [(str "SELECT system, system_version, code, display, designations "
+                                   "FROM valueset_member WHERE vs_url=? AND vs_version=?"
+                                   " ORDER BY ord" lim)
+                              url (v version)])]
+
+          ;; filter present but no word tokens (e.g. punctuation) → no matches
+          (nil? fts-q) [0 nil]
+
+          :else
+          (let [rng (when (and member-id-lo member-id-hi) [member-id-lo member-id-hi])
+                sql (str "SELECT m.system, m.system_version, m.code, m.display, m.designations, "
+                         "count(*) OVER () AS total "
+                         "FROM valueset_member_fts f JOIN valueset_member m ON m.id = f.rowid "
+                         "WHERE f.valueset_member_fts MATCH ? AND m.vs_url=? AND m.vs_version=?"
+                         (when rng " AND f.rowid BETWEEN ? AND ?")
+                         " ORDER BY m.ord" lim)
+                rows (jdbc/execute! ds (into [sql fts-q url (v version)] rng))]
+            [(or (some-> (first rows) :total long) (when (zero? (or offset 0)) 0)) rows]))]
+    (cond-> {:concepts              (mapv #(member-row->concept display-langs %) rows)
+             :used-codesystems      (mapv (fn [m]
+                                            (let [sys (get m "system") sv (get m "version")]
+                                              {:uri (if sv (str sys "|" sv) sys)}))
+                                          member-systems)
+             :compose-pins          (into [] (keep (fn [m]
+                                                     (when-let [sv (get m "version")]
+                                                       {:system (get m "system") :version sv})))
+                                          member-systems)
+             :multi-version-systems #{}}
+      total               (assoc :total total)
+      (seq display-langs)  (assoc :display-language displayLanguage))))
+
+(deftype FtrmValueSetCatalogue [ds]
   protos/ValueSet
   (vs-metadata [_ {:keys [url version]}]
-    ;; Same key-filter trick as `cs-metadata` above.
-    (eduction
-     (filter (fn [[[k-url k-ver] _]]
-               (and (or (nil? url)     (= url k-url))
-                    (or (nil? version) (= version k-ver)))))
-     (map (fn [[[k-url k-ver] _]]
-            (cond-> {:url k-url}
-              (not (str/blank? k-ver)) (assoc :version k-ver))))
-     cache))
+    (let [[sql params] (cond
+                         (and url (not (str/blank? version)))
+                         ["SELECT url, version FROM valueset WHERE url = ? AND version = ?" [url version]]
+                         url
+                         ["SELECT url, version FROM valueset WHERE url = ?" [url]]
+                         :else
+                         ["SELECT url, version FROM valueset" []])]
+      (into []
+            (map (fn [row]
+                   (cond-> {:url (:valueset/url row)}
+                     (not (str/blank? (:valueset/version row)))
+                     (assoc :version (:valueset/version row)))))
+            (jdbc/execute! ds (into [sql] params)))))
 
   (vs-resource [_ params]
-    (some-> (lookup-entry cache (:url params)
-                          (or (:valueSetVersion params) (params-version params)))
-            vs-resource-from-entry))
+    (when-let [{:keys [version]} (resolve-vs ds (:url params)
+                                             (or (:valueSetVersion params) (params-version params)))]
+      (some-> (load-vs-entry ds (:url params) version) vs-resource-from-entry)))
 
   (vs-expand [_ svc params]
-    (let [entry (lookup-entry cache (:url params)
-                              (or (:valueSetVersion params) (params-version params)))
-          expanding (conj (or (:expanding params) #{}) (:url params))]
-      (or (compose/stored-extensional-expand (:compose entry) params)
-          (compose/expand-compose svc (:compose entry)
-            (assoc params :expanding expanding :purpose :expand)))))
+    (let [url (:url params)
+          {:keys [version member-count] :as resolved}
+          (resolve-vs ds url (or (:valueSetVersion params) (params-version params)))]
+      (cond
+        ;; Membership materialised and the request needs no per-concept
+        ;; enrichment (`activeOnly` needs inactive status, `property=` needs
+        ;; properties — neither is carried on member rows): page in SQL.
+        (and member-count (not (:activeOnly params)) (empty? (:properties params)))
+        (expand-from-members ds resolved params)
+
+        version
+        (let [entry (load-vs-entry ds url version)
+              expanding (conj (or (:expanding params) #{}) url)]
+          (or (compose/stored-extensional-expand (:compose entry) params)
+              (compose/expand-compose svc (:compose entry)
+                (assoc params :expanding expanding :purpose :expand)))))))
 
   (vs-validate-code [_ svc params]
-    (when-let [entry (lookup-entry cache (:url params)
-                                   (or (:valueSetVersion params) (params-version params)))]
-      (vs-validate/validate-code svc entry params))))
+    (when-let [{:keys [version]} (resolve-vs ds (:url params)
+                                             (or (:valueSetVersion params) (params-version params)))]
+      (vs-validate/validate-code svc (load-vs-entry ds (:url params) version) params))))
 
 ;; ---------------------------------------------------------------------------
 ;; ConceptMap catalogue
@@ -939,10 +1065,13 @@
   [path]
   (let [ds (db/open path)
         cs-cache (load-codesystem-cache ds)
-        vs-cache (load-valueset-cache ds)
-        cm-cache (load-conceptmap-cache ds)]
+        cm-cache (load-conceptmap-cache ds)
+        ;; ValueSets are served straight off the `(url, version)` PK index,
+        ;; not cached — the compose blobs are large (tens of MB) and a
+        ;; given request touches one. Probe once to decide registration.
+        valuesets? (some? (jdbc/execute-one! ds ["SELECT 1 FROM valueset LIMIT 1"]))]
     {:datasource ds
      :codesystem (when (seq cs-cache) (->FtrmCodeSystemCatalogue ds cs-cache))
-     :valueset   (when (seq vs-cache) (->FtrmValueSetCatalogue   ds vs-cache))
+     :valueset   (when valuesets? (->FtrmValueSetCatalogue ds))
      :conceptmap (when (seq cm-cache) (->FtrmConceptMapCatalogue ds cm-cache))
      :naming-system (fn [id] (db/resolve-system ds id))}))

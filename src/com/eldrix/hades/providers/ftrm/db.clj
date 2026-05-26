@@ -59,10 +59,8 @@
   32)
 
 (def ^:private init-sql
-  "Per-connection pragmas applied at handout. Equivalent to the
-  apply-runtime-pragmas! function the unpooled path used to call.
-  Joined with `;` because Hikari's connectionInitSql accepts one
-  statement; SQLite-JDBC happily executes a `;`-delimited script."
+  "Per-connection pragmas applied at handout via Hikari's
+  `connectionInitSql` (one `;`-delimited script; SQLite-JDBC runs it whole)."
   "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL")
 
 (defn- pooled-datasource ^HikariDataSource [^String path]

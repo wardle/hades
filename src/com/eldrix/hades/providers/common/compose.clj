@@ -11,7 +11,8 @@
             [com.eldrix.hades.providers.common.canonical :as canonical]
             [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.providers.common.display :as display]
-            [com.eldrix.hades.protocols :as protos]))
+            [com.eldrix.hades.protocols :as protos])
+  (:import (java.text Normalizer Normalizer$Form)))
 
 (set! *warn-on-reflection* true)
 
@@ -70,27 +71,50 @@
                                   (or property "?") ", op = " op " has no value")})))
         filter-array))
 
-(defn- safe-lowercase-includes?
-  "Nil-safe case-insensitive substring containment: true when `substring`
-  appears in `s` after both are lower-cased. False when either is
-  nil — call sites can thread potentially-missing strings through
-  without their own nil guards."
-  [s substr]
-  (and s substr
-       (str/includes? (str/lower-case s) (str/lower-case substr))))
+(defn- fold
+  "Lower-case and strip diacritics (NFD decompose, drop combining marks) so
+  filtering matches the FTS `unicode61 remove_diacritics` folding — \"café\"
+  and \"cafe\" compare equal."
+  [^String s]
+  (-> (Normalizer/normalize s Normalizer$Form/NFD)
+      (.replaceAll "\\p{M}+" "")
+      str/lower-case))
+
+(defn- word-tokens
+  "Folded Unicode letter/digit word tokens of `s`; nil → empty."
+  [s]
+  (when s (remove str/blank? (str/split (fold s) #"[^\p{L}\p{Nd}]+"))))
+
+(defn- text-matcher
+  "Compile the `$expand` `filter` into a predicate `(fn [s] -> boolean)`:
+  true when every whitespace token of `filter` is a (case-insensitive)
+  prefix of some word in `s` — the autocomplete-style token-prefix semantic
+  the SNOMED/Hermes provider uses and the FHIR `filter` 'left matching'
+  example describes (\"acut ast\" matches \"acute asthma\"). The filter is
+  tokenised once here, not per candidate; the returned predicate only
+  re-tokenises each candidate `s`. Returns nil for a blank filter (no
+  filtering)."
+  [filter]
+  (when-let [needles (seq (word-tokens filter))]
+    (fn [s]
+      (boolean
+       (when-let [words (word-tokens s)]
+         (every? (fn [needle] (some #(str/starts-with? % needle) words)) needles))))))
 
 (defn- designations-match?
-  "True when any designation in `designations` has a `:value` that
-  matches search string `s` (via `safe-lowercase-includes?`)."
-  [designations s]
-  (some (fn [{:keys [value]}] (safe-lowercase-includes? value s)) designations))
+  "True when any designation's `:value` satisfies the compiled `match?`."
+  [match? designations]
+  (some (fn [{:keys [value]}] (match? value)) designations))
 
 (defn- concept-designations
   [concept]
   (or (:designations concept)
       (get concept "designation")))
 
-(defn- normalise-designation
+(defn normalise-designation
+  "Coerce a designation — either already internal (`:value`-keyed) or a raw
+  FHIR designation map (string-keyed) — into the internal
+  `{:value :language :use}` shape."
   [designation]
   (if (contains? designation :value)
     designation
@@ -135,12 +159,6 @@
        (every? (fn [include]
                  (every? concept-display (get include "concept")))
                (get compose "include"))))
-
-(defn- stored-concept-matches-filter?
-  [concept text]
-  (or (str/blank? text)
-      (safe-lowercase-includes? (concept-code concept) text)
-      (safe-lowercase-includes? (concept-display concept) text)))
 
 (defn- stored-concept-row
   [display-langs include concept]
@@ -198,21 +216,20 @@
   this exists only to skip lookups entirely for the displays-present
   stored shape; it is no longer the sole guard against the enrichment
   cliff."
-  [compose {:keys [offset count filter displayLanguage] :as params}]
+  [compose {:keys [offset displayLanguage] :as params}]
   (when (stored-extensional-answerable? compose params)
     (let [display-langs (display/parse-display-language displayLanguage)
           offset' (or offset 0)
-          pairs (stored-extensional-pairs compose)
-          filtered-pairs (if (str/blank? filter)
-                           pairs
-                           (clojure.core/filter
-                            (fn [[_ concept]]
-                              (stored-concept-matches-filter? concept filter))
-                            pairs))
-          total (clojure.core/count filtered-pairs)
-          concepts (cond->> filtered-pairs
+          limit   (:count params)
+          match?  (text-matcher (:filter params))
+          matched (cond->> (stored-extensional-pairs compose)
+                    match? (filter (fn [[_ concept]]
+                                     (or (match? (concept-code concept))
+                                         (match? (concept-display concept))))))
+          total   (count matched)
+          concepts (cond->> matched
                      (pos? offset') (drop offset')
-                     count          (take count)
+                     limit          (take limit)
                      true           (map (fn [[include concept]]
                                            (stored-concept-row display-langs include concept))))]
       (cond-> {:concepts              (vec concepts)
@@ -221,6 +238,28 @@
                :compose-pins          (stored-compose-pins compose)
                :multi-version-systems #{}}
         (seq display-langs) (assoc :display-language displayLanguage)))))
+
+(defn extensional-members
+  "When `compose` is a pure stored-extensional definition with a display on
+  every concept — the shape `stored-extensional-expand` answers without
+  CodeSystem enrichment — return an ordered seq of member maps
+  `{:system :version :code :display :designations}` (`:designations` is the
+  raw FHIR designation array or nil). Otherwise nil.
+
+  This is the single definition of \"materialisable membership\": a backend
+  indexer calls it to explode membership into queryable rows, and the
+  request path uses the same gate, so the two never drift."
+  [compose]
+  (when (and (stored-extensional-compose? compose)
+             (every? (fn [include] (every? concept-display (get include "concept")))
+                     (get compose "include")))
+    (map (fn [[include concept]]
+           {:system       (or (get concept "system")  (get include "system"))
+            :version      (or (get concept "version") (get include "version"))
+            :code         (concept-code concept)
+            :display      (concept-display concept)
+            :designations (concept-designations concept)})
+         (stored-extensional-pairs compose))))
 
 (defn- expand-include-concepts
   "Expand a concept-driven include (`include.concept[]`) into the
@@ -232,7 +271,9 @@
   so concept-driven includes honour `filter` without compose having to
   post-filter the merged expansion."
   [svc system version concepts {:keys [activeOnly displayLanguage text properties max-hits]}]
-  (cond->>
+  (let [match?        (text-matcher text)
+        display-langs (display/parse-display-language displayLanguage)]
+   (cond->>
    (keep (fn [{:strs [code] provided-display "display"}]
           (let [raw       (when system
                             (protos/cs-lookup svc (cond-> {:system system :code code}
@@ -242,8 +283,7 @@
             ;; semantics part of the value set: emit them even when no
             ;; provider serves the system, using the provided display.
             (when (or looked-up (nil? system) provided-display)
-              (let [display-langs (display/parse-display-language displayLanguage)
-                    lang-display (when (and (seq display-langs) looked-up)
+              (let [lang-display (when (and (seq display-langs) looked-up)
                                    (display/find-display-for-language (:designations looked-up) display-langs))
                     display (or provided-display lang-display (:display looked-up))
                     result-version (or (:version looked-up) version)
@@ -253,9 +293,9 @@
                                       (:properties looked-up)))
                     designations (:designations looked-up)]
                 (when (and (not (and activeOnly inactive?))
-                           (or (nil? text)
-                               (safe-lowercase-includes? display text)
-                               (designations-match? designations text)))
+                           (or (nil? match?)
+                               (match? display)
+                               (designations-match? match? designations)))
                   (cond-> {:code    code
                            :system  system
                            :display display}
@@ -270,7 +310,7 @@
                                         (contains? want (if (keyword? k) (name k) (str k))))
                                       (:properties looked-up))))))))))
          concepts)
-    max-hits (take max-hits)))
+    max-hits (take max-hits))))
 
 (defn- build-query
   [system version filters params]
