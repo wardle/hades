@@ -517,9 +517,14 @@ jobs:
           key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v2
           fail-on-cache-miss: true
 
+      - id: pin
+        name: Read pinned tx-benchmark SHA
+        run: echo "sha=$(cat test/resources/tx-benchmark-pin.txt)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v6
         with:
           repository: wardle/tx-benchmark
+          ref: ${{ steps.pin.outputs.sha }}
           path: tx-benchmark
 
       - uses: grafana/setup-k6-action@v1
