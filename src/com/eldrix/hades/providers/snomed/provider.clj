@@ -253,6 +253,63 @@
                   (= 1 (count queries)) (first queries)
                   :else                 (hermes.search/q-and (vec queries)))}))))
 
+(defn- expression-satisfies-concept-filter?
+  "Does post-coordinated expression `expr` satisfy a single SNOMED `concept`
+  compose filter? Decided by *structural expression subsumption*
+  (`hermes/subsumes`, which normalises both sides to canonical form) rather
+  than the focus concept alone — a refinement can introduce supertypes the
+  focus lacks, and a strict `descendant-of` constraint admits a refined
+  expression even though the focus concept (its own ancestor) is excluded.
+
+  `rel` is the subsumption of the filter's `target` concept relative to the
+  expression: `:subsumes` (target is a proper ancestor), `:equivalent`,
+  `:subsumed-by`, or `:not-subsumed`.
+
+  Returns nil (not satisfied) for non-`concept` filters and for `concept`
+  ops whose membership isn't expressible as a subsumption test (e.g. `in`
+  refset — an expression is never a stored refset member)."
+  [svc expr {:keys [property op value]}]
+  (when (= "concept" property)
+    (when-let [target (parse-long (str value))]
+      (let [rel (hermes/subsumes svc target expr)]
+        (case op
+          "is-a"                             (contains? #{:subsumes :equivalent} rel)
+          ("descendent-of" "descendant-of")  (= :subsumes rel)
+          "="                                (= :equivalent rel)
+          "is-not-a"                         (not (contains? #{:subsumes :equivalent} rel))
+          nil)))))
+
+(defn- expression-membership
+  "Resolve whether a post-coordinated SNOMED expression is a member of a
+  filter-based include. ValueSet validation narrows the include with a
+  synthetic `code = <expr>` filter (see `vs-validate`); an expression can
+  never be enumerated into a Lucene result, so membership is decided here
+  where the whole filter set is visible.
+
+  A member iff the include permits expressions (`expressions = true`), the
+  expression is valid, AND it satisfies every selecting filter by structural
+  subsumption. On success returns the single synthetic concept (rendered
+  display); otherwise empty. `expressions = false` or absent ⇒ expressions
+  are never members."
+  [svc filters expr ver lang-range]
+  (let [expressions-allowed? (some #(and (= "expressions" (:property %))
+                                         (= "true" (str (:value %))))
+                                   filters)
+        selecting (remove #(#{"code" "expressions"} (:property %)) filters)
+        valid?    (try (nil? (hermes/validate-expression svc expr {:mrcm false}))
+                       (catch Exception _ false))
+        member?   (and expressions-allowed? valid?
+                       (every? #(expression-satisfies-concept-filter? svc expr %) selecting))]
+    (if-not member?
+      {:concepts []}
+      {:concepts [{:code expr :system snomed-system-uri :version ver
+                   :display (or (try (hermes/render-expression* svc expr
+                                       {:terms :update :definition-status :auto
+                                        :language-refset-ids (hermes/match-locale svc lang-range true)})
+                                     (catch Exception _ nil))
+                                expr)}]
+       :total 1})))
+
 ;; FHIR R4 ConceptMap equivalence codes for the SNOMED historical
 ;; association reference sets. See
 ;; https://confluence.ihtsdotools.org/display/DOCRELFMT/5.2.5.1
@@ -727,9 +784,20 @@
   (cs-expand* [_ q]
     (let [{:keys [version filters max-hits text active-only displayLanguage]} q
           ver (or version (version-uri svc))
-          {base-q :query issues :issues} (compose-filters->query svc filters)]
-      (if (seq issues)
+          ;; ValueSet validation narrows the include with a synthetic
+          ;; `code = <value>`; a non-numeric value is a post-coordinated
+          ;; expression that can't be enumerated — resolve membership directly.
+          expr (some (fn [{:keys [property op value]}]
+                       (when (and (= "code" property) (= "=" op)
+                                  (string? value) (nil? (parse-long value)))
+                         value))
+                     filters)
+          {base-q :query issues :issues} (when-not expr (compose-filters->query svc filters))]
+      (cond
+        expr (expression-membership svc filters expr ver displayLanguage)
+        (seq issues)
         {:concepts [] :issues issues}
+        :else
         (let [{:keys [concepts total]}
               (expansion/expand {:svc            svc
                                  :query          base-q

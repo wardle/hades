@@ -7,7 +7,8 @@ This log documents significant changes for each release.
 * `import` and `serve` now accept archive files (`.tgz`/`.tar.gz`/`.tar`/`.zip`) as positional sources; each is extracted to a temporary directory, walked like any other source, and removed afterwards (#19). FHIR package installs keep the download cache to just the `.tgz` tarballs — no unpacked extracts.
 * Improved FHIR `CodeSystem`/`ValueSet` browse performance by caching provider lists and precomputed unfiltered search resources at service construction.
 * Performance enhancements for valueset expansion.
-* Hades passes 493 / 600 (82.2%) non-skipped tests in the pinned HL7 FHIR Terminology Conformance suite with no regression from baseline.
+* `$validate-code` against a SNOMED CT ValueSet whose `compose` uses a filter include with `expressions = true` now validates post-coordinated expressions: membership is decided by structural expression subsumption (`hermes/subsumes`) against the include's `concept` filters, with `expressions = false`/absent rejecting expressions. The rendered expression is returned as the display.
+* Hades passes 495 / 600 (82.5%) non-skipped tests in the pinned HL7 FHIR Terminology Conformance suite with no regression from baseline.
 
 ## [v2.0.198] - 2026-05-09
 
