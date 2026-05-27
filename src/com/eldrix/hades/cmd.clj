@@ -95,17 +95,17 @@
   (case kind
     :hermes-db
     (let [path (.getPath dir)]
-      (println (str "  → index: " path))
+      (log/info "index" {:db path})
       (hermes/index path)
       (with-open [svc (hermes/open path {:quiet true})]
         (log-module-dependency-problems svc)))
     :fhir-tx-db
     (let [path (.getPath file)]
-      (println (str "  → index: " path))
+      (log/info "index" {:db path})
       (ftrm-index/index! path))
     :loinc-db
     (let [path (.getPath file)]
-      (println (str "  → index: " path))
+      (log/info "index" {:db path})
       (loinc-index/index! path))
     ;; Release-only entries (rf2, loinc) — silently skipped so a chained
     ;; pipeline that mixes release sources with built artefacts doesn't
