@@ -7,7 +7,7 @@ and evolving towards a general-purpose terminology server.
 
 ```bash
 # CLI subcommands — hades owns the full lifecycle (acquisition, maintenance,
-# serving) for both SNOMED CT and FHIR conformance packages. Positional
+# serving) for both SNOMED CT and FHIR packages. Positional
 # arguments are always paths; installable ids are passed via repeatable
 # `--dist` flags (with optional `@<version>` suffix).
 clj -M:run serve   snomed.db fhir.db --port 8080                                       # run FHIR server (positional sources, repeatable, mix kinds)
