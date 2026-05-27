@@ -2,7 +2,7 @@
 
 This walkthrough builds three terminologies side-by-side and serves
 them from a single Hades process: SNOMED CT, LOINC, and a couple of
-FHIR conformance packages from
+FHIR packages from
 [packages.fhir.org](https://packages.fhir.org). Each block is a
 discrete step — skip any terminology you don't need.
 
@@ -17,9 +17,13 @@ discrete step — skip any terminology you don't need.
   - [**UK TRUD account**](https://isd.digital.nhs.uk/trud) — for UK
     users. Provides the UK editions (UK Clinical, UK Drug, and the
     "monolith" merged edition that bundles dm+d).
+  - **An RF2 release archive you already have** — e.g. obtained via
+    [UMLS](https://www.nlm.nih.gov/research/umls/) or any other route.
+    Import it directly, no registry credentials needed.
 - **A LOINC release archive** — sign in at
-  [loinc.org/downloads](https://loinc.org/downloads/) (free) and unzip
-  the archive locally (e.g. to `/tmp/Loinc_2.81/`).
+  [loinc.org/downloads](https://loinc.org/downloads/) (free) and
+  download the archive (e.g. `Loinc_2.81.zip`). `import` reads the zip
+  directly; you don't need to unzip it first.
 
 > Throughout this document, examples use `java -jar hades.jar`. From a
 > source checkout, replace with `clj -M:run` throughout.
@@ -48,21 +52,31 @@ java -jar hades.jar install snomed.db \
     --api-key ./trud-api-key.txt
 ```
 
+**Already have the release on disk (UMLS or otherwise):** point
+`import` at the RF2 archive. `.zip`/`.tgz`/`.tar.gz`/`.tar` are read
+directly, or pass the path to an already-unzipped directory — either
+works:
+
+```shell
+java -jar hades.jar import snomed.db /path/to/snomed-rf2.zip   # archive
+java -jar hades.jar import snomed.db /path/to/unzipped-rf2/    # or a directory
+```
+
 `install` auto-indexes the destination so `snomed.db/` is queryable
-as soon as it returns. See [SNOMED CT](#snomed-ct) below for layering
-extensions, pinning releases, and importing a manually-downloaded
-RF2 archive.
+as soon as it returns; after `import`, run `index` (see
+[SNOMED CT](#snomed-ct) below) to make it queryable. That section also
+covers layering extensions and pinning releases.
 
 ## 2. Build LOINC
 
-LOINC isn't distributed via a registry — point `import` at the unzipped
-release directory:
+LOINC isn't distributed via a registry — point `import` at the release
+archive (or an unzipped directory; both work):
 
 ```shell
-java -jar hades.jar import loinc.db /tmp/Loinc_2.81/
+java -jar hades.jar import loinc.db /path/to/Loinc_2.81.zip
 ```
 
-## 3. Install FHIR conformance packages
+## 3. Install FHIR packages
 
 ```shell
 java -jar hades.jar install fhir.db \
@@ -74,7 +88,7 @@ java -jar hades.jar install fhir.db \
 Packages are pulled from `packages.fhir.org` and loaded into a SQLite
 container. No credentials needed. To serve in-memory instead —
 faster simple lookups, larger heap — add `--cache-dir packages/` and `serve`
-the extracted directories directly (see
+the cached `.tgz` tarballs directly (see
 [In-memory vs SQLite container](#in-memory-vs-sqlite-container) below).
 
 ## 4. Check what you've got
@@ -191,22 +205,25 @@ java -jar hades.jar install            snomed.db --dist uk.nhs/sct-drug-ext --ap
 
 ### Importing a manually-downloaded release
 
-If you already have an RF2 release on disk, skip `install`:
+If you already have an RF2 release on disk, skip `install`. Pass either
+the release archive (`.zip`/`.tgz`/`.tar.gz`/`.tar`, read directly) or an
+already-unzipped directory:
 
 ```shell
-java -jar hades.jar list /path/to/unzipped-rf2/                       # preview what will be imported
-java -jar hades.jar import snomed.db /path/to/unzipped-rf2/
+java -jar hades.jar import snomed.db /path/to/snomed-rf2.zip         # archive, or an unzipped directory
+java -jar hades.jar list   /path/to/unzipped-rf2/                    # preview a directory before importing
 ```
 
 ## LOINC
 
-LOINC is consumed from a local release directory (the unzipped
-`Loinc_<version>` archive from [loinc.org](https://loinc.org/downloads/)).
-There is no registry — manual download is required for licensing reasons,
-but no API key is involved.
+LOINC is consumed from a local release archive (the `Loinc_<version>`
+download from [loinc.org](https://loinc.org/downloads/)) — passed to
+`import` as the zip or an unzipped directory. There is no registry —
+manual download is required for licensing reasons, but no API key is
+involved.
 
 ```shell
-java -jar hades.jar import loinc.db /path/to/Loinc_2.81/
+java -jar hades.jar import loinc.db /path/to/Loinc_2.81.zip
 ```
 
 `import` auto-indexes the destination — the ancestor closure and FTS
@@ -262,11 +279,12 @@ version with `@<version>`.
 ### In-memory vs SQLite container
 
 `install` lands a FHIR package as a SQLite container by default. Add
-`--cache-dir <dir>` to also keep the extracted JSON, then `serve` the
-package directory directly for in-memory operation:
+`--cache-dir <dir>` to retain the downloaded package tarball at
+`<dir>/<id>-<version>.tgz`, then `serve` that archive directly for
+in-memory operation (`serve` extracts it on demand):
 
 ```shell
-# Install once, keep the extracted JSON in ./packages
+# Install once, keep the downloaded tarballs in ./packages
 java -jar hades.jar install fhir.db \
     --dist hl7.fhir.r4.core@4.0.1 \
     --dist hl7.terminology.r4@7.0.1 \
@@ -275,8 +293,8 @@ java -jar hades.jar install fhir.db \
 # Serve in-memory (faster simple lookups, larger heap)
 java -jar hades.jar serve --port 8080 \
     snomed.db loinc.db \
-    packages/hl7.fhir.r4.core-4.0.1/package \
-    packages/hl7.terminology.r4-7.0.1/package
+    packages/hl7.fhir.r4.core-4.0.1.tgz \
+    packages/hl7.terminology.r4-7.0.1.tgz
 
 # Or serve from the SQLite container (lower memory)
 java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
@@ -296,5 +314,6 @@ it — so the choice is purely a boot-time / memory / latency tradeoff:
 The SQLite container is `install`'s default and the recommended way to
 serve. Reach for in-memory only when simple-`$lookup` latency on a small
 catalogue matters more than boot time and memory; `serve` a package
-directory or archive (`.tgz`/`.zip`) directly. `tx-resource` overlays
+archive (`.tgz`/`.zip`) or an extracted package directory directly.
+`tx-resource` overlays
 are always in-memory. See [FTRM](ftrm.md) for the container schema.

@@ -17,31 +17,32 @@ For ad-hoc spot-checking of a single test, run `k6` directly (see
 [Spot-check one test](#spot-check-one-test) below) — that's one
 command, no flavor needed.
 
-## Don't do these
+## Ground rules
 
-These are common ways to get the wrong answer:
+Follow these to get a comparable, honest answer:
 
-- **Don't read or run scripts under `~/Dev/tx-benchmark/scripts/`
-  that aren't tracked in the repo.** Anything *untracked* there
-  (e.g. `bench-hades-native.sh`, `run-native.ts`, `report-native.ts`)
-  is stale local scaffolding from a prior session, not part of the
-  benchmark. Use only the recipes below.
-- **Don't pass the whole `.hades/fhir-cache/` cache directory to
-  `serve`.** The canonical FHIR fixture is the single combined FTRM
-  container `.hades/fhir-tx.db`, which already holds every FHIR package
-  including VSAC. The recipes serve that one file — not the unpacked
-  cache, and not a separate VSAC database.
+- **Use only the recipes below.** They are the tracked, supported way to
+  run the benchmark. Ignore anything *untracked* under
+  `~/Dev/tx-benchmark/scripts/` (e.g. `bench-hades-native.sh`,
+  `run-native.ts`, `report-native.ts`) — that's stale local scaffolding
+  from a prior session, not part of the benchmark.
+- **Serve the single combined FTRM container `.hades/fhir-tx.db`.** It
+  already holds every FHIR package, including VSAC, so one file is the
+  whole canonical FHIR fixture. (Point `serve` at this file, not at the
+  unpacked `.hades/fhir-cache/` directory and not at a separate VSAC
+  database.)
 - **VSAC is served by FTRM here, like everything else.** `fhir-tx.db` is
   the **FTRM (SQLite)** provider — the same path CI preflight and the
   criterium bench (`clj -M:bench`) exercise, so EX04 latency is
   comparable across all three. (The in-memory provider over the unpacked
   cache serves the same resources but at different latency/footprint; the
   parity tests use it, the benchmark does not.)
-- **Don't change the port to match `tx-benchmark/servers.json`.** That
-  file is for the Docker pipeline. We pass the URL explicitly to k6,
-  so port `8080` works fine.
-- **Don't `Monitor` hades startup.** Startup is one-shot. Use a
-  Bash `until` poll on `/fhir/metadata` (recipes below do this).
+- **Keep hades on port `8080`.** The recipes pass the URL explicitly to
+  k6, so the default port just works. (`tx-benchmark/servers.json` is for
+  the Docker pipeline only — leave it alone.)
+- **Wait for startup with a Bash `until` poll on `/fhir/metadata`** (the
+  recipes below do this). Startup is one-shot, so `Monitor` is the wrong
+  tool for it.
 
 ## Run a flavor
 

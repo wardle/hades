@@ -51,6 +51,8 @@ clojure -M:run mcp \
   .hades/fhir-tx.db
 ```
 
+Obviously *you* don't manually start the MCP server, but tell your LLM (e.g. Claude, ChatGPT/Codex) how to start it.
+
 ## Setup
 
 Run the MCP server from a packaged jar or a source checkout (shown
