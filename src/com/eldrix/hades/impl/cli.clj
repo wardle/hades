@@ -78,8 +78,7 @@
     fhir-opts))
 
 (def all-options
-  {:metadata-out [nil "--metadata-out PATH" "Write service metadata to PATH (JSON)"]
-   :port         ["-p" "--port PORT" "Port number"
+  {:port         ["-p" "--port PORT" "Port number"
                   :default 8080
                   :parse-fn parse-long
                   :validate [#(< 0 % 0x10000) "Must be a number between 0 and 65536"]]
@@ -97,7 +96,6 @@
                   :parse-fn parse-dist
                   :update-fn conj]
    :no-index     [nil "--no-index" "Skip auto-indexing"]
-   :verbose      ["-v" "--verbose"]
    :progress     [nil "--progress" "Show progress reporting"]
    :help         ["-h" "--help"]})
 
@@ -259,10 +257,7 @@
              "Examples:"
              "  hades status snomed.db"
              "  hades status snomed.db loinc.db --format json"])
-    :opts [(option :format)
-           [nil "--modules" "Show installed modules (SNOMED)"]
-           [nil "--refsets" "Show installed refsets (SNOMED)"]
-           (option :help)]}
+    :opts [(option :format) (option :help)]}
    {:cmd  "serve" :usage "serve <paths...>"
     :args {:min 1 :hint "<paths...>"}
     :desc "Start the FHIR terminology server."
@@ -288,8 +283,7 @@
              "  hades serve intl.db uk.db --default http://snomed.info/sct=http://snomed.info/sct/900000000000207008/version/20250201"
              "  hades serve snomed.db loinc.db packages/hl7.fhir.r4.core/package"
              "  hades serve snomed.db .hades/fhir-cache/hl7.fhir.r4.core-4.0.1.tgz"])
-    :opts [(option :metadata-out)
-           (option :port) (option :bind-address) (option :locale)
+    :opts [(option :port) (option :bind-address) (option :locale)
            (option :default) (option :help)]}
    {:cmd  "mcp" :usage "mcp <paths...>"
     :args {:min 1 :hint "<paths...>"}

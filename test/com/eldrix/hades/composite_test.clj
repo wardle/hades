@@ -4,7 +4,7 @@
   (bare-URL binding, supplement wrapping, naming-system resolution).
   This file targets the dispatch and cross-cutting behaviour itself:
 
-    - precomputed `cs-meta` / `vs-meta` cache
+    - `cs-meta` / `vs-meta` resource resolution
     - `with-overlays` precedence
     - ConceptMap candidate selection (single, ambiguous)
     - version-availability + check-system-version issue construction"
@@ -85,38 +85,33 @@
     (composite/from-providers providers {:supplements supplements})))
 
 ;; ---------------------------------------------------------------------------
-;; Precomputed metadata cache
+;; cs-meta / vs-meta resource resolution
 ;; ---------------------------------------------------------------------------
 
-(deftest cs-meta-precomputed-cache-test
+(deftest cs-meta-test
   (let [svc (svc-of [cs-v1 cs-other])]
-    (testing "bare URL hits the cache"
+    (testing "bare URL resolves to the registered CodeSystem"
       (is (= "1.0" (:version (composite/cs-meta svc "http://example.com/r/cs"))))
       (is (= "active" (:status (composite/cs-meta svc "http://example.com/r/cs")))))
-    (testing "versioned URL hits the cache"
+    (testing "versioned URL resolves"
       (is (= "1.0" (:version (composite/cs-meta svc "http://example.com/r/cs|1.0")))))
     (testing "unknown URL returns nil — does not throw"
       (is (nil? (composite/cs-meta svc "http://example.com/r/missing"))))))
 
-(deftest vs-meta-precomputed-cache-test
+(deftest vs-meta-test
   (let [svc (svc-of [cs-v1 vs-cs])]
-    (testing "VS metadata is cached"
+    (testing "explicit ValueSet resolves"
       (is (= "retired" (:status (composite/vs-meta svc "http://example.com/r/vs")))))
-    (testing "implicit VS for a CodeSystem is cached too"
+    (testing "implicit VS for a CodeSystem resolves too"
       (is (some? (composite/vs-meta svc "http://example.com/r/cs"))))))
 
 ;; ---------------------------------------------------------------------------
-;; Multi-resource provider — regression for the cache-build bug where
-;; `cs-meta-by-key` was populated by calling `(cs-resource impl {})`
-;; with empty params. Single-resource impls (in-memory CS, Hermes)
-;; ignore params and so worked by accident; multi-resource impls
-;; (SQLite catalogues serving thousands of CSs through one impl)
-;; dispatch on `:url` and silently returned nil for every registered
-;; key — leaving `composite/cs-meta` to return nil, which in turn
-;; suppressed status warnings on `$validate-code` / `$expand` against
-;; any SQLite-backed CodeSystem. The cache is now built by parsing
-;; each registration key into `{:url :system :version}`; the live-call
-;; fallback in `cs-meta` / `vs-meta` does the same.
+;; Multi-resource provider — `cs-meta` / `vs-meta` must pass the registered
+;; `:url` down so a provider that serves many resources through one impl
+;; (e.g. an FTRM SQLite catalogue dispatching on `(:url params)`) returns
+;; the right entry. A bare `(cs-resource impl {})` would dispatch on nil and
+;; yield nil for every key — silently suppressing status warnings on
+;; `$validate-code` / `$expand` against any catalogue-backed CodeSystem.
 ;; ---------------------------------------------------------------------------
 
 (defn- multi-cs-provider
@@ -161,10 +156,10 @@
         (when-let [m (get by-url url)]
           (select-keys m [:url :version :name :title :status :description]))))))
 
-(deftest cs-meta-by-key-built-with-url-params
-  (testing "cs-meta-by-key is populated for every registration of a
-            multi-resource provider — without the fix, every value is
-            nil and `cs-meta` returns nil for any registered URL"
+(deftest cs-meta-resolves-multi-resource-provider
+  (testing "cs-meta returns the right entry for every registration of a
+            multi-resource provider — it must dispatch on the registered
+            URL, not return nil for keys served through one impl"
     (let [entries [{:url "http://x/cs/a" :version "1.0" :status "active"
                     :name "Aye"}
                    {:url "http://x/cs/b" :version "1.0" :status "draft"
@@ -178,8 +173,8 @@
       (testing "versioned-key lookup also resolves"
         (is (= "active" (:status (composite/cs-meta svc "http://x/cs/a|1.0"))))))))
 
-(deftest vs-meta-by-key-built-with-url-params
-  (testing "vs-meta-by-key is populated for every registration of a
+(deftest vs-meta-resolves-multi-resource-provider
+  (testing "vs-meta returns the right entry for every registration of a
             multi-resource provider"
     (let [entries [{:url "http://x/vs/p" :version "1.0" :status "active"
                     :name "Pee"}
@@ -204,22 +199,11 @@
       (is (= 1 @calls)))))
 
 (deftest cs-meta-honours-naming-system-aliases-test
-  (let [base (svc-of [cs-v1])
-        resolver (fn [id]
+  (let [resolver (fn [id]
                    (when (= id "urn:oid:1.2.3") "http://example.com/r/cs"))
-        svc (composite/->TerminologyService
-              (:codesystems base)
-              (:valuesets base)
-              (:conceptmaps base)
-              [resolver]
-              (:cs-meta-by-key base)
-              (:vs-meta-by-key base)
-              (:cs-providers base)
-              (:vs-providers base)
-              (:cs-search-resources base)
-              (:vs-search-resources base)
-              {} [])]
-    (testing "alias is resolved against the precomputed map"
+        {:keys [providers]} (load-fhir/build-from-fhir-data (fhir-data [cs-v1]))
+        svc (composite/from-providers providers {:naming-systems [resolver]})]
+    (testing "alias resolves to the aliased CodeSystem's metadata"
       (is (= "1.0" (:version (composite/cs-meta svc "urn:oid:1.2.3")))))
     (testing "unknown alias returns nil"
       (is (nil? (composite/cs-meta svc "urn:oid:9.9.9"))))))

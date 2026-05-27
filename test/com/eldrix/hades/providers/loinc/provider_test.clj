@@ -403,13 +403,13 @@
                          :expression ["Coding.display"]}]}}])
 
 (deftest ^:live answer-list-valuesets-expand-and-validate
-  (testing "answer list ValueSets are advertised"
+  (testing "answer list ValueSets are resolvable by URL (implicit, not enumerated)"
     (let [url "http://loinc.org/vs/LL1234-5"
-          meta (first (filter #(= url (:url %)) (protos/vs-metadata *vs* {})))]
+          meta (first (protos/vs-metadata *vs* {:url url}))]
       (is (= url (:url meta)))))
-  (testing "part hierarchy ValueSets are advertised"
+  (testing "part hierarchy ValueSets are resolvable by URL (implicit, not enumerated)"
     (let [url "http://loinc.org/vs/LP248770-2"
-          meta (first (filter #(= url (:url %)) (protos/vs-metadata *vs* {})))]
+          meta (first (protos/vs-metadata *vs* {:url url}))]
       (is (= url (:url meta)))))
   (doseq [{:keys [label input expected]} answer-list-expand-cases]
     (testing label
@@ -651,8 +651,9 @@
     (is (contains? urls (:url (loinc-model/conceptmap :rsna-rid))))
     (is (contains? urls (:url (loinc-model/conceptmap :rsna-rpid))))
     (is (= {:url part-url
-            :system "http://loinc.org"
-            :target "http://snomed.info/sct"
+            :status "active"
+            :source-uri "http://loinc.org"
+            :target-uri "http://snomed.info/sct"
             :title "LOINC part related code mappings to http://snomed.info/sct"
             :version fixtures/loinc-version}
            (protos/cm-resource *cm* {:url part-url})))))
@@ -739,3 +740,24 @@
   (doseq [{:keys [label input expected]} external-conceptmap-translate-cases]
     (testing label
       (is (submap? expected (protos/cm-translate *cm* input))))))
+
+(deftest ^:live vs-metadata-honours-search-filters
+  (let [implicit-url "http://loinc.org/vs"
+        urls (fn [opts] (set (map :url (protos/vs-metadata *vs* opts))))
+        all  (urls {})]
+    (testing "no filter returns every synthesised ValueSet"
+      (is (contains? all implicit-url)))
+    (testing "title :exact pins the implicit LOINC ValueSet"
+      (is (= #{implicit-url}
+             (urls {:title {:value "All LOINC codes" :modifier :exact}}))))
+    (testing "name :exact \"LOINC\" matches only the implicit ValueSet"
+      (is (= #{implicit-url} (urls {:name {:value "LOINC" :modifier :exact}}))))
+    (testing "title :contains is case-insensitive"
+      (is (contains? (urls {:title {:value "loinc codes" :modifier :contains}})
+                     implicit-url)))
+    (testing "status is an exact token match, and narrows the result set"
+      (let [active (urls {:status "active"})]
+        (is (contains? active implicit-url))
+        (is (every? all active))))
+    (testing "a non-matching filter returns nothing"
+      (is (empty? (urls {:title {:value "no such valueset title" :modifier :exact}}))))))

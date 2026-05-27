@@ -129,7 +129,8 @@ maps.
 |---|---|
 | `search_code_systems` | FHIR REST search across registered CodeSystems |
 | `search_value_sets` | FHIR REST search across registered ValueSets |
-| `service_info` | List every CodeSystem, ValueSet, and ConceptMap installed on the server, with totals |
+| `search_concept_maps` | FHIR REST search across registered ConceptMaps |
+| `service_info` | Counts of registered CodeSystems, ValueSets, and ConceptMaps |
 
 ## Resources
 

@@ -420,9 +420,24 @@
     (some? experimental) (assoc "experimental" (boolean experimental))
     (map? compose) (assoc "compose" compose)))
 
+(defn cm-resource->map
+  "Build a string-keyed FHIR ConceptMap JSON map from a `::resource-meta`."
+  [{:keys [url version name title status description experimental source-uri target-uri]}]
+  (cond-> {"resourceType" "ConceptMap"}
+    url            (assoc "url" url)
+    version        (assoc "version" version)
+    name           (assoc "name" name)
+    title          (assoc "title" title)
+    status         (assoc "status" status)
+    description    (assoc "description" description)
+    (some? experimental) (assoc "experimental" (boolean experimental))
+    source-uri     (assoc "sourceUri" source-uri)
+    target-uri     (assoc "targetUri" target-uri)))
+
 (defn search-bundle
   "Build a FHIR searchset Bundle from a `::result/search-result`.
-  `opts` carries `:type` (`\"CodeSystem\"` or `\"ValueSet\"`),
+  `opts` carries `:type` (`\"CodeSystem\"`, `\"ValueSet\"`, or
+  `\"ConceptMap\"`),
   `:self-link` (the request URL to echo on `link[self]`), and
   `:resource->map` (a fn producing the per-entry FHIR resource map)."
   [{:keys [total resources]} {:keys [type self-link resource->map]}]

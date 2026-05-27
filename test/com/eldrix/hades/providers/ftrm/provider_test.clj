@@ -598,3 +598,49 @@
         (is (s/valid? ::result/validate r) (s/explain-str ::result/validate r))
         (is (or (:x-unknown-system r) (true? (:not-found r)))))
       (finally (delete-quietly path)))))
+
+(defn- vs-entry [url name title status]
+  {:type :valueset :url url :version "1.0"
+   :metadata {"name" name "title" title "status" status}
+   :compose {"include" [{"system" "http://example.org/cs/x"
+                         "concept" [{"code" "a" "display" "A"}]}]}})
+
+(def vs-search-data
+  [(vs-entry "http://example.org/vs/alpha" "AlphaVS" "Alpha ValueSet" "active")
+   (vs-entry "http://example.org/vs/beta"  "BetaVS"  "Beta ValueSet"  "retired")
+   (vs-entry "http://example.org/vs/pct"   "PctVS"   "100% Coverage"  "active")
+   (vs-entry "http://example.org/vs/abc"   "AbcVS"   "100ABC Coverage" "active")])
+
+(defn- build-vs-search-db [path]
+  (ftrm-index/build! path vs-search-data {:loader-type "synthetic-vs-search"})
+  (ftrm-index/index! path))
+
+(deftest vs-metadata-pushes-search-filters-to-sql
+  (let [path (new-temp-path)]
+    (try
+      (build-vs-search-db path)
+      (let [{:keys [valueset]} (ftrm-provider/open-providers path)
+            urls (fn [opts] (set (map :url (protos/vs-metadata valueset opts))))]
+        (testing "no filter returns every ValueSet"
+          (is (= 4 (count (protos/vs-metadata valueset {})))))
+        (testing "status is an exact token match"
+          (is (= #{"http://example.org/vs/alpha" "http://example.org/vs/pct"
+                   "http://example.org/vs/abc"}
+                 (urls {:status "active"})))
+          (is (= #{"http://example.org/vs/beta"} (urls {:status "retired"}))))
+        (testing "name starts-with (default modifier), case-insensitive"
+          (is (= #{"http://example.org/vs/alpha"} (urls {:name {:value "alph"}}))))
+        (testing "title :contains"
+          (is (= #{"http://example.org/vs/alpha" "http://example.org/vs/beta"}
+                 (urls {:title {:value "valueset" :modifier :contains}}))))
+        (testing "name :exact is case-sensitive"
+          (is (empty? (urls {:name {:value "alphavs" :modifier :exact}})))
+          (is (= #{"http://example.org/vs/alpha"}
+                 (urls {:name {:value "AlphaVS" :modifier :exact}}))))
+        (testing "LIKE metacharacters in the query match literally"
+          (is (= #{"http://example.org/vs/pct"}
+                 (urls {:title {:value "100%" :modifier :contains}}))))
+        (testing "filters combine"
+          (is (= #{"http://example.org/vs/alpha"}
+                 (urls {:status "active" :title {:value "Alpha" :modifier :contains}})))))
+      (finally (delete-quietly path)))))

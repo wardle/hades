@@ -17,7 +17,6 @@
             [com.eldrix.hades.providers.loinc.import :as loinc-import]
             [com.eldrix.hades.providers.loinc.index :as loinc-index]
             [com.eldrix.hades.providers.loinc.loader :as loinc-loader]
-            [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.impl.sources :as sources]
             [com.eldrix.hades.providers.ftrm.db :as ftrm-db]
             [com.eldrix.hermes.core :as hermes]
@@ -362,15 +361,7 @@
   (run! compact-one (files-or-throw paths)))
 
 (defn- log-catalogue-summary [svc]
-  ;; Count distinct url|version, not raw rows: a resource served by more
-  ;; than one provider (e.g. a CodeSystem present in two FTRM containers)
-  ;; appears once per provider in the metadata listing, which would
-  ;; otherwise inflate the tally above the deduplicated served catalogue.
-  (let [distinct-count (fn [ms] (count (into #{} (map (juxt :url :version)) ms)))]
-    (log/info "service catalogue"
-              {:codesystem-count (distinct-count (protos/cs-metadata svc {}))
-               :valueset-count   (distinct-count (protos/vs-metadata svc {}))
-               :conceptmap-count (distinct-count (protos/cm-metadata svc {}))})))
+  (log/info "service catalogue" (:totals (hades/metadata svc))))
 
 (defn- build-svc
   "Open CLI positional paths as a Hades service."
@@ -392,10 +383,6 @@
       (println "\nCodeSystems:")
       (pp/print-table (take 50 codesystems))
       (more-line (count codesystems) 50))
-    (when (seq valuesets)
-      (println "\nValueSets (first 20):")
-      (pp/print-table (take 20 valuesets))
-      (more-line (count valuesets) 20))
     (when (seq conceptmaps)
       (println "\nConceptMaps:")
       (pp/print-table (take 30 conceptmaps)))))
@@ -403,19 +390,13 @@
 (defn- status [{fmt :format :as opts} args]
   (let [svc (build-svc opts args)]
     (try
-      (let [st {:codesystems (vec (sort-by (juxt :url :version) (protos/cs-metadata svc {})))
-                :valuesets   (vec (sort-by (juxt :url :version) (protos/vs-metadata svc {})))
-                :conceptmaps (vec (protos/cm-metadata svc {}))}]
+      (let [m (dissoc (hades/metadata svc) :valuesets)]
         (case fmt
-          :json (println (json/write-str st :escape-slash false :indent true))
-          :edn  (pp/pprint st)
-          (print-status-table st)))
+          :json (println (json/write-str m :escape-slash false :indent true))
+          :edn  (pp/pprint m)
+          (print-status-table m)))
       (finally
         (hades/close svc)))))
-
-(defn- write-metadata [meta path]
-  (spit path (with-out-str (json/pprint meta)))
-  (log/info "wrote service metadata" {:path path}))
 
 (defn- logback-config-source [^LoggerContext ctx]
   (or (some-> (ConfigurationWatchListUtil/getMainWatchURL ctx) str)
@@ -442,7 +423,7 @@
                      "request threads. Use -Dlogback.configurationFile=logback-async.xml "
                      "for async logging.")))))
 
-(defn- serve [{:keys [metadata-out port bind-address] :as opts} args]
+(defn- serve [{:keys [port bind-address] :as opts} args]
   (set-default-uncaught-exception-handler)
   (log-logback-config!)
   (log/info "env" (-> (System/getProperties)
@@ -451,7 +432,6 @@
   (let [svc (build-svc opts args)
         server-opts (cond-> {:port port}
                       bind-address (assoc :host bind-address))]
-    (when metadata-out (write-metadata (hades/metadata svc) metadata-out))
     (log/info "starting Hades FHIR terminology server" server-opts)
     (http/start! (http/make-server svc server-opts))))
 

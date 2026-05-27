@@ -29,6 +29,7 @@
             [com.eldrix.hades.providers.common.fhir-extract :as fhir-extract]
             [com.eldrix.hades.providers.common.issues :as issues]
             [com.eldrix.hades.providers.common.property-filter :as property-filter]
+            [com.eldrix.hades.providers.common.search-filter :as search-filter]
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.providers.common.vs-validate :as vs-validate])
   (:import (com.google.re2j Pattern)))
@@ -222,13 +223,15 @@
 
 (deftype MemoryCodeSystem [meta code-index hierarchy property-uri-map case-sensitive? ci-index]
   protos/CodeSystem
-  (cs-metadata [_ {url-q :url ver-q :version}]
+  (cs-metadata [_ {url-q :url ver-q :version :as opts}]
     ;; Single-resource provider: skip allocation entirely when the
-    ;; caller's URL/version filter doesn't match.
+    ;; caller's filters don't match.
     (let [my-url (:url meta)
           my-ver (:version meta)]
       (when (and (or (nil? url-q) (= url-q my-url))
-                 (or (nil? ver-q) (= ver-q my-ver)))
+                 (or (nil? ver-q) (= ver-q my-ver))
+                 (search-filter/matches-resource-filters?
+                  (select-keys meta [:status :name :title :description]) opts))
         [(cond-> {:url my-url}
            my-ver                     (assoc :version my-ver)
            (:content meta)            (assoc :content (:content meta))
@@ -547,11 +550,16 @@
 
 (deftype MemoryValueSet [vs-data]
   protos/ValueSet
-  (vs-metadata [_ {url-q :url ver-q :version}]
+  (vs-metadata [_ {url-q :url ver-q :version :as opts}]
     (let [my-url (:url vs-data)
-          my-ver (:version vs-data)]
+          my-ver (:version vs-data)
+          m      (:metadata vs-data)]
       (when (and (or (nil? url-q) (= url-q my-url))
-                 (or (nil? ver-q) (= ver-q my-ver)))
+                 (or (nil? ver-q) (= ver-q my-ver))
+                 (search-filter/matches-resource-filters?
+                  {:name (get m "name") :title (get m "title")
+                   :status (get m "status") :description (get m "description")}
+                  opts))
         [(cond-> {:url my-url}
            my-ver (assoc :version my-ver))])))
 
@@ -674,7 +682,15 @@
            (seq pairs) (assoc :pairs pairs))])))
 
   (cm-resource [_ _params]
-    (:metadata cm-data))
+    (let [{:keys [url version source-uri target-uri metadata]} cm-data]
+      (cond-> {:url url}
+        version                      (assoc :version version)
+        (get metadata "name")        (assoc :name (get metadata "name"))
+        (get metadata "title")       (assoc :title (get metadata "title"))
+        (get metadata "status")      (assoc :status (get metadata "status"))
+        (get metadata "description") (assoc :description (get metadata "description"))
+        source-uri                   (assoc :source-uri source-uri)
+        target-uri                   (assoc :target-uri target-uri))))
 
   (cm-translate [_ {:keys [code system target] :as _params}]
     (let [{:keys [target-uri]} cm-data

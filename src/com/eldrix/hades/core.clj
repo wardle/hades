@@ -94,13 +94,19 @@
 (defn metadata
   "Describe what `svc` knows about: every CodeSystem, ValueSet, and
   ConceptMap registered, composed live from each provider's
-  `*-metadata`, plus totals. Any `:metadata` map passed at open time
-  (e.g. a loader's skipped-entry report) is merged in beneath the
-  composed catalogue — live keys win on conflict."
+  `*-metadata`, plus totals. Entries are deduplicated and ordered by
+  `url|version`: a resource served by more than one provider appears
+  once. `:totals` therefore counts the distinct served catalogue. Any
+  `:metadata` map passed at open time (e.g. a loader's skipped-entry
+  report) is merged in beneath the composed catalogue — live keys win
+  on conflict."
   [svc]
-  (let [css (vec (sort-by (juxt :url :version) (protos/cs-metadata svc {})))
-        vss (vec (sort-by (juxt :url :version) (protos/vs-metadata svc {})))
-        cms (vec (protos/cm-metadata svc {}))]
+  (let [distinct-by (fn [ms] (->> ms (sort-by (juxt :url :version))
+                                  (partition-by (juxt :url :version))
+                                  (mapv first)))
+        css (distinct-by (protos/cs-metadata svc {}))
+        vss (distinct-by (protos/vs-metadata svc {}))
+        cms (distinct-by (protos/cm-metadata svc {}))]
     (merge (:metadata svc)
            {:codesystems css
             :valuesets   vss
@@ -204,10 +210,11 @@
 
 (defn search-code-systems
   "FHIR REST search across registered CodeSystems. `params` is a flat
-  map of filters (`:url :version :status :name :title :description`),
-  string modifiers (`:name-mode :title-mode :description-mode` —
-  `:starts-with`, `:exact`, or `:contains`), and result-control fields
-  (`:_count :_offset :_summary`). Returns `{:total :resources}`."
+  map of token filters (`:url :version :status`), string filters
+  (`:name :title :description`, each a `{:value :modifier}` map where
+  `:modifier` is `:starts-with` (default), `:exact`, or `:contains`),
+  and result-control fields (`:_count :_offset :_summary`). Returns
+  `{:total :resources}`."
   [svc params]
   (composite/search-code-systems svc params))
 
@@ -222,3 +229,13 @@
   `vs-resource` returns nil."
   [svc params]
   (composite/search-value-sets svc params))
+
+(s/fdef search-concept-maps
+  :args (s/cat :svc some? :params map?)
+  :ret  ::search-result)
+
+(defn search-concept-maps
+  "FHIR REST search across registered ConceptMaps. Same params and
+  return shape as `search-code-systems`."
+  [svc params]
+  (composite/search-concept-maps svc params))

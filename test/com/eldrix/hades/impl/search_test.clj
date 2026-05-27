@@ -67,6 +67,17 @@
    "description" "A Beta ValueSet"
    "compose" {"include" [{"system" "http://example.com/cs/beta"}]}})
 
+(def ^:private cm-alpha-to-beta
+  {"resourceType" "ConceptMap"
+   "url" "http://example.com/cm/alpha-to-beta" "version" "1.0" "status" "active"
+   "name" "AlphaToBeta" "title" "Alpha to Beta map"
+   "description" "Maps Alpha codes to Beta"
+   "sourceUri" "http://example.com/vs/alpha"
+   "targetUri" "http://example.com/vs/beta"
+   "group" [{"source" "http://example.com/cs/alpha"
+             "target" "http://example.com/cs/beta"
+             "element" [{"code" "A" "target" [{"code" "B" "equivalence" "equivalent"}]}]}]})
+
 (defn- fhir-data [resource-maps]
   (mapcat #(loaders/resource->fhir-data % "<test>") resource-maps))
 
@@ -76,7 +87,7 @@
     (composite/from-providers providers {:supplements supplements})))
 
 (def ^:private all-resources
-  [cs-alpha-v1 cs-alpha-v2 cs-beta vs-alpha vs-beta])
+  [cs-alpha-v1 cs-alpha-v2 cs-beta vs-alpha vs-beta cm-alpha-to-beta])
 
 ;; ---------------------------------------------------------------------------
 ;; Composite — token + string filters, modifiers, paging, sort, _summary
@@ -106,19 +117,19 @@
 (deftest cs-search-string-filters-test
   (let [svc (svc-of all-resources)]
     (testing "name default :starts-with case-insensitive"
-      (is (= 2 (:total (hades/search-code-systems svc {:name "alpha"})))))
+      (is (= 2 (:total (hades/search-code-systems svc {:name {:value "alpha"}})))))
     (testing "name :exact rejects case mismatch"
       (is (= 0 (:total (hades/search-code-systems
-                         svc {:name "alpha" :name-mode :exact})))))
+                         svc {:name {:value "alpha" :modifier :exact}})))))
     (testing "name :exact accepts exact case"
       (is (= 1 (:total (hades/search-code-systems
-                         svc {:name "Alpha" :name-mode :exact})))))
+                         svc {:name {:value "Alpha" :modifier :exact}})))))
     (testing "title :contains substring"
       (is (= 1 (:total (hades/search-code-systems
-                         svc {:title "v2" :title-mode :contains})))))
+                         svc {:title {:value "v2" :modifier :contains}})))))
     (testing "description :starts-with"
       (is (= 2 (:total (hades/search-code-systems
-                         svc {:description "the"})))))))
+                         svc {:description {:value "the"}})))))))
 
 (deftest cs-search-sort-and-paging-test
   (let [svc (svc-of all-resources)]
@@ -183,10 +194,31 @@
         (is (= ["http://example.com/vs/alpha"]
                (mapv :url (:resources result))))))))
 
+(deftest cm-search-test
+  (let [svc (svc-of all-resources)]
+    (testing "no filters returns the map with a complete resource-meta"
+      (let [{:keys [total resources]} (hades/search-concept-maps svc {})
+            cm (first resources)]
+        (is (= 1 total))
+        (is (= "AlphaToBeta" (:name cm)))
+        (is (= "Alpha to Beta map" (:title cm)))
+        (is (= "active" (:status cm)))
+        (is (= "http://example.com/vs/alpha" (:source-uri cm)))))
+    (testing "status filter"
+      (is (= 1 (:total (hades/search-concept-maps svc {:status "active"}))))
+      (is (= 0 (:total (hades/search-concept-maps svc {:status "retired"})))))
+    (testing "name :contains"
+      (is (= 1 (:total (hades/search-concept-maps svc {:name {:value "beta" :modifier :contains}}))))
+      (is (= 0 (:total (hades/search-concept-maps svc {:name {:value "zzz" :modifier :contains}})))))
+    (testing "url filter pins one entry"
+      (is (= 1 (:total (hades/search-concept-maps
+                         svc {:url "http://example.com/cm/alpha-to-beta"})))))))
+
 (deftest result-conforms-to-spec-test
   (let [svc (svc-of all-resources)]
     (is (s/valid? ::result/search-result (hades/search-code-systems svc {})))
-    (is (s/valid? ::result/search-result (hades/search-value-sets svc {})))))
+    (is (s/valid? ::result/search-result (hades/search-value-sets svc {})))
+    (is (s/valid? ::result/search-result (hades/search-concept-maps svc {})))))
 
 ;; ---------------------------------------------------------------------------
 ;; Wire — search-bundle shape
@@ -302,7 +334,17 @@
           (let [{:keys [body]} (fixtures/request!
                                  base {:path "/ValueSet?_summary=false"})]
             (is (some #(some? (get-in % ["resource" "compose"]))
-                      (get body "entry"))))))
+                      (get body "entry")))))
+        (testing "GET /ConceptMap returns a searchset Bundle of ConceptMaps"
+          (let [{:keys [status body]} (fixtures/request! base {:path "/ConceptMap"})]
+            (is (= 200 status))
+            (is (= "searchset" (get body "type")))
+            (is (= 1 (get body "total")))
+            (is (= "ConceptMap" (get-in body ["entry" 0 "resource" "resourceType"])))
+            (is (= "AlphaToBeta" (get-in body ["entry" 0 "resource" "name"])))))
+        (testing "GET /ConceptMap?status= filters"
+          (let [{:keys [body]} (fixtures/request! base {:path "/ConceptMap?status=retired"})]
+            (is (= 0 (get body "total"))))))
       (finally
         (fixtures/stop-server srv)
         (hades/close svc)))))

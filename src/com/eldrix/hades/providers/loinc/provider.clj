@@ -3,6 +3,7 @@
   (:require [clojure.string :as str]
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.providers.common.display :as display]
+            [com.eldrix.hades.providers.common.search-filter :as search-filter]
             [com.eldrix.hades.providers.common.issues :as issues]
             [com.eldrix.hades.providers.common.property-filter :as property-filter]
             [com.eldrix.hades.providers.loinc.model :as model]
@@ -516,12 +517,16 @@
   (close [_] (store/close! ds))
 
   protos/CodeSystem
-  (cs-metadata [this {:keys [url version]}]
+  (cs-metadata [this {:keys [url version] :as opts}]
     (when (and (or (nil? url) (= loinc-url url))
-               (or (nil? version) (= (:version this) version)))
+               (or (nil? version) (= (:version this) version))
+               (search-filter/matches-resource-filters?
+                {:name "LOINC" :title "Logical Observation Identifiers Names and Codes"
+                 :status "active"} opts))
       [(cond-> {:url loinc-url
                 :name "LOINC"
                 :title "Logical Observation Identifiers Names and Codes"
+                :status "active"
                 :content "complete"
                 :case-sensitive false}
          (:version this) (assoc :version (:version this)))]))
@@ -656,17 +661,9 @@
                       id]
                      (row-builder)))
 
-(defn- answer-list-metadata
-  ([ds]
-   (jdbc/execute! ds
-                  ["SELECT answer_list_id, answer_list_name, answer_list_oid
-                    FROM answer_list
-                    GROUP BY answer_list_id
-                    ORDER BY answer_list_id"]
-                  (row-builder)))
-  ([ds id]
-   (when-let [row (answer-list-meta-row ds id)]
-     [row])))
+(defn- answer-list-metadata [ds id]
+  (when-let [row (answer-list-meta-row ds id)]
+    [row]))
 
 (defn- answer-list-resource [version {:keys [answer_list_id answer_list_name answer_list_oid]}]
   (cond-> {:url (answer-list-id->url answer_list_id)
@@ -693,32 +690,14 @@
                       id]
                      (row-builder)))
 
-(defn- group-metadata [ds]
-  (jdbc/execute! ds
-                 ["SELECT group_id, group_name, status
-                   FROM loinc_group
-                   ORDER BY group_id"]
-                 (row-builder)))
-
-(defn- hierarchy-root-metadata [ds]
-  (jdbc/execute! ds
-                 ["SELECT code, COALESCE(MAX(code_text), code) AS code_text
-                   FROM (
-                     SELECT code, code_text
-                     FROM component_hierarchy_by_system
-                     UNION
-                     SELECT immediate_parent AS code, immediate_parent AS code_text
-                     FROM component_hierarchy_by_system
-                   )
-                   GROUP BY code
-                   ORDER BY code"]
-                 (row-builder)))
+(defn- group-vs-status [status]
+  (if (#{"Deprecated" "DEPRECATED"} status) "retired" "active"))
 
 (defn- group-resource [version {:keys [group_id group_name status]}]
   (cond-> {:url (group-id->url group_id)
            :name group_name
            :title group_name
-           :status (if (#{"Deprecated" "DEPRECATED"} status) "retired" "active")}
+           :status (group-vs-status status)}
     version (assoc :version version)))
 
 (defn- hierarchy-root-row [ds id]
@@ -1137,53 +1116,51 @@
 (defn- version-matches? [actual requested]
   (or (nil? requested) (= actual requested)))
 
+(defn- vs-meta-match?
+  "Whether a synthesised LOINC ValueSet with `name`/`title`/`status`
+  satisfies the `opts` search filters."
+  [opts name title status]
+  (search-filter/matches-resource-filters? {:name name :title title :status status} opts))
+
 (defrecord LoincValueSet [ds version]
   protos/ValueSet
-  (vs-metadata [_ {url-q :url version-q :version}]
-    (when (version-matches? version version-q)
-      (cond
-        (implicit-loinc-vs? url-q)
-        [(cond-> {:url implicit-loinc-vs-url} version (assoc :version version))]
-
-        url-q
+  (vs-metadata [_ {url-q :url version-q :version include-implicit? :include-implicit?
+                   :or {include-implicit? true} :as opts}]
+    (let [tuple    (fn [url] (cond-> {:url url} version (assoc :version version)))
+          implicit (fn [] (when (vs-meta-match? opts "LOINC" "All LOINC codes" "active")
+                            [(tuple implicit-loinc-vs-url)]))
+          answers  (fn [rows] (keep (fn [{:keys [answer_list_id answer_list_name]}]
+                                      (when (vs-meta-match? opts answer_list_name answer_list_name "active")
+                                        (tuple (answer-list-id->url answer_list_id))))
+                                    rows))
+          groups   (fn [rows] (keep (fn [{:keys [group_id group_name status]}]
+                                      (when (vs-meta-match? opts group_name group_name (group-vs-status status))
+                                        (tuple (group-id->url group_id))))
+                                    rows))
+          roots    (fn [rows] (keep (fn [{:keys [code code_text]}]
+                                      (when (vs-meta-match? opts code_text code_text "active")
+                                        (tuple (group-id->url code))))
+                                    rows))]
+      (when (version-matches? version version-q)
         (cond
-          (answer-list-id url-q)
-          (mapv (fn [row]
-                  (cond-> {:url (answer-list-id->url (:answer_list_id row))}
-                    version (assoc :version version)))
-                (answer-list-metadata ds (answer-list-id url-q)))
+          (implicit-loinc-vs? url-q)
+          (vec (implicit))
 
-          (group-id url-q)
-          (mapv (fn [row]
-                  (cond-> {:url (group-id->url (:group_id row))}
-                    version (assoc :version version)))
-                (when-let [row (group-meta-row ds (group-id url-q))]
-                  [row]))
+          ;; A specific URL is resolved on demand — this is how every LOINC
+          ;; implicit ValueSet (answer list, group, multi-axial part) is
+          ;; routed and expanded. They are never enumerated.
+          url-q
+          (cond
+            (answer-list-id url-q) (vec (answers (answer-list-metadata ds (answer-list-id url-q))))
+            (group-id url-q)       (vec (groups (some-> (group-meta-row ds (group-id url-q)) vector)))
+            (part-id url-q)        (vec (roots (some-> (hierarchy-root-row ds (part-id url-q)) vector)))
+            :else nil)
 
-          (part-id url-q)
-          (mapv (fn [row]
-                  (cond-> {:url (group-id->url (:code row))}
-                    version (assoc :version version)))
-                (when-let [row (hierarchy-root-row ds (part-id url-q))]
-                  [row]))
-
-          :else nil)
-
-        :else
-        (into (into [(cond-> {:url implicit-loinc-vs-url} version (assoc :version version))]
-                    (map (fn [row]
-                           (cond-> {:url (answer-list-id->url (:answer_list_id row))}
-                             version (assoc :version version))))
-                    (answer-list-metadata ds))
-              (concat
-                (map (fn [row]
-                       (cond-> {:url (group-id->url (:group_id row))}
-                         version (assoc :version version)))
-                     (group-metadata ds))
-                (map (fn [row]
-                       (cond-> {:url (group-id->url (:code row))}
-                         version (assoc :version version)))
-                     (hierarchy-root-metadata ds)))))))
+          ;; Catalogue enumeration. Every LOINC ValueSet is implicit, so the
+          ;; listing carries only the `http://loinc.org/vs` anchor — and only
+          ;; when implicit entries are wanted (the routing index; not browse).
+          include-implicit?
+          (vec (implicit))))))
 
   (vs-resource [_ {:keys [url] :as params}]
     (when (version-matches? version (requested-version params))
@@ -1551,7 +1528,12 @@
                (all-conceptmap-metas ds version))))
 
   (cm-resource [this params]
-    (first (protos/cm-metadata this params)))
+    (when-let [m (first (protos/cm-metadata this params))]
+      (cond-> {:url (:url m) :status "active"}
+        (:version m) (assoc :version (:version m))
+        (:title m)   (assoc :title (:title m))
+        (:system m)  (assoc :source-uri (:system m))
+        (:target m)  (assoc :target-uri (:target m)))))
 
   (cm-translate [_ {:keys [code] :as params}]
     (if-let [{:keys [kind target-system]} (conceptmap-kind params)]

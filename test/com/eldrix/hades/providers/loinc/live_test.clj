@@ -39,8 +39,6 @@
 (defn- vs-listed? [url]
   (fn [m] (boolean (some #(= url (:url %)) (:valuesets m)))))
 
-(defn- vs-url-matching? [re]
-  (fn [m] (boolean (some #(re-find re (str (:url %))) (:valuesets m)))))
 
 (defn- equals? [v] (fn [r] (= v r)))
 
@@ -142,21 +140,13 @@
    ;;   • /vs/{LL-id}        -> answer-list members
    ;;   • /vs/{LG-id}        -> group members
    ;;   • /vs/{LP-code}      -> multi-axial hierarchy descendants
-   ;; Cases that fail today are missing-functionality flags; the LL ones
-   ;; pass against the current implementation.
+   ;; All but the bare /vs anchor are implicit: resolved/expanded by exact
+   ;; URL, not enumerated in the catalogue listing.
    ;; -------------------------------------------------------------------------
 
    {:name "metadata: vs catalogue lists the all-of-LOINC implicit VS"
     :op :metadata :input {}
     :expect [["http://loinc.org/vs is listed" (vs-listed? "http://loinc.org/vs")]]}
-
-   {:name "metadata: vs catalogue lists at least one LL answer-list VS"
-    :op :metadata :input {}
-    :expect [["any LL URL listed" (vs-url-matching? #"^http://loinc\.org/vs/LL\d")]]}
-
-   {:name "metadata: vs catalogue lists at least one LG group VS"
-    :op :metadata :input {}
-    :expect [["any LG URL listed" (vs-url-matching? #"^http://loinc\.org/vs/LG\d")]]}
 
    {:name "vs-expand: all-of-LOINC with filter narrows to hemoglobin"
     :op :expand

@@ -4,6 +4,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [com.eldrix.hades.providers.common.issues :as issues]
+            [com.eldrix.hades.providers.common.search-filter :as search-filter]
             [com.eldrix.hades.providers.common.property-filter :as property-filter]
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.providers.snomed.batch :as batch]
@@ -574,7 +575,7 @@
          [svc]
   protos/CodeSystem
   (cs-metadata [_ {url-q :url ver-q :version include-implicit? :include-implicit?
-                   :or {include-implicit? true}}]
+                   :or {include-implicit? true} :as opts}]
     ;; Hermes serves the composite of every installed SNOMED module
     ;; under one URL. The wildcard catches lookups pinning to any
     ;; module-version URI; mark it `:implicit?` so catalogue listings
@@ -587,7 +588,9 @@
         (conj {:url snomed-system-uri :version "*" :implicit? true})
 
         (and (or (nil? url-q) (= url-q snomed-system-uri))
-             (or (nil? ver-q) (= ver-q real-version)))
+             (or (nil? ver-q) (= ver-q real-version))
+             (search-filter/matches-resource-filters?
+              {:name "SNOMEDCT" :title "SNOMED CT" :status "active"} opts))
         (conj {:url snomed-system-uri :version real-version}))))
 
   (cs-resource [_ _params]
@@ -943,7 +946,12 @@
                :target snomed-system-uri
                :title  (str title " (target → SNOMED CT)")}]))
          external-map-refsets)))))
-  (cm-resource [_ _params])
+  (cm-resource [this params]
+    (when-let [m (first (protos/cm-metadata this params))]
+      (cond-> {:url (:url m) :status "active"}
+        (:title m)  (assoc :title (:title m))
+        (:system m) (assoc :source-uri (:system m))
+        (:target m) (assoc :target-uri (:target m)))))
   (cm-translate
     [_ {:keys [code] :as params}]
     (let [resolved (resolve-cm params)

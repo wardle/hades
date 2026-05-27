@@ -118,32 +118,30 @@
                       value_set_version (assoc :valueSetVersion value_set_version))]
     (hades/validate-codeable-concept svc codings* base-params)))
 
+(defn- string-filter
+  "Build a `::input/string-filter` from the flat MCP inputs: a `:value`
+  with an optional `:modifier`."
+  [value mode]
+  (cond-> {:value value}
+    mode (assoc :modifier (->string-mode mode))))
+
 (defn- search-params
   [{:keys [url version status name title description
            name_mode title_mode description_mode
            count offset summary]}]
   (cond-> {}
-    url              (assoc :url url)
-    version          (assoc :version version)
-    status           (assoc :status status)
-    name             (assoc :name name)
-    title            (assoc :title title)
-    description      (assoc :description description)
-    name_mode        (assoc :name-mode (->string-mode name_mode))
-    title_mode       (assoc :title-mode (->string-mode title_mode))
-    description_mode (assoc :description-mode (->string-mode description_mode))
-    count            (assoc :_count count)
-    offset           (assoc :_offset offset)
-    summary          (assoc :_summary summary)))
-
-(defn- tool-search-code-systems [svc args]
-  (hades/search-code-systems svc (search-params args)))
-
-(defn- tool-search-value-sets [svc args]
-  (hades/search-value-sets svc (search-params args)))
+    url         (assoc :url url)
+    version     (assoc :version version)
+    status      (assoc :status status)
+    name        (assoc :name (string-filter name name_mode))
+    title       (assoc :title (string-filter title title_mode))
+    description (assoc :description (string-filter description description_mode))
+    count       (assoc :_count count)
+    offset      (assoc :_offset offset)
+    summary     (assoc :_summary summary)))
 
 (defn- tool-service-info [svc _]
-  (hades/metadata svc))
+  (:totals (hades/metadata svc)))
 
 ;; ---------------------------------------------------------------------------
 ;; Tool catalogue
@@ -272,7 +270,7 @@
     :inputSchema {:type       "object"
                   :properties search-properties
                   :required   []}
-    :fn          tool-search-code-systems}
+    :fn          (fn [svc args] (hades/search-code-systems svc (search-params args)))}
 
    {:name        "search_value_sets"
     :description (str "FHIR REST search across registered ValueSets. Same shape as "
@@ -281,13 +279,20 @@
     :inputSchema {:type       "object"
                   :properties search-properties
                   :required   []}
-    :fn          tool-search-value-sets}
+    :fn          (fn [svc args] (hades/search-value-sets svc (search-params args)))}
+
+   {:name        "search_concept_maps"
+    :description (str "FHIR REST search across registered ConceptMaps. Same shape as "
+                      "`search_code_systems`.")
+    :inputSchema {:type       "object"
+                  :properties search-properties
+                  :required   []}
+    :fn          (fn [svc args] (hades/search-concept-maps svc (search-params args)))}
 
    {:name        "service_info"
-    :description (str "Describe what the server knows about: every CodeSystem, "
-                      "ValueSet, and ConceptMap registered (with their canonical "
-                      "URLs and versions) plus totals. Use this to discover what "
-                      "terminology is loaded before guessing a system URL.")
+    :description (str "Counts of registered CodeSystems, ValueSets, and "
+                      "ConceptMaps. Use search_code_systems, search_value_sets, or "
+                      "search_concept_maps to find specific resources.")
     :inputSchema {:type       "object"
                   :properties {}
                   :required   []}
@@ -314,9 +319,9 @@
 ;; ---------------------------------------------------------------------------
 ;; Resources
 ;;
-;; Two static markdown guides plus two dynamic catalogue resources backed
-;; by `core/metadata`. Each entry carries a `:content` fn `(svc) -> text`;
-;; static guides ignore svc.
+;; Two static markdown guides plus two dynamic count resources backed by
+;; `core/metadata` totals. Each entry carries a `:content` fn
+;; `(svc) -> text`; static guides ignore svc.
 ;; ---------------------------------------------------------------------------
 
 (def ^:private operations-guide
@@ -335,8 +340,8 @@ and to understand what each returns.
 | List concepts in a ValueSet, optionally text-filtered | `expand` |
 | Map a code to one in another CodeSystem | `translate` |
 | Test whether one code is an ancestor of another | `subsumes` |
-| Find a CodeSystem or ValueSet by name/title/description | `search_code_systems` / `search_value_sets` |
-| Discover what terminology is installed | `service_info` |
+| Find a CodeSystem, ValueSet, or ConceptMap by name/title/description | `search_code_systems` / `search_value_sets` / `search_concept_maps` |
+| See how many CodeSystems / ValueSets / ConceptMaps are installed | `service_info` |
 
 ## $lookup vs $validate-code
 
@@ -379,8 +384,8 @@ Tests whether one code is an ancestor of another within a single CodeSystem.
   inspect the best one → `validate_code` against the target ValueSet.
 - **Build a draft ValueSet**: `expand` with `filter` to seed → `expand` against
   draft compose → iterate.
-- **Cross-terminology mapping**: `service_info` to find ConceptMaps with
-  the right target → `translate` per code.
+- **Cross-terminology mapping**: `translate` per code with `system` and
+  `target` — Hades picks the ConceptMap.
 ")
 
 (def ^:private value-sets-guide
@@ -455,41 +460,15 @@ them, dedupes by (system, code), and applies any `compose.exclude` last.
   you supply the wrong language; pass `display_language` if needed.
 ")
 
-(defn- format-catalogue-section
-  "Render `entries` as a small markdown table. Each entry uses the keys
-  `:url`, `:version`, plus a per-section extras fn for any final column."
-  [title entries extras]
-  (let [rows (->> entries
-                  (mapv (fn [{:keys [url version] :as e}]
-                          (str "| " url " | " (or version "-") " | " (extras e) " |"))))]
-    (str "## " title " (" (count entries) ")\n\n"
-         "| URL | Version | Notes |\n"
-         "|-----|---------|-------|\n"
-         (str/join "\n" rows)
-         "\n")))
-
 (defn- catalogue-code-systems [svc]
-  (let [{:keys [codesystems]} (hades/metadata svc)]
-    (str "# CodeSystems registered on this server\n\n"
-         "Live from each provider's `cs-metadata`. Counts include the\n"
-         "implicit and supplement entries that providers expose for routing.\n\n"
-         (format-catalogue-section
-          "CodeSystems" codesystems
-          (fn [{:keys [implicit? content supplements]}]
-            (str/join " " (cond-> []
-                            implicit?       (conj "implicit")
-                            content         (conj (str "content=" content))
-                            (seq supplements) (conj (str "supplements=" (count supplements))))))))))
+  (str "# CodeSystems\n\n"
+       (:codesystems (:totals (hades/metadata svc))) " registered. "
+       "Use the `search_code_systems` tool to find one by URL, name, or title.\n"))
 
 (defn- catalogue-value-sets [svc]
-  (let [{:keys [valuesets]} (hades/metadata svc)]
-    (str "# ValueSets registered on this server\n\n"
-         "Live from each provider's `vs-metadata`. Implicit entries (e.g.\n"
-         "Hermes' \"all of SNOMED\" VS) are listed but are not extensionally\n"
-         "expandable.\n\n"
-         (format-catalogue-section
-          "ValueSets" valuesets
-          (fn [{:keys [implicit?]}] (if implicit? "implicit" ""))))))
+  (str "# ValueSets\n\n"
+       (:valuesets (:totals (hades/metadata svc))) " registered. "
+       "Use the `search_value_sets` tool to find one by URL, name, or title.\n"))
 
 (def ^:private resources*
   [{:uri         "hades://guides/operations"
@@ -503,13 +482,13 @@ them, dedupes by (system, code), and applies any `compose.exclude` last.
     :mimeType    "text/markdown"
     :content     (constantly value-sets-guide)}
    {:uri         "hades://catalog/code-systems"
-    :name        "Live CodeSystem catalogue"
-    :description "Every CodeSystem the server can answer for, with canonical URL and version. Computed on demand from the live providers."
+    :name        "CodeSystem count"
+    :description "Number of CodeSystems registered. Use search_code_systems to find specific ones."
     :mimeType    "text/markdown"
     :content     catalogue-code-systems}
    {:uri         "hades://catalog/value-sets"
-    :name        "Live ValueSet catalogue"
-    :description "Every ValueSet the server can answer for. Computed on demand from the live providers."
+    :name        "ValueSet count"
+    :description "Number of ValueSets registered. Use search_value_sets to find specific ones."
     :mimeType    "text/markdown"
     :content     catalogue-value-sets}])
 
@@ -587,10 +566,9 @@ them, dedupes by (system, code), and applies any `compose.exclude` last.
                     (str "Translate the following codes to the target CodeSystem `" target "`:\n\n"
                          codes "\n\n"
                          "Please:\n"
-                         "1. Use `service_info` to identify ConceptMaps that target `" target "`.\n"
-                         "2. For each input code, call `translate` (with `url=` the chosen ConceptMap, or `system`+`target`) to get matches.\n"
-                         "3. Note the `equivalence` of each match (equivalent / equal / wider / narrower / relatedto / inexact / unmatched / disjoint) so I can judge fidelity.\n"
-                         "4. Report a table: source → target → equivalence → display."))]}))
+                         "1. For each input code, call `translate` with `system` and `target=" target "` (Hades selects the ConceptMap) to get matches.\n"
+                         "2. Note the `equivalence` of each match (equivalent / equal / wider / narrower / relatedto / inexact / unmatched / disjoint) so I can judge fidelity.\n"
+                         "3. Report a table: source → target → equivalence → display."))]}))
 
 (defn- prompt-explore-concept [args]
   (let [system (require-arg! args "system" "system")

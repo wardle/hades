@@ -23,6 +23,7 @@
   (:require [charred.api :as charred]
             [clojure.string :as str]
             [com.eldrix.hades.providers.common.canonical :as canonical]
+            [com.eldrix.hades.providers.common.search-filter :as search-filter]
             [com.eldrix.hades.providers.common.compose :as compose]
             [com.eldrix.hades.providers.common.display :as display]
             [com.eldrix.hades.providers.common.issues :as issues]
@@ -86,6 +87,9 @@
 (defn- conceptmap-row->entry [row]
   {:url            (:conceptmap/url row)
    :version        (system-version-or-nil (:conceptmap/version row))
+   :name           (:conceptmap/name row)
+   :title          (:conceptmap/title row)
+   :status         (:conceptmap/status row)
    :source-uri     (:conceptmap/source_uri row)
    :source-version (:conceptmap/source_version row)
    :target-uri     (:conceptmap/target_uri row)
@@ -575,14 +579,16 @@
 
 (deftype FtrmCodeSystemCatalogue [ds cache]
   protos/CodeSystem
-  (cs-metadata [_ {:keys [url version]}]
+  (cs-metadata [_ {:keys [url version] :as opts}]
     ;; Cache is keyed by `[url version]`, so we filter the raw key
     ;; before allocating a tuple map. URL hot-path: walks the cache
     ;; doing key compares, allocates a tuple only for the survivor.
     (eduction
-     (filter (fn [[[k-url k-ver] _]]
+     (filter (fn [[[k-url k-ver] entry]]
                (and (or (nil? url)     (= url k-url))
-                    (or (nil? version) (= version k-ver)))))
+                    (or (nil? version) (= version k-ver))
+                    (search-filter/matches-resource-filters?
+                     (select-keys entry [:status :name :title :description]) opts))))
      (map (fn [[[k-url k-ver] entry]]
             (cond-> {:url k-url}
               (not (str/blank? k-ver)) (assoc :version k-ver)
@@ -942,22 +948,49 @@
       total               (assoc :total total)
       (seq display-langs)  (assoc :display-language displayLanguage))))
 
+(defn- like-pattern
+  "Build a case-insensitive SQL `LIKE` pattern for a `::input/string-filter`,
+  escaping `\\ % _` so they match literally."
+  [{:keys [value modifier]}]
+  (let [esc (str/replace (str/lower-case value) #"([\\%_])" "\\\\$1")]
+    (case (or modifier :starts-with)
+      :starts-with (str esc "%")
+      :contains    (str "%" esc "%"))))
+
+(defn- string-filter-sql
+  "WHERE fragment + bind params matching a `valueset_resource.metadata`
+  JSON field (`r.metadata`) against a `::input/string-filter`. `:exact`
+  is a case-sensitive equality; the others are case-insensitive `LIKE`."
+  [json-key {:keys [modifier] :as f}]
+  (if (= :exact modifier)
+    [(str "json_extract(r.metadata,'$." json-key "') = ?") (:value f)]
+    [(str "lower(json_extract(r.metadata,'$." json-key "')) LIKE ? ESCAPE '\\'")
+     (like-pattern f)]))
+
 (deftype FtrmValueSetCatalogue [ds]
   protos/ValueSet
-  (vs-metadata [_ {:keys [url version]}]
-    (let [[sql params] (cond
-                         (and url (not (str/blank? version)))
-                         ["SELECT url, version FROM valueset WHERE url = ? AND version = ?" [url version]]
-                         url
-                         ["SELECT url, version FROM valueset WHERE url = ?" [url]]
-                         :else
-                         ["SELECT url, version FROM valueset" []])]
+  (vs-metadata [_ {:keys [url version status name title description]}]
+    (let [string-clauses (cond-> []
+                           name        (conj (string-filter-sql "name" name))
+                           title       (conj (string-filter-sql "title" title))
+                           description (conj (string-filter-sql "description" description)))
+          meta-filter?   (or status (seq string-clauses))
+          clauses        (-> (cond-> []
+                               url                        (conj ["v.url = ?" url])
+                               (not (str/blank? version)) (conj ["v.version = ?" version])
+                               status                     (conj ["json_extract(r.metadata,'$.status') = ?" status]))
+                             (into string-clauses))
+          sql (str "SELECT v.url, v.version FROM valueset v"
+                   (when meta-filter?
+                     " JOIN valueset_resource r ON r.url = v.url AND r.version = v.version")
+                   (when (seq clauses)
+                     (str " WHERE " (str/join " AND " (map first clauses)))))]
       (into []
             (map (fn [row]
                    (cond-> {:url (:valueset/url row)}
                      (not (str/blank? (:valueset/version row)))
                      (assoc :version (:valueset/version row)))))
-            (jdbc/execute! ds (into [sql] params)))))
+            (jdbc/execute! ds (into [sql] (mapcat rest) clauses)))))
 
   (vs-resource [_ params]
     (when-let [{:keys [version]} (resolve-vs ds (:url params)
@@ -1010,6 +1043,11 @@
     (let [entry (lookup-entry cache (:url params) (params-version params))]
       (cond-> {:url (:url entry)}
         (:version entry)    (assoc :version    (:version entry))
+        (:name entry)       (assoc :name       (:name entry))
+        (:title entry)      (assoc :title      (:title entry))
+        (:status entry)     (assoc :status     (:status entry))
+        (get-in entry [:metadata "description"])
+        (assoc :description (get-in entry [:metadata "description"]))
         (:source-uri entry) (assoc :source-uri (:source-uri entry))
         (:target-uri entry) (assoc :target-uri (:target-uri entry)))))
 

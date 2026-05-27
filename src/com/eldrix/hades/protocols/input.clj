@@ -75,13 +75,14 @@
                    ::filters ::text ::max-hits ::active-only]))
 
 ;; ---------------------------------------------------------------------------
-;; Search params — flat map of FHIR search filter values + parsed
-;; string modifiers + result-control fields. Consumed by composite
-;; `search-code-systems` / `search-value-sets`.
+;; Search params — flat map of FHIR search filter values + result-control
+;; fields. Consumed by composite `search-code-systems` /
+;; `search-value-sets`.
 ;;
 ;; Token fields (`:url`, `:version`, `:status`) match exactly. String
-;; fields (`:name`, `:title`, `:description`) match according to their
-;; companion `*-mode` key (`:starts-with`, `:exact`, `:contains`).
+;; fields (`:name`, `:title`, `:description`) are `::string-filter` maps
+;; — a `:value` with an optional `:modifier` (`:starts-with` (default),
+;; `:exact`, `:contains`).
 ;;
 ;; `_count` / `_offset` paginate the merged result. Justification: an
 ;; unfiltered `GET /ValueSet` against the smoke catalogues (1,962 CSs +
@@ -91,14 +92,20 @@
 ;; modest RPS. Defaults are applied at the HTTP layer, not here.
 ;; ---------------------------------------------------------------------------
 
-(s/def ::title (s/nilable string?))
+;; String-typed search fields (`:name :title :description`) are FHIR
+;; `string` parameters: a `:value` plus an optional `:modifier`. Per the
+;; FHIR spec the modifier rides on the parameter name (`title:contains`),
+;; defaults to starts-with when omitted, and is drawn from a closed
+;; vocabulary. `:status` is a FHIR `token` — exact match, no modifier.
+(s/def ::modifier #{:starts-with :exact :contains})
+(s/def ::value string?)
+(s/def ::string-filter
+  (s/keys :req-un [::value] :opt-un [::modifier]))
+
 (s/def ::status string?)
-(s/def ::name (s/nilable string?))
-(s/def ::description (s/nilable string?))
-(s/def ::string-mode #{:starts-with :exact :contains})
-(s/def ::name-mode ::string-mode)
-(s/def ::title-mode ::string-mode)
-(s/def ::description-mode ::string-mode)
+(s/def ::name ::string-filter)
+(s/def ::title ::string-filter)
+(s/def ::description ::string-filter)
 (s/def ::_count nat-int?)
 (s/def ::_offset nat-int?)
 (s/def ::_summary string?)
@@ -106,14 +113,13 @@
 (s/def ::search-params
   (s/keys :opt-un [::url ::version ::status
                    ::name ::title ::description
-                   ::name-mode ::title-mode ::description-mode
                    ::_count ::_offset ::_summary]))
 
 ;; ---------------------------------------------------------------------------
 ;; Metadata-opts — small DSL passed to `cs-metadata` / `vs-metadata` /
-;; `cm-metadata`. Lets callers push token filters down to providers so
-;; non-survivors are never realised (e.g. SQLite catalogue with 2.5k
-;; ValueSets returns 1 tuple under `?url=…`, not 2.5k).
+;; `cm-metadata`. Carries the search filters down to providers, which
+;; apply them (in SQL, or an in-memory predicate) and emit only the
+;; matching registration tuples.
 ;;
 ;; Providers MUST honour every opt they receive — callers trust the
 ;; result and don't re-filter. `{}` (or no keys) means "everything".
@@ -122,9 +128,13 @@
 ;;   :version            — exact-match version (alongside or without :url)
 ;;   :include-implicit?  — when false, drop entries flagged `:implicit?`;
 ;;                          default true so boot/status/cmd see them
+;;   :status             — exact-match status token
+;;   :name :title        — `::string-filter` (match per `:modifier`),
+;;   :description          same semantics as `::search-params`
 ;; ---------------------------------------------------------------------------
 
 (s/def ::include-implicit? boolean?)
 
 (s/def ::metadata-opts
-  (s/keys :opt-un [::url ::version ::include-implicit?]))
+  (s/keys :opt-un [::url ::version ::include-implicit?
+                   ::status ::name ::title ::description]))

@@ -323,24 +323,12 @@
       (is (nil? (composite/find-valueset svc "http://example.com/cs-only"))))))
 
 (deftest naming-system-resolves-alias-to-canonical
-  (let [base (svc-of [cs-v1])
-        resolver (fn [id]
+  (let [resolver (fn [id]
                    (case id
                      "urn:oid:1.2.3" "http://example.com/r/cs"
                      nil))
-        ;; Reconstruct with naming-systems while preserving the base catalogues.
-        svc (composite/->TerminologyService
-              (:codesystems base)
-              (:valuesets base)
-              (:conceptmaps base)
-              [resolver]
-              (:cs-meta-by-key base)
-              (:vs-meta-by-key base)
-              (:cs-providers base)
-              (:vs-providers base)
-              (:cs-search-resources base)
-              (:vs-search-resources base)
-              {} [])]
+        {:keys [providers]} (load-fhir/build-from-fhir-data (fhir-data [cs-v1]))
+        svc (composite/from-providers providers {:naming-systems [resolver]})]
     (testing "alias resolves to canonical when no direct match exists"
       (is (some? (composite/find-codesystem svc "urn:oid:1.2.3"))))
     (testing "direct canonical lookup is unaffected"

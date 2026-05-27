@@ -250,11 +250,13 @@
       :else (recur (.getCause t)))))
 
 (defn- saturation-response []
-  ;; 503 + Retry-After: 1 + throttled OperationOutcome — the load-shedding
+  ;; 503 + Retry-After + throttled OperationOutcome — the load-shedding
   ;; signal a client can back off on. Body shape matches every other error
-  ;; path, so clients parse it the same way.
+  ;; path, so clients parse it the same way. Retry-After is jittered over
+  ;; 1-3s rather than fixed so a batch of shed clients don't all retry on
+  ;; the same tick and re-saturate the pool.
   {:status  503
-   :headers {"Retry-After" "1"}
+   :headers {"Retry-After" (str (inc (rand-int 3)))}
    :body    (wire/operation-outcome
              [{:severity "error"
                :type     "throttled"
@@ -263,7 +265,7 @@
 (def catch-all-error
   "Map any thrown exception to a FHIR OperationOutcome response: typed
   ex-info `:type` keys steer the HTTP status, HikariCP saturation maps
-  to 503 + `Retry-After: 1`, and unknown exceptions log + 500."
+  to 503 + jittered `Retry-After`, and unknown exceptions log + 500."
   {:name  ::catch-all-error
    :error (fn [context ex]
             (if-let [cause (saturation-cause ex)]
@@ -705,7 +707,9 @@
 
 (def ^:private search-string-fields #{"name" "title" "description"})
 (def ^:private search-token-fields  #{"url" "version" "status"})
-(def ^:private string-modes         {""         :starts-with
+;; FHIR string modifiers, keyed by the URL suffix. "" (no suffix) is the
+;; default and emits a `::input/string-filter` with no `:modifier`.
+(def ^:private string-modifiers     {""         nil
                                      "exact"    :exact
                                      "contains" :contains})
 
@@ -733,10 +737,10 @@
   (let [[field mod] (split-modifier k)]
     (cond
       (search-string-fields field)
-      (if-let [parsed-mode (string-modes mod)]
-        (-> acc
-            (assoc-in [:params (keyword field)] v)
-            (assoc-in [:params (keyword (str field "-mode"))] parsed-mode))
+      (if (contains? string-modifiers mod)
+        (assoc-in acc [:params (keyword field)]
+                  (cond-> {:value v}
+                    (seq mod) (assoc :modifier (string-modifiers mod))))
         (update acc :errors conj (modifier-error field mod)))
 
       (search-token-fields field)
@@ -842,6 +846,11 @@
                    hades/search-value-sets
                    wire/vs-resource->map))
 
+(defn- cm-search [request]
+  (search-response request "ConceptMap"
+                   hades/search-concept-maps
+                   wire/cm-resource->map))
+
 ;; ---------------------------------------------------------------------------
 ;; Metadata endpoints
 ;; ---------------------------------------------------------------------------
@@ -892,6 +901,7 @@
         op-base     [parse-params parse-fhir-params tx-overlay request-flags]
         cs-search-i [parse-params (parse-search-params "CodeSystem")]
         vs-search-i [parse-params (parse-search-params "ValueSet")]
+        cm-search-i [parse-params (parse-search-params "ConceptMap")]
         max-expand  (max-expansion max-expansion-size)]
     #{["/fhir/metadata"                   :get  [parse-params metadata]                              :route-name ::metadata]
 
@@ -916,7 +926,9 @@
       ["/fhir/CodeSystem"                 :get  (conj cs-search-i cs-search)                        :route-name ::cs-search-get]
       ["/fhir/CodeSystem/_search"         :post (conj cs-search-i cs-search)                        :route-name ::cs-search-post]
       ["/fhir/ValueSet"                   :get  (conj vs-search-i vs-search)                        :route-name ::vs-search-get]
-      ["/fhir/ValueSet/_search"           :post (conj vs-search-i vs-search)                        :route-name ::vs-search-post]}))
+      ["/fhir/ValueSet/_search"           :post (conj vs-search-i vs-search)                        :route-name ::vs-search-post]
+      ["/fhir/ConceptMap"                 :get  (conj cm-search-i cm-search)                        :route-name ::cm-search-get]
+      ["/fhir/ConceptMap/_search"         :post (conj cm-search-i cm-search)                        :route-name ::cm-search-post]}))
 
 (defn- fhir-error-response
   [status issues]

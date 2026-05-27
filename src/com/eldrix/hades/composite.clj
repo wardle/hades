@@ -9,11 +9,7 @@
     :valuesets      {url|version → provider}
     :conceptmaps    [{:impl :description}]   ; multi-axis lookup
     :naming-systems [resolver-fn ...]        ; OID/URN → canonical
-    :cs-meta-by-key / :vs-meta-by-key        ; precomputed resource maps
     :cs-providers / :vs-providers            ; unique provider vectors
-    :cs-search-resources / :vs-search-resources
-                                             ; sorted unfiltered browse pages
-                                             ; or delayed overlay merge
     :metadata       {…}                      ; load report
 
   The record satisfies `protos/CodeSystem`, `protos/ValueSet`,
@@ -31,6 +27,7 @@
             [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.providers.common.canonical :as canonical]
             [com.eldrix.hades.providers.common.issues :as issues]
+            [com.eldrix.hades.providers.common.search-filter :as search-filter]
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.protocols.result :as result]
             [com.eldrix.hades.providers.common.supplement :as supplement]))
@@ -196,35 +193,25 @@
 ;; `vs-validate/validate-code` (ValueSet $validate-code).
 
 (defn cs-meta
-  "Return the cached `cs-resource` map for `system` (a URL, optionally
-  with `|version`). Constant time. Returns nil if no provider serves
-  this key. Use this in cross-cutting helpers instead of calling
-  `find-codesystem` + `protos/cs-resource` separately."
-  [{:keys [cs-meta-by-key naming-systems] :as svc} system]
-  (or (get cs-meta-by-key system)
-      (let [resolved (resolve-canonical naming-systems system)]
-        (when (and resolved (not= resolved system))
-          (get cs-meta-by-key resolved)))
-      ;; Fall back to a live call when the impl was found via
-      ;; canonical/version stripping that bypasses the precomputed
-      ;; map (rare: bare-URL request with only a versioned binding
-      ;; precomputed). Pass `:url`/`:system` so multi-resource impls
-      ;; can dispatch.
-      (when-let [cs (find-codesystem svc system)]
-        (let [[url version] (canonical/parse-versioned-uri system)]
-          (protos/cs-resource cs (cond-> {:url url :system url}
-                                   version (assoc :version version)))))))
+  "Return the `cs-resource` map for `system` (a URL, optionally with
+  `|version`), or nil if no provider serves this key. Resolves the
+  serving provider and asks it directly. Use this in cross-cutting
+  helpers instead of calling `find-codesystem` + `protos/cs-resource`
+  separately."
+  [{:keys [naming-systems] :as svc} system]
+  (when-let [cs (find-codesystem svc system)]
+    (let [[url version] (canonical/parse-versioned-uri (or (resolve-canonical naming-systems system) system))]
+      (protos/cs-resource cs (cond-> {:url url :system url}
+                               version (assoc :version version))))))
 
 (defn vs-meta
-  [{:keys [vs-meta-by-key naming-systems] :as svc} url]
-  (or (get vs-meta-by-key url)
-      (let [resolved (resolve-canonical naming-systems url)]
-        (when (and resolved (not= resolved url))
-          (get vs-meta-by-key resolved)))
-      (when-let [vs (find-valueset svc url)]
-        (let [[u version] (canonical/parse-versioned-uri url)]
-          (protos/vs-resource vs (cond-> {:url u}
-                                   version (assoc :version version)))))))
+  "Return the `vs-resource` map for `url` (optionally with `|version`),
+  or nil if no provider serves it. Asks the serving provider directly."
+  [{:keys [naming-systems] :as svc} url]
+  (when-let [vs (find-valueset svc url)]
+    (let [[u version] (canonical/parse-versioned-uri (or (resolve-canonical naming-systems url) url))]
+      (protos/vs-resource vs (cond-> {:url u}
+                               version (assoc :version version))))))
 
 (defn add-cs-status-warnings
   "Add informational issues for CodeSystem publication status (draft/retired/experimental)."
@@ -354,9 +341,7 @@
 
 (defrecord TerminologyService
   [codesystems valuesets conceptmaps naming-systems
-   cs-meta-by-key vs-meta-by-key
    cs-providers vs-providers
-   cs-search-resources vs-search-resources
    metadata closers]
 
   java.io.Closeable
@@ -490,29 +475,6 @@
 ;; produce a published resource.
 ;; ---------------------------------------------------------------------------
 
-(defn- string-match
-  "FHIR string search semantics. `mode` is `:starts-with`,
-  `:exact`, or `:contains`. nil candidate never matches."
-  [candidate query mode]
-  (when candidate
-    (case mode
-      :exact       (= candidate query)
-      :starts-with (str/starts-with? (str/lower-case candidate) (str/lower-case query))
-      :contains    (str/includes? (str/lower-case candidate) (str/lower-case query)))))
-
-(defn- matches-resource-filters?
-  "Apply the materialised-resource filter set. Tokens (`:status`) must
-  match exactly; strings (`:name :title :description`) honour their
-  companion `*-mode`. URL/version are not checked here — the metadata
-  DSL already pushed them down to the provider."
-  [m {:keys [status name title description
-             name-mode title-mode description-mode]}]
-  (and (or (nil? status)      (= status (:status m)))
-       (or (nil? name)        (string-match (:name m) name (or name-mode :starts-with)))
-       (or (nil? title)       (string-match (:title m) title (or title-mode :starts-with)))
-       (or (nil? description) (string-match (:description m) description
-                                            (or description-mode :starts-with)))))
-
 (defn- key->params
   "Map a metadata tuple to the `*-resource` params map. Multi-resource
   providers dispatch on `:url`/`:system`; single-resource impls ignore
@@ -543,61 +505,15 @@
     (dissoc m :compose)
     m))
 
-(def ^:private resource-meta-filter-keys [:status :name :title :description])
-
-(defn- needs-materialisation?
-  "Whether the supplied filters reference fields only available on the
-  materialised resource map (not on the cheap metadata tuple)."
-  [filters]
-  (boolean (some #(contains? filters %) resource-meta-filter-keys)))
-
-(defn- unfiltered-search?
-  [filters]
-  (empty? filters))
-
 (defn- pair-seq
-  "Lazy seq of `[provider tuple]` pairs. Token filters (`:url :version`)
-  and implicit-suppression have already been pushed into `metadata-fn`
-  via the metadata-opts DSL — providers honour them, so this layer
-  trusts every emitted tuple."
+  "Lazy seq of `[provider tuple]` pairs. Filters (`:url :version :status
+  :name :title :description`) and implicit-suppression are pushed into
+  `metadata-fn` via the metadata-opts DSL; providers honour them, so each
+  emitted tuple is a match."
   [providers metadata-fn opts]
   (eduction
    (mapcat (fn [p] (eduction (map #(vector p %)) (metadata-fn p opts))))
    (distinct providers)))
-
-(defn- provider-search-resources
-  "Build the sorted browse/search resource vector by asking each unique
-  provider for its searchable metadata. ValueSet browse suppresses
-  implicit routing-only entries at the same layer as request-time
-  search, so totals match FHIR search semantics."
-  [providers metadata-fn resource-fn]
-  (->> (pair-seq providers metadata-fn {:include-implicit? false})
-       (keep (fn [[p t]] (resource-fn p (key->params t))))
-       (reduce (fn [m {:keys [url version] :as r}]
-                 (assoc m [url version] r))
-               {})
-       vals
-       (sort compare-by-url-version)
-       vec))
-
-(defn- realize-search-resources
-  [resources]
-  (if (instance? clojure.lang.IDeref resources) @resources resources))
-
-(defn- merge-search-resources
-  "Overlay-first merge for precomputed browse vectors. Used by
-  request-scoped overlays without re-enumerating the base catalogues."
-  [overlay-resources base-resources]
-  (->> (concat (realize-search-resources overlay-resources)
-               (realize-search-resources base-resources))
-       (reduce (fn [m {:keys [url version] :as r}]
-                 (if (contains? m [url version])
-                   m
-                   (assoc m [url version] r)))
-               {})
-       vals
-       (sort compare-by-url-version)
-       vec))
 
 (defn- page-of
   "Lazy page slice: drop `offset`, then take `_count` if specified."
@@ -605,77 +521,43 @@
   (cond->> (drop offset xs)
     _count (take _count)))
 
-(defn- search-resources*
-  "Search over precomputed, sorted resource maps for unfiltered browse.
-  Exact URL and materialised filters still go through provider metadata
-  so providers own their own matching semantics."
-  [resources {:keys [_count _offset _summary] :as params}]
-  (let [resources (realize-search-resources resources)
-        page (if (= "count" _summary)
-               []
-               (into [] (map #(summarise-resource params %))
-                     (page-of _count (or _offset 0) resources)))]
-    (s/assert ::result/search-result {:total (count resources) :resources page})))
-
 (defn- search*
-  "Two paths, picked from `filters`:
+  "Search `providers` for the resources matching `params`. The full
+  filter set (`:url :version :status :name :title :description`) is
+  pushed to each provider via the metadata-opts DSL, and implicit
+  routing-only entries are suppressed (`:include-implicit? false`), so
+  each emitted tuple is a real, listable match. Tuples are deduplicated
+  by `[url version]` (a resource served by two providers counts once,
+  first registration wins), sorted, and only the requested page is
+  materialised via `resource-fn` — the total is counted from the cheap
+  metadata tuples, never by materialising the whole catalogue.
 
-    * Cheap path — only `:url`/`:version` filters or none. The
-      provider applies them via the metadata-opts DSL, so we sort the
-      surviving tuples (no `*-resource` calls), page, and materialise
-      ONLY the page. For a 10k-VS browse with `_count=10` this is ~10
-      `*-resource` calls instead of 10k; for a URL-by-url request
-      against a 2.5k-VS catalogue, the SQLite catalogue's key filter
-      avoids 2,499 tuple allocations.
-
-    * Filtered path — at least one of `:status :name :title
-      :description` is supplied. We can't filter without the
-      materialised resource map; realise everything that survived the
-      tuple stage, then sort/page over the result.
-
-  `:_summary=count` short-circuits the page projection in both paths
-  (return `total` only).
-
-  Defaults and caps for `:_count` belong at the HTTP boundary; this
-  fn takes whatever is supplied."
+  `:_summary=count` returns `total` only; `:_count`/`:_offset`
+  paginate. Defaults and caps for `:_count` are applied at the HTTP
+  boundary."
   [providers metadata-fn resource-fn {:keys [_count _offset _summary] :as params}]
   (let [filters (dissoc params :_count :_offset :_summary)
-        opts    (cond-> {:include-implicit? false}
-                  (:url filters)     (assoc :url (:url filters))
-                  (:version filters) (assoc :version (:version filters)))
-        offset  (or _offset 0)
-        count?  (= "count" _summary)
-        pairs   (pair-seq providers metadata-fn opts)]
-    (if (needs-materialisation? filters)
-      (let [matched   (into []
-                            (keep (fn [[p t]]
-                                    (let [m (resource-fn p (key->params t))]
-                                      (when (and m (matches-resource-filters? m filters))
-                                        m))))
-                            pairs)
-            sorted    (sort compare-by-url-version matched)
-            resources (if count?
-                        []
-                        (into [] (map #(summarise-resource params %))
-                              (page-of _count offset sorted)))]
-        (s/assert ::result/search-result {:total (count matched) :resources resources}))
-      (let [sorted-pairs (sort compare-pair-by-url-version pairs)
-            resources    (if count?
-                           []
-                           (into [] (comp (keep (fn [[p t]] (resource-fn p (key->params t))))
-                                          (map #(summarise-resource params %)))
-                                 (page-of _count offset sorted-pairs)))]
-        (s/assert ::result/search-result
-                  {:total (count sorted-pairs) :resources resources})))))
+        opts    (into {:include-implicit? false} filters)
+        sorted  (->> (pair-seq providers metadata-fn opts)
+                     (reduce (fn [m [_ t :as pair]]
+                               (let [k [(:url t) (:version t)]]
+                                 (cond-> m (not (contains? m k)) (assoc k pair))))
+                             {})
+                     vals
+                     (sort compare-pair-by-url-version))
+        resources (if (= "count" _summary)
+                    []
+                    (into [] (comp (keep (fn [[p t]] (resource-fn p (key->params t))))
+                                   (map #(summarise-resource params %)))
+                          (page-of _count (or _offset 0) sorted)))]
+    (s/assert ::result/search-result
+              {:total (count sorted) :resources resources})))
 
 (defn search-code-systems
   "Search registered CodeSystem resources. `params` is a
   `::input/search-params`; returns a `::result/search-result`."
-  [{:keys [cs-providers cs-search-resources]} params]
-  (let [filters (dissoc params :_count :_offset :_summary)]
-    (if (unfiltered-search? filters)
-      (search-resources* cs-search-resources params)
-      (search* cs-providers protos/cs-metadata protos/cs-resource params))))
+  [{:keys [cs-providers]} params]
+  (search* cs-providers protos/cs-metadata protos/cs-resource params))
 
 (defn search-value-sets
   "Search registered ValueSet resources. `params` is a
@@ -684,11 +566,28 @@
   Implicit ValueSets — those advertised in `vs-metadata` for routing
   only — are dropped at the provider via `:include-implicit? false` in
   the metadata-opts the composite hands down."
-  [{:keys [vs-providers vs-search-resources]} params]
-  (let [filters (dissoc params :_count :_offset :_summary)]
-    (if (unfiltered-search? filters)
-      (search-resources* vs-search-resources params)
-      (search* vs-providers protos/vs-metadata protos/vs-resource params))))
+  [{:keys [vs-providers]} params]
+  (search* vs-providers protos/vs-metadata protos/vs-resource params))
+
+(defn search-concept-maps
+  "Search registered ConceptMap resources. `params` is a
+  `::input/search-params`; returns a `::result/search-result`."
+  [svc {:keys [_count _offset _summary] :as params}]
+  (let [{url-q :url ver-q :version :as filters} (dissoc params :_count :_offset :_summary)
+        matched (->> (protos/cm-metadata svc {})
+                     (keep (fn [d]
+                             (when (and (or (nil? url-q) (= url-q (:url d)))
+                                        (or (nil? ver-q) (= ver-q (:version d))))
+                               (protos/cm-resource svc (key->params d)))))
+                     (filter #(search-filter/matches-resource-filters? % filters))
+                     (reduce (fn [m {:keys [url version] :as r}] (assoc m [url version] r)) {})
+                     vals
+                     (sort compare-by-url-version))
+        page (if (= "count" _summary)
+               []
+               (into [] (map #(summarise-resource params %))
+                     (page-of _count (or _offset 0) matched)))]
+    (s/assert ::result/search-result {:total (count matched) :resources page})))
 
 ;; ---------------------------------------------------------------------------
 ;; CodeableConcept aggregation — uses vs-validate-code per coding then
@@ -1020,38 +919,15 @@
                                 (map (fn [p] #(.close ^java.io.Closeable p))))
                           (reverse providers))
            all-closers (concat auto-closers closers)
-           ;; Precompute resource metadata once. Every cross-cutting
-           ;; helper consults these maps with O(1) lookup; no per-request
-           ;; DB hit. Recompute on `with-overlays` so layered services
-           ;; get matching meta for their layered impls.
-           ;;
-           ;; Pass `:url`/`:system`/`:version` derived from each key so
-           ;; multi-resource impls (catalogues serving thousands of CSs
-           ;; or VSs through one provider, e.g. SQLite) can return the
-           ;; right entry. Single-resource impls ignore the params.
-           key->params (fn [k]
-                         (let [[url version] (canonical/parse-versioned-uri k)]
-                           (cond-> {:url url :system url}
-                             version (assoc :version version))))
-           cs-meta-by-key (reduce-kv (fn [m k cs] (assoc m k (protos/cs-resource cs (key->params k))))
-                                     {} (:codesystems with-supps))
-           vs-meta-by-key (reduce-kv (fn [m k vs] (assoc m k (protos/vs-resource vs (key->params k))))
-                                     {} (:valuesets with-supps))
-           cs-providers (vec (distinct (vals (:codesystems with-supps))))
-           vs-providers (vec (distinct (vals (:valuesets with-supps))))
-           cs-search-resources (provider-search-resources cs-providers protos/cs-metadata protos/cs-resource)
-           vs-search-resources (provider-search-resources vs-providers protos/vs-metadata protos/vs-resource)]
+           cs-providers (distinct (vals (:codesystems with-supps)))
+           vs-providers (distinct (vals (:valuesets with-supps)))]
        (->TerminologyService
          (:codesystems with-supps)
          (:valuesets with-supps)
          (:conceptmaps with-supps)
          (:naming-systems with-supps)
-         cs-meta-by-key
-         vs-meta-by-key
          cs-providers
          vs-providers
-         cs-search-resources
-         vs-search-resources
          (or metadata {})
          all-closers)))))
 
@@ -1066,9 +942,7 @@
                                     (seq supplements) (assoc :supplements supplements)
                                     (seq naming-systems) (assoc :naming-systems naming-systems)))
          codesystems (merge (:codesystems base) (:codesystems overlay))
-         valuesets (merge (:valuesets base) (:valuesets overlay))
-         cs-meta-by-key (merge (:cs-meta-by-key base) (:cs-meta-by-key overlay))
-         vs-meta-by-key (merge (:vs-meta-by-key base) (:vs-meta-by-key overlay))]
+         valuesets (merge (:valuesets base) (:valuesets overlay))]
      ;; Overlay-first ordering for `:conceptmaps` and `:naming-systems`:
      ;; `candidate-cm-impls` and `resolve-canonical` both walk in order
      ;; and pick the first match, so overlay entries shadow base entries.
@@ -1077,15 +951,7 @@
        valuesets
        (into (vec (:conceptmaps overlay))    (:conceptmaps base))
        (into (vec (:naming-systems overlay)) (:naming-systems base))
-       cs-meta-by-key
-       vs-meta-by-key
-       (vec (distinct (concat (:cs-providers overlay) (:cs-providers base))))
-       (vec (distinct (concat (:vs-providers overlay) (:vs-providers base))))
-       (delay
-         (merge-search-resources (:cs-search-resources overlay)
-                                 (:cs-search-resources base)))
-       (delay
-         (merge-search-resources (:vs-search-resources overlay)
-                                 (:vs-search-resources base)))
+       (distinct (concat (:cs-providers overlay) (:cs-providers base)))
+       (distinct (concat (:vs-providers overlay) (:vs-providers base)))
        (:metadata base)
        nil))))

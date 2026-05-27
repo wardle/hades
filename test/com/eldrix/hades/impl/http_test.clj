@@ -28,7 +28,7 @@
                     "fhir-tx-12345 - Connection is not available, request timed out after 2000ms")
           {:keys [status headers body]} (run-error (pedestal-wrapped ex))]
       (is (= 503 status))
-      (is (= "1" (get headers "Retry-After")))
+      (is (contains? #{"1" "2" "3"} (get headers "Retry-After")))
       (is (= "OperationOutcome" (get body "resourceType")))
       (is (= "error"     (get-in body ["issue" 0 "severity"])))
       (is (= "throttled" (get-in body ["issue" 0 "code"])))
