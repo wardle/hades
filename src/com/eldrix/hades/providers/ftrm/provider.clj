@@ -563,19 +563,21 @@
                        :expression   ["Coding.code"]}]}
       (not fragment?) (assoc :message msg))))
 
-(defn- cs-resource-from-meta [meta]
+(defn- cs-resource-from-meta
+  [{:keys [url version name title status experimental description content
+           case-sensitive hierarchy-meaning standards-status]}]
   (cond-> {}
-    (:url meta)              (assoc :url (:url meta))
-    (:version meta)          (assoc :version (:version meta))
-    (:name meta)             (assoc :name (:name meta))
-    (:title meta)            (assoc :title (:title meta))
-    (:status meta)           (assoc :status (:status meta))
-    (some? (:experimental meta)) (assoc :experimental (:experimental meta))
-    (:description meta)      (assoc :description (:description meta))
-    (:content meta)          (assoc :content (:content meta))
-    (some? (:case-sensitive meta)) (assoc :case-sensitive (:case-sensitive meta))
-    (:hierarchy-meaning meta) (assoc :hierarchy-meaning (:hierarchy-meaning meta))
-    (:standards-status meta) (assoc :standards-status (:standards-status meta))))
+    url                    (assoc :url url)
+    version                (assoc :version version)
+    name                   (assoc :name name)
+    title                  (assoc :title title)
+    status                 (assoc :status status)
+    (some? experimental)   (assoc :experimental experimental)
+    description            (assoc :description description)
+    content                (assoc :content content)
+    (some? case-sensitive) (assoc :case-sensitive case-sensitive)
+    hierarchy-meaning      (assoc :hierarchy-meaning hierarchy-meaning)
+    standards-status       (assoc :standards-status standards-status)))
 
 (deftype FtrmCodeSystemCatalogue [ds cache]
   protos/CodeSystem
@@ -821,14 +823,17 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- vs-resource-from-entry [{:keys [url version metadata compose]}]
-  (let [experimental (get metadata "experimental")]
+  (let [name         (get metadata "name")
+        title        (get metadata "title")
+        status       (get metadata "status")
+        experimental (get metadata "experimental")]
     (cond-> {:url url}
       version              (assoc :version version)
-      (get metadata "name")        (assoc :name (get metadata "name"))
-      (get metadata "title")       (assoc :title (get metadata "title"))
-      (get metadata "status")      (assoc :status (get metadata "status"))
-      (some? experimental)         (assoc :experimental (boolean experimental))
-      (map? compose)               (assoc :compose compose))))
+      name                 (assoc :name name)
+      title                (assoc :title title)
+      status               (assoc :status status)
+      (some? experimental) (assoc :experimental (boolean experimental))
+      (map? compose)       (assoc :compose compose))))
 
 (defn- resolve-vs-version
   "Choose the stored version to serve for a ValueSet `url`, given the
@@ -985,12 +990,14 @@
                      " JOIN valueset_resource r ON r.url = v.url AND r.version = v.version")
                    (when (seq clauses)
                      (str " WHERE " (str/join " AND " (map first clauses)))))]
+      ;; `plan` streams the result-set cursor straight into one vector via
+      ;; the xform — no second collection (unlike `execute!`, which builds
+      ;; its own vector first).
       (into []
-            (map (fn [row]
-                   (cond-> {:url (:valueset/url row)}
-                     (not (str/blank? (:valueset/version row)))
-                     (assoc :version (:valueset/version row)))))
-            (jdbc/execute! ds (into [sql] (mapcat rest) clauses)))))
+            (map (fn [{:valueset/keys [url version]}]
+                   (cond-> {:url url}
+                     (not (str/blank? version)) (assoc :version version))))
+            (jdbc/plan ds (into [sql] (mapcat rest) clauses)))))
 
   (vs-resource [_ params]
     (when-let [{:keys [version]} (resolve-vs ds (:url params)
@@ -1031,25 +1038,26 @@
      (filter (fn [[[k-url k-ver] _]]
                (and (or (nil? url)     (= url k-url))
                     (or (nil? version) (= version k-ver)))))
-     (map (fn [[[k-url k-ver] entry]]
+     (map (fn [[[k-url k-ver] {:keys [source-uri target-uri pairs]}]]
             (cond-> {:url    k-url
-                     :system (:source-uri entry)
-                     :target (:target-uri entry)}
+                     :system source-uri
+                     :target target-uri}
               (not (str/blank? k-ver)) (assoc :version k-ver)
-              (seq (:pairs entry))      (assoc :pairs (:pairs entry)))))
+              (seq pairs)              (assoc :pairs pairs))))
      cache))
 
   (cm-resource [_ params]
-    (let [entry (lookup-entry cache (:url params) (params-version params))]
-      (cond-> {:url (:url entry)}
-        (:version entry)    (assoc :version    (:version entry))
-        (:name entry)       (assoc :name       (:name entry))
-        (:title entry)      (assoc :title      (:title entry))
-        (:status entry)     (assoc :status     (:status entry))
-        (get-in entry [:metadata "description"])
-        (assoc :description (get-in entry [:metadata "description"]))
-        (:source-uri entry) (assoc :source-uri (:source-uri entry))
-        (:target-uri entry) (assoc :target-uri (:target-uri entry)))))
+    (let [{:keys [url version name title status source-uri target-uri metadata]}
+          (lookup-entry cache (:url params) (params-version params))
+          description (get metadata "description")]
+      (cond-> {:url url}
+        version     (assoc :version version)
+        name        (assoc :name name)
+        title       (assoc :title title)
+        status      (assoc :status status)
+        description (assoc :description description)
+        source-uri  (assoc :source-uri source-uri)
+        target-uri  (assoc :target-uri target-uri))))
 
   (cm-translate [_ {:keys [code system target] :as params}]
     (let [entry (lookup-entry cache (:url params) (params-version params))
