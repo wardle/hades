@@ -93,7 +93,8 @@
         (= fhir-vs "")
         {:query :all, :ecl "*"}
         (str/starts-with? fhir-vs "isa/")
-        {:query :isa, :ecl (str "<" (subs fhir-vs 4))}
+        ;; FHIR `isa/X` is reflexive: includes X and its descendants (`<<X`).
+        {:query :isa, :ecl (str "<<" (subs fhir-vs 4))}
         (= "refset" fhir-vs)
         {:query :refsets, :ecl (str "<" snomed/ReferenceSetConcept)}
         (str/starts-with? fhir-vs "refset/")
@@ -309,6 +310,37 @@
                                      (catch Exception _ nil))
                                 expr)}]
        :total 1})))
+
+(defn- implicit-root-id
+  "Extract the concept id from an implicit-VS ECL string (`<<X`, `<X`, `^X`).
+  Returns a long, or nil when no digits are present."
+  [ecl]
+  (some-> (re-find #"\d+" ecl) parse-long))
+
+(defn- implicit-expression-member?
+  "Membership of post-coordinated expression `expr` in an implicit SNOMED
+  ValueSet (`?fhir_vs=…`), decided by *structural expression subsumption*
+  (`hermes/subsumes`) — not the focus concept, which misses refinement-
+  introduced supertypes.
+
+  Returns true/false for the common implicit forms (`:all`, `:isa`,
+  reference-set), or `:unsupported` for arbitrary `:ecl` — Hermes' ECL
+  engine evaluates over indexed pre-coordinated concepts, and an
+  expression isn't indexed. Plain-concept membership in arbitrary ECL is
+  handled separately via `intersect-ecl` (expand the ECL, intersect with
+  the single concept). An invalid expression is never a member; reference
+  sets enumerate pre-coordinated concepts so an expression is never a
+  member."
+  [svc query ecl expr]
+  (if (seq (hermes/validate-expression svc expr {:mrcm false}))
+    false
+    (case query
+      :all                  true
+      :isa                  (contains? #{:subsumes :equivalent}
+                                       (hermes/subsumes svc (implicit-root-id ecl) expr))
+      (:in-refset :refsets) false
+      :ecl                  :unsupported
+      false)))
 
 ;; FHIR R4 ConceptMap equivalence codes for the SNOMED historical
 ;; association reference sets. See
@@ -857,11 +889,12 @@
                 (and (= query :isa) no-filter? cnt)
                 (expansion/expand-paginated-query
                   svc
-                  (hermes.search/q-descendantOf (parse-long (subs ecl 1)))
+                  ;; `isa` is reflexive — include the root concept itself.
+                  (hermes.search/q-descendantOrSelfOf (implicit-root-id ecl))
                   {:offset offset :limit cnt})
 
                 (and (= query :in-refset) no-filter? cnt)
-                (let [refset-id (parse-long (subs ecl 1))
+                (let [refset-id (implicit-root-id ecl)
                       result    (expansion/expand-paginated-query
                                   svc (hermes.search/q-memberOf refset-id)
                                   {:offset offset :limit cnt})
@@ -917,9 +950,9 @@
           ecl
           (let [;; Validate that the implicit VS root concept/refset exists
                 vs-valid? (case query
-                            :isa (let [root (parse-long (subs ecl 1))]
+                            :isa (let [root (implicit-root-id ecl)]
                                    (and root (hermes/concept svc root)))
-                            :in-refset (let [refset-id (parse-long (subs ecl 1))]
+                            :in-refset (let [refset-id (implicit-root-id ecl)]
                                          (and refset-id
                                               (hermes/concept svc refset-id)
                                               (hermes/subsumed-by? svc refset-id snomed/ReferenceSetConcept)))
@@ -946,8 +979,29 @@
                                                                     :language-refset-ids lang-refset-ids})
                                         (catch Exception _ nil)))
                     display-val (or expr-display preferred)
-                    member? (when focus-id (seq (hermes/intersect-ecl svc [focus-id] ecl)))]
-                  (if member?
+                    ;; Plain concepts test membership against the ECL directly;
+                    ;; post-coordinated expressions (no `code'`) can't be
+                    ;; enumerated, so membership is structural subsumption.
+                    member (if code'
+                             (boolean (seq (hermes/intersect-ecl svc [code'] ecl)))
+                             (implicit-expression-member? svc query ecl code))]
+                  (cond
+                    (= :unsupported member)
+                    (let [msg (str "Validation of post-coordinated expressions against the "
+                                   "arbitrary ECL value set '" url "' is not supported")]
+                      {:result  false
+                       :code    (keyword code)
+                       :system  system
+                       :version ver
+                       :display display-val
+                       :message msg
+                       :issues  [{:severity     "error"
+                                  :type         "not-supported"
+                                  :details-code "not-implemented"
+                                  :text         msg
+                                  :expression   ["code"]}]})
+
+                    member
                     (let [result {:result true :display display-val :code (keyword code)
                                   :system system :version ver}]
                       (if (and display (not= display display-val))
@@ -962,6 +1016,8 @@
                                            :text         msg
                                            :expression   ["display"]}]))
                         result))
+
+                    :else
                     (let [code-ref (cond-> (str system "#" code)
                                      display (str " ('" display "')"))
                           msg (str "The provided code '" code-ref "' was not found in the value set '" url "'")]

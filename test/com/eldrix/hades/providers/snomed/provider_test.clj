@@ -24,7 +24,7 @@
     {:query :all, :ecl "*"}]
    ["http://snomed.info/sct?fhir_vs=isa/[sctid]"
     {:host "snomed.info", :edition nil, :version nil, :path "/sct" :query {:fhir_vs "isa/[sctid]"}}
-    {:query :isa :ecl "<[sctid]"}]
+    {:query :isa :ecl "<<[sctid]"}]
    ["http://snomed.info/sct?fhir_vs=refset"
     {:host "snomed.info", :edition nil, :version nil, :path "/sct" :query {:fhir_vs "refset"}}
     {:query :refsets :ecl "<900000000000455006"}]
@@ -255,6 +255,74 @@
             [{:property "constraint" :op "regex" :value ".*"}])]
       (is (= 1 (count issues)))
       (is (str/includes? (:text (first issues)) "property=constraint")))))
+
+;; Post-coordinated expression validation. Both paths decide membership by
+;; structural subsumption of the whole expression, not the focus concept:
+;; the focus alone misses refinement-introduced supertypes and excludes a
+;; refined expression from a strict `descendant-of` constraint.
+(def ^:private repair-tendon-right
+  "Repair of tendon of hand (367430006) refined with laterality = right."
+  "367430006:{272741003=24028007}")
+
+(deftest ^:live expression-membership-in-filter-include
+  ;; Explicit ValueSet filter include: validation narrows it with a synthetic
+  ;; `code=<expression>` filter, and `cs-expand*` resolves membership directly.
+  (let [provider (snomed/->HermesService *svc*)
+        codes (fn [filters]
+                (mapv :code (:concepts (protos/cs-expand* provider
+                                         {:system "http://snomed.info/sct"
+                                          :filters filters}))))]
+    (testing "expressions=true + is-a ancestor → member"
+      (is (= [repair-tendon-right]
+             (codes [{:property "concept" :op "is-a" :value "71388002"}   ; Procedure
+                     {:property "expressions" :op "=" :value "true"}
+                     {:property "code" :op "=" :value repair-tendon-right}]))))
+    (testing "expressions=false → expressions are never members"
+      (is (empty? (codes [{:property "concept" :op "is-a" :value "71388002"}
+                          {:property "expressions" :op "=" :value "false"}
+                          {:property "code" :op "=" :value repair-tendon-right}]))))
+    (testing "is-a an unrelated concept → not a member"
+      (is (empty? (codes [{:property "concept" :op "is-a" :value "73211009"} ; Diabetes
+                          {:property "expressions" :op "=" :value "true"}
+                          {:property "code" :op "=" :value repair-tendon-right}]))))))
+
+(deftest ^:live implicit-isa-is-reflexive
+  ;; FHIR `?fhir_vs=isa/X` is reflexive: includes X itself, not just strict
+  ;; descendants. Affects both plain-concept validation and expansion.
+  (let [provider (snomed/->HermesService *svc*)
+        url      "http://snomed.info/sct?fhir_vs=isa/73211009"     ; Diabetes mellitus
+        validate (fn [c] (:result (protos/vs-validate-code provider *svc*
+                                    {:url url :system "http://snomed.info/sct" :code c})))]
+    (testing "the root concept itself is a member of its own isa value set"
+      (is (true? (validate "73211009"))))
+    (testing "a descendant remains a member"
+      (let [a-descendant (first (filter #(not= 73211009 %)
+                                        (com.eldrix.hermes.core/intersect-ecl
+                                          *svc*
+                                          (mapv :conceptId
+                                                (take 50 (com.eldrix.hermes.core/expand-ecl *svc* "<73211009")))
+                                          "<73211009")))]
+        (is (true? (validate (str a-descendant))))))))
+
+(deftest ^:live implicit-valueset-expression-validation
+  (let [provider (snomed/->HermesService *svc*)
+        result   (fn [vs]
+                   (protos/vs-validate-code provider *svc*
+                     {:url (str "http://snomed.info/sct?fhir_vs" vs)
+                      :system "http://snomed.info/sct"
+                      :code repair-tendon-right}))]
+    (testing "member of isa/<focus> — subsumption is reflexive"
+      (is (true? (:result (result "=isa/367430006")))))
+    (testing "member of isa/<ancestor>"
+      (is (true? (:result (result "=isa/71388002")))))
+    (testing "not a member of isa/<unrelated>"
+      (is (false? (:result (result "=isa/73211009")))))
+    (testing "member of ?fhir_vs (all)"
+      (is (true? (:result (result "")))))
+    (testing "arbitrary ECL value set is declined as not-supported"
+      (let [r (result "=ecl/<<71388002")]
+        (is (false? (:result r)))
+        (is (= "not-supported" (:type (first (:issues r)))))))))
 
 (comment
   (#'snomed/parse-snomed-uri "http://snomed.info/sct"))
