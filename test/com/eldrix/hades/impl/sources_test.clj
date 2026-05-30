@@ -88,8 +88,7 @@
   (let [^File f (File/createTempFile "fhir-tx-detect" ".db")]
     (.delete f)
     (try
-      (let [ds (db/create! (.getPath f))]
-        (db/close! ds))
+      (with-open [_ds (db/create! (.getPath f))])
       (let [files (sources/tx-file-seq (.getPath f))
             e     (first files)]
         (is (= 1 (count files)))

@@ -82,9 +82,8 @@
   (mapcat #(loaders/resource->fhir-data % "<test>") resource-maps))
 
 (defn- svc-of [resource-maps]
-  (let [{:keys [providers supplements]} (load-fhir/build-from-fhir-data
-                                          (fhir-data resource-maps))]
-    (composite/from-providers providers {:supplements supplements})))
+  (composite/from-providers
+    (:providers (load-fhir/build-from-fhir-data (fhir-data resource-maps)))))
 
 (def ^:private all-resources
   [cs-alpha-v1 cs-alpha-v2 cs-beta vs-alpha vs-beta cm-alpha-to-beta])

@@ -35,9 +35,8 @@
 (def ^:dynamic *server* nil)
 
 (defn- in-memory-svc [resource-maps]
-  (let [data (mapcat #(loaders/resource->fhir-data % "<test>") resource-maps)
-        {:keys [providers supplements]} (load-fhir/build-from-fhir-data data)]
-    (composite/from-providers providers {:supplements supplements})))
+  (let [data (mapcat #(loaders/resource->fhir-data % "<test>") resource-maps)]
+    (composite/from-providers (:providers (load-fhir/build-from-fhir-data data)))))
 
 (defn server-fixture [f]
   (let [svc (in-memory-svc [base-cs])

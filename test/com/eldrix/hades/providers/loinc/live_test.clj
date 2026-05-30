@@ -51,7 +51,7 @@
       :expand            (hades/expand *svc* input)
       :translate         (hades/translate *svc* input)
       :metadata          (hades/metadata *svc*)
-      :resolve-canonical (composite/resolve-canonical (:naming-systems *svc*) (:id input)))))
+      :find-codesystem   (composite/find-codesystem *svc* (:id input)))))
 
 (defn- check [{:keys [name op input expect]}]
   (testing name
@@ -134,7 +134,7 @@
              ["maps to 1007-4" (match-code? "1007-4")]]}
 
    ;; -------------------------------------------------------------------------
-   ;; LoincValueSet — desired behaviour from the LOINC FHIR IG. The IG
+   ;; LoincProvider ValueSet surface — desired behaviour from the LOINC FHIR IG. The IG
    ;; defines four URL patterns under `http://loinc.org/vs[/...]`:
    ;;   • bare /vs           -> all of LOINC
    ;;   • /vs/{LL-id}        -> answer-list members
@@ -223,29 +223,27 @@
              ["invalid-display" (issue-details? "invalid-display")]]}
 
    ;; -------------------------------------------------------------------------
-   ;; NamingSystem — the LOINC OID resolves via both `urn:oid:` and bare
-   ;; forms; unknown OIDs must NOT resolve to LOINC.
+   ;; OID/URN aliases — the LOINC OID routes to LoincProvider via both
+   ;; `urn:oid:` and bare forms; unknown OIDs do not route.
    ;; -------------------------------------------------------------------------
 
-   {:name "naming-system: urn:oid: prefix resolves to LOINC"
-    :op :resolve-canonical :input {:id "urn:oid:2.16.840.1.113883.6.1"}
-    :expect [["= loinc-url" (equals? loinc-url)]]}
+   {:name "alias: urn:oid: prefix routes to LOINC"
+    :op :find-codesystem :input {:id "urn:oid:2.16.840.1.113883.6.1"}
+    :expect [["provider found" some?]]}
 
-   {:name "naming-system: bare OID resolves to LOINC"
-    :op :resolve-canonical :input {:id "2.16.840.1.113883.6.1"}
-    :expect [["= loinc-url" (equals? loinc-url)]]}
+   {:name "alias: bare OID routes to LOINC"
+    :op :find-codesystem :input {:id "2.16.840.1.113883.6.1"}
+    :expect [["provider found" some?]]}
 
-   {:name "naming-system: unknown OID is not claimed as LOINC"
-    :op :resolve-canonical :input {:id "1.2.3.4.5.6.7.8.9"}
-    :expect [["not loinc-url" #(not= loinc-url %)]]}])
+   {:name "alias: unknown OID does not route"
+    :op :find-codesystem :input {:id "1.2.3.4.5.6.7.8.9"}
+    :expect [["no provider" nil?]]}])
 
 (deftest ^:live operation-cases
   (doseq [c cases] (check c)))
 
-(deftest ^:live live-loinc-oid-resolves-via-naming-system
-  (testing "request with system=urn:oid:... resolves to canonical LOINC URL"
-    (is (= loinc-url
-           (composite/resolve-canonical (:naming-systems *svc*) "2.16.840.1.113883.6.1")))
+(deftest ^:live live-loinc-oid-routes-via-identifier-alias
+  (testing "request with system=<bare OID> routes to LoincProvider and responds with canonical URL"
     (let [r (hades/lookup *svc*
               {:system "2.16.840.1.113883.6.1" :code "718-7"})]
       (is (= "Hemoglobin [Mass/volume] in Blood" (:display r)))

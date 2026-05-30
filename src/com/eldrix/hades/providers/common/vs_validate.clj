@@ -7,8 +7,8 @@
   matching / display validation / inactive-status / fragment-CS /
   status-warning logic, and returns a `::result/validate`.
 
-  Provider impls (`MemoryValueSet`, `FtrmValueSetCatalogue`, …) call
-  this with their own `vs-data` `{:url :version :compose :metadata}`
+  Provider impls (`MemoryValueSet`, `FtrmProvider`, `LoincProvider`, …)
+  call this with their own `vs-data` `{:url :version :compose :metadata}`
   map. Behaviour is identical across backends because the function only
   depends on the svc and the compose def."
   (:require [clojure.string :as str]
@@ -286,8 +286,7 @@
                                (:display match)
                                (not (display/display-matches? match display display-langs)))
         result (if display-mismatch?
-                 (let [lenient?  (let [v (:lenient-display-validation params)]
-                                   (if (contains? params :lenient-display-validation) v true))
+                 (let [lenient?  (get params :lenient-display-validation true)
                        cs-m      (when system (composite/cs-meta svc system))
                        cs-lang   (when cs-m (or (:language cs-m) (get cs-m "language")))
                        msg       (issues/format-display-mismatch display system code

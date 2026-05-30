@@ -368,16 +368,22 @@
             (protos/cs-expand* svc
               {:system loinc-uri :text "glucose" :max-hits 10}))}
 
-   ;; --- FHIR REST search (FS01) -----------------------------------------
+   ;; --- FHIR REST search (CodeSystem / ValueSet) ------------------------
    ;;
-   ;; The four shapes the FS01 pool exercises:
-   ;;   *-by-url   — `?url=<canonical>` (1400/1800 of the pool).
-   ;;                Pre-filter on metadata tuples collapses each
-   ;;                provider to ≤1 surviving entry; one *-resource
-   ;;                call per provider thereafter.
-   ;;   *-browse   — unfiltered. Bounded by the per-provider walk;
-   ;;                SQLite VS catalogue (~2.5k entries in smoke)
-   ;;                drives the worst case.
+   ;; The query shapes a client issues against `/CodeSystem` and
+   ;; `/ValueSet`, with the exact params the HTTP layer hands the
+   ;; composite (`_count`/`_summary` keys):
+   ;;   *-by-url       — `?url=<canonical>`. The pre-filter on metadata
+   ;;                    tuples collapses each provider to ≤1 surviving
+   ;;                    entry; one *-resource call per provider
+   ;;                    thereafter. The fast path.
+   ;;   *-browse-page  — `_count=10&_summary=true`. Walks, dedups and
+   ;;                    SORTS the whole catalogue to return one page —
+   ;;                    the latency hot spot. `vs-browse-page` over the
+   ;;                    ~15k-ValueSet catalogue is the slowest search op.
+   ;;   *-browse-count — `_summary=count`. Same walk + dedup but the sort
+   ;;                    is skipped (only the total is returned); guards
+   ;;                    that the count-only path stays sort-free.
    {:id :fs01/cs-by-url :tx-bench "FS01"
     :fn (fn [svc]
           (hades/search-code-systems svc
@@ -386,10 +392,14 @@
     :fn (fn [svc]
           (hades/search-value-sets svc
             {:url "http://hl7.org/fhir/ValueSet/administrative-gender"}))}
-   {:id :fs01/cs-browse :tx-bench "FS01"
-    :fn (fn [svc] (hades/search-code-systems svc {}))}
-   {:id :fs01/vs-browse :tx-bench "FS01"
-    :fn (fn [svc] (hades/search-value-sets svc {}))}
+   {:id :fs01/cs-browse-page :tx-bench "FS01"
+    :fn (fn [svc] (hades/search-code-systems svc {:_count 10 :_summary "true"}))}
+   {:id :fs01/vs-browse-page :tx-bench "FS01"
+    :fn (fn [svc] (hades/search-value-sets svc {:_count 10 :_summary "true"}))}
+   {:id :fs01/cs-browse-count :tx-bench "FS01"
+    :fn (fn [svc] (hades/search-code-systems svc {:_summary "count"}))}
+   {:id :fs01/vs-browse-count :tx-bench "FS01"
+    :fn (fn [svc] (hades/search-value-sets svc {:_summary "count"}))}
 
    ;; --- $expand on VSAC extensional ValueSets (EX04) ---------------------
    ;;

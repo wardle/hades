@@ -5,24 +5,18 @@
             [com.eldrix.hades.providers.common.compose :as compose]
             [com.eldrix.hades.providers.loinc.model :as loinc-model]
             [com.eldrix.hades.providers.loinc.provider :as loinc-provider]
-            [com.eldrix.hades.providers.loinc.store :as loinc-store]
             [com.eldrix.hades.protocols :as protos]))
 
-(def ^:dynamic *cs* nil)
-(def ^:dynamic *vs* nil)
-(def ^:dynamic *cm* nil)
 (def ^:dynamic *svc* nil)
 
 (defn provider-fixture [f]
-  (let [{:keys [datasource codesystem valueset conceptmap]} (loinc-provider/open-providers fixtures/loinc-db-path)]
+  (let [provider (loinc-provider/open fixtures/loinc-db-path)
+        svc      (composite/from-providers [provider])]
     (try
-      (binding [*cs* codesystem
-                *vs* valueset
-                *cm* conceptmap
-                *svc* (composite/from-providers [codesystem valueset conceptmap])]
+      (binding [*svc* svc]
         (f))
       (finally
-        (loinc-store/close! datasource)))))
+        (.close ^java.io.Closeable svc)))))
 
 (use-fixtures :once provider-fixture)
 
@@ -171,22 +165,22 @@
 (deftest ^:live cs-lookup
   (doseq [{:keys [label input expected]} cs-lookup-cases]
     (testing label
-      (let [result (protos/cs-lookup *cs* input)]
+      (let [result (protos/cs-lookup *svc* input)]
         (if (fn? expected)
           (expected result)
           (is (submap? expected result)))))))
 
 (deftest ^:live cs-lookup-property-wildcard
   (testing "property=* behaves like no property filter"
-    (let [unfiltered (protos/cs-lookup *cs* {:system "http://loinc.org" :code "718-7"})
-          wildcard (protos/cs-lookup *cs* {:system "http://loinc.org"
+    (let [unfiltered (protos/cs-lookup *svc* {:system "http://loinc.org" :code "718-7"})
+          wildcard (protos/cs-lookup *svc* {:system "http://loinc.org"
                                            :code "718-7"
                                            :properties ["*"]})]
       (is (= (set (map :code (:properties unfiltered)))
              (set (map :code (:properties wildcard))))))))
 
 (deftest ^:live loinc-codesystem-metadata-advertises-case-insensitive
-  (let [meta (first (protos/cs-metadata *cs* {:url "http://loinc.org"}))]
+  (let [meta (first (protos/cs-metadata *svc* {:url "http://loinc.org"}))]
     (is (= false (:case-sensitive meta)))))
 
 (def validate-code-cases
@@ -210,7 +204,7 @@
 (deftest ^:live validate-code-display-language-checks-designations
   (doseq [{:keys [label input expected]} validate-code-cases]
     (testing label
-      (is (submap? expected (protos/cs-validate-code *cs* input))))))
+      (is (submap? expected (protos/cs-validate-code *svc* input))))))
 
 (deftest ^:live validate-code-surfaces-inactive-and-unknown-system
   (testing "deprecated LOINC codes carry inactive metadata through composite warnings"
@@ -223,7 +217,7 @@
                       (= "code-comment" (:details-code %)))
                 (:issues r)))))
   (testing "unknown systems use the shared validate-code shape"
-    (let [r (protos/cs-validate-code *cs* {:system "http://example.org"
+    (let [r (protos/cs-validate-code *svc* {:system "http://example.org"
                                            :code "x"})]
       (is (false? (:result r)))
       (is (= "http://example.org" (:x-unknown-system r)))
@@ -252,7 +246,7 @@
 (deftest ^:live implicit-valueset-validate-code-checks-localized-display
   (doseq [{:keys [label input expected]} implicit-valueset-validate-code-cases]
     (testing label
-      (is (submap? expected (protos/vs-validate-code *vs* nil input))))))
+      (is (submap? expected (protos/vs-validate-code *svc* nil input))))))
 
 (def cs-expand-cases
   [{:label "canonical English multi-token search is AND-of-tokens"
@@ -289,7 +283,7 @@
 (deftest ^:live expand-searches-canonical-and-linguistic-text
   (doseq [{:keys [label input expected-codes expect-concepts? display-pattern]} cs-expand-cases]
     (testing label
-      (let [concepts (:concepts (protos/cs-expand* *cs* input))]
+      (let [concepts (:concepts (protos/cs-expand* *svc* input))]
         (when (some? expected-codes)
           (is (= expected-codes (mapv :code concepts))))
         (when expect-concepts?
@@ -298,14 +292,14 @@
           (is (every? #(re-find display-pattern (:display %)) concepts)))))))
 
 (deftest ^:live cs-expand*-supports-code-eq-filter
-  (let [r (protos/cs-expand* *cs* {:system "http://loinc.org"
+  (let [r (protos/cs-expand* *svc* {:system "http://loinc.org"
                                    :filters [{:property "code"
                                               :op "="
                                               :value "718-7"}]})]
     (is (= ["718-7"] (codes r)))))
 
 (deftest ^:live codesystem-expand-respects-requested-version
-  (let [r (protos/cs-expand* *cs* {:system "http://loinc.org"
+  (let [r (protos/cs-expand* *svc* {:system "http://loinc.org"
                                    :version "not-the-loaded-version"
                                    :text "hemoglobin"
                                    :max-hits 10})]
@@ -313,12 +307,12 @@
 
 (deftest ^:live expand-empty-token-filter-does-not-broaden-results
   (testing "CodeSystem search"
-    (let [r (protos/cs-expand* *cs* {:system "http://loinc.org"
+    (let [r (protos/cs-expand* *svc* {:system "http://loinc.org"
                                      :text "&&&"
                                      :max-hits 10})]
       (is (empty? (:concepts r)))))
   (testing "implicit ValueSet search"
-    (let [r (protos/vs-expand *vs* nil {:url "http://loinc.org/vs"
+    (let [r (protos/vs-expand *svc* nil {:url "http://loinc.org/vs"
                                         :filter "&&&"
                                         :count 10})]
       (is (empty? (:concepts r)))
@@ -405,31 +399,31 @@
 (deftest ^:live answer-list-valuesets-expand-and-validate
   (testing "answer list ValueSets are resolvable by URL (implicit, not enumerated)"
     (let [url "http://loinc.org/vs/LL1234-5"
-          meta (first (protos/vs-metadata *vs* {:url url}))]
+          meta (first (protos/vs-metadata *svc* {:url url}))]
       (is (= url (:url meta)))))
   (testing "part hierarchy ValueSets are resolvable by URL (implicit, not enumerated)"
     (let [url "http://loinc.org/vs/LP248770-2"
-          meta (first (protos/vs-metadata *vs* {:url url}))]
+          meta (first (protos/vs-metadata *svc* {:url url}))]
       (is (= url (:url meta)))))
   (doseq [{:keys [label input expected]} answer-list-expand-cases]
     (testing label
-      (is (submap? expected (protos/vs-expand *vs* nil input)))))
+      (is (submap? expected (protos/vs-expand *svc* nil input)))))
   (doseq [{:keys [label input expected]} answer-list-validate-code-cases]
     (testing label
-      (is (submap? expected (protos/vs-validate-code *vs* nil input)))))
+      (is (submap? expected (protos/vs-validate-code *svc* nil input)))))
   (doseq [{:keys [label input expected]} specific-valueset-validate-code-cases]
     (testing label
-      (is (submap? expected (protos/vs-validate-code *vs* nil input)))))
+      (is (submap? expected (protos/vs-validate-code *svc* nil input)))))
   (testing "non-answer-list LOINC ValueSet URLs are not claimed as answer lists"
-    (is (nil? (protos/vs-expand *vs* nil {:url "http://loinc.org/vs/LP12345-6"})))
-    (is (nil? (protos/vs-expand *vs* nil {:url "http://loinc.org/vs/LG123-4"})))))
+    (is (nil? (protos/vs-expand *svc* nil {:url "http://loinc.org/vs/LP12345-6"})))
+    (is (nil? (protos/vs-expand *svc* nil {:url "http://loinc.org/vs/LG123-4"})))))
 
 (deftest ^:live group-valuesets-expand-like-loinc
   ;; fhir.loinc.org expands LG51973-2 to these five LOINC terms for the
   ;; pinned 2.82 release. Exact membership is more stable than display
   ;; text and catches broken group-file import or ordering.
   (let [url "http://loinc.org/vs/LG51973-2"
-        r (protos/vs-expand *vs* nil {:url url :count 10})]
+        r (protos/vs-expand *svc* nil {:url url :count 10})]
     (is (= 5 (:total r)))
     (is (= ["100675-8" "105880-9" "29604-6" "30247-1" "72493-0"]
            (codes r)))))
@@ -437,11 +431,11 @@
 (deftest ^:live expansion-pagination-is-deterministic
   (testing "answer-list paging is stable"
     (let [url "http://loinc.org/vs/LL1234-5"
-          page #(codes (protos/vs-expand *vs* nil {:url url :offset 1 :count 2}))]
+          page #(codes (protos/vs-expand *svc* nil {:url url :offset 1 :count 2}))]
       (is (= ["LA14675-5" "LA14676-3"] (page)))
       (is (= (page) (page)))))
   (testing "implicit all-LOINC paging is stable"
-    (let [page #(codes (protos/vs-expand *vs* nil {:url "http://loinc.org/vs"
+    (let [page #(codes (protos/vs-expand *svc* nil {:url "http://loinc.org/vs"
                                                    :filter "hemoglobin"
                                                    :offset 1
                                                    :count 5}))]
@@ -449,7 +443,7 @@
       (is (= 5 (count (page)))))))
 
 (deftest ^:live filtered-implicit-valueset-reports-total
-  (let [r (protos/vs-expand *vs* nil {:url "http://loinc.org/vs"
+  (let [r (protos/vs-expand *svc* nil {:url "http://loinc.org/vs"
                                       :filter "hemoglobin"
                                       :count 5})]
     (is (= 5 (count (:concepts r))))
@@ -490,25 +484,27 @@
 
 (def subsumes-cases
   [{:label "part parent subsumes term"
-    :input {:codeA "LP392452-1"
+    :input {:systemA "http://loinc.org" :systemB "http://loinc.org"
+            :codeA "LP392452-1"
             :codeB "718-7"}
     :expected {:outcome "subsumes"}}
    {:label "term is subsumed by part parent"
-    :input {:codeA "718-7"
+    :input {:systemA "http://loinc.org" :systemB "http://loinc.org"
+            :codeA "718-7"
             :codeB "LP392452-1"}
     :expected {:outcome "subsumed-by"}}])
 
 (deftest ^:live expansion-filters-and-hierarchy
   (doseq [{:keys [label input expected-codes exact-codes?]} expansion-filter-cases]
     (testing label
-      (let [actual-codes (codes (protos/cs-expand* *cs* input))]
+      (let [actual-codes (codes (protos/cs-expand* *svc* input))]
         (if exact-codes?
           (is (= expected-codes actual-codes))
           (doseq [code expected-codes]
             (is (some #{code} actual-codes)))))))
   (doseq [{:keys [label input expected]} subsumes-cases]
     (testing label
-      (is (submap? expected (protos/cs-subsumes *cs* input))))))
+      (is (submap? expected (protos/cs-subsumes *svc* input))))))
 
 (def expand-compose-cases
   [{:label "STATUS and CLASS filters narrow the composed expansion"
@@ -543,7 +539,7 @@
              (:issues r))))))
 
 (deftest ^:live unsupported-filters-do-not-broaden-loinc-expansion
-  (let [r (protos/cs-expand* *cs* {:system "http://loinc.org"
+  (let [r (protos/cs-expand* *svc* {:system "http://loinc.org"
                                    :filters [{:property "not-a-loinc-filter"
                                               :op "="
                                               :value "x"}]
@@ -561,7 +557,7 @@
   ;; the LNC slice is ordered by code. Expanding the implicit all-LOINC
   ;; ValueSet at that page with activeOnly=true must skip it rather than
   ;; returning an inactive concept.
-  (let [r (protos/vs-expand *vs* nil {:url "http://loinc.org/vs"
+  (let [r (protos/vs-expand *svc* nil {:url "http://loinc.org/vs"
                                       :activeOnly true
                                       :offset 729
                                       :count 1})
@@ -584,8 +580,8 @@
 (deftest ^:live active-only-applies-to-filtered-implicit-loinc-expansion
   (doseq [{:keys [label base inactive-code]} filtered-active-only-cases]
     (testing label
-      (let [inactive (protos/vs-expand *vs* nil base)
-            active (protos/vs-expand *vs* nil (assoc base :activeOnly true))]
+      (let [inactive (protos/vs-expand *svc* nil base)
+            active (protos/vs-expand *svc* nil (assoc base :activeOnly true))]
         (is (has-code? inactive-code (:concepts inactive)))
         (is (not (has-code? inactive-code (:concepts active))))))))
 
@@ -607,8 +603,8 @@
 (deftest ^:live active-only-applies-to-specific-loinc-valuesets
   (doseq [{:keys [label base inactive-concept]} specific-active-only-cases]
     (testing label
-      (let [inactive (protos/vs-expand *vs* nil base)
-            active (protos/vs-expand *vs* nil (assoc base :activeOnly true))
+      (let [inactive (protos/vs-expand *svc* nil base)
+            active (protos/vs-expand *svc* nil (assoc base :activeOnly true))
             inactive-code (:code inactive-concept)]
         (is (some #(submap? inactive-concept %) (:concepts inactive)))
         (is (not (has-code? inactive-code (:concepts active))))
@@ -639,10 +635,10 @@
   ;; deliberately exposes the imported MapTo.csv rows under this URL.
   (doseq [{:keys [label input expected]} map-to-translate-cases]
     (testing label
-      (is (submap? expected (protos/cm-translate *cm* input))))))
+      (is (submap? expected (protos/cm-translate *svc* input))))))
 
 (deftest ^:live imported-conceptmaps-are-advertised
-  (let [metas (protos/cm-metadata *cm* {})
+  (let [metas (protos/cm-metadata *svc* {})
         urls (set (map :url metas))
         part-url (loinc-model/part-related-conceptmap-url "http://snomed.info/sct")]
     (is (contains? urls (:url (loinc-model/conceptmap :map-to))))
@@ -656,7 +652,7 @@
             :target-uri "http://snomed.info/sct"
             :title "LOINC part related code mappings to http://snomed.info/sct"
             :version fixtures/loinc-version}
-           (protos/cm-resource *cm* {:url part-url})))))
+           (protos/cm-resource *svc* {:url part-url})))))
 
 (def external-conceptmap-translate-cases
   [{:label "part related code mappings translate LOINC to SNOMED CT"
@@ -739,11 +735,11 @@
 (deftest ^:live imported-external-conceptmaps-translate-both-directions
   (doseq [{:keys [label input expected]} external-conceptmap-translate-cases]
     (testing label
-      (is (submap? expected (protos/cm-translate *cm* input))))))
+      (is (submap? expected (protos/cm-translate *svc* input))))))
 
 (deftest ^:live vs-metadata-honours-search-filters
   (let [implicit-url "http://loinc.org/vs"
-        urls (fn [opts] (set (map :url (protos/vs-metadata *vs* opts))))
+        urls (fn [opts] (set (map :url (protos/vs-metadata *svc* opts))))
         all  (urls {})]
     (testing "no filter returns every synthesised ValueSet"
       (is (contains? all implicit-url)))

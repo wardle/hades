@@ -6,7 +6,6 @@
             [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.protocols.result :as result]
             [com.eldrix.hades.providers.common.fhir-loader :as loaders-fhir]
-            [com.eldrix.hades.providers.ftrm.db :as ftrm-db]
             [com.eldrix.hades.providers.ftrm.index :as ftrm-index]
             [com.eldrix.hades.providers.ftrm.provider :as ftrm-provider])
   (:import (java.io File)))
@@ -67,23 +66,23 @@
   (let [path (new-temp-path)]
     (try
       (build-multilang-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)]
+      (let [provider (ftrm-provider/open path)]
         (testing "displayLanguage selects matching designation as display"
-          (let [r (protos/cs-lookup codesystem
+          (let [r (protos/cs-lookup provider
                     {:system "http://example.org/cs/colours" :code "red"
                      :displayLanguage "fr"})]
             (is (= "Rouge" (:display r)))))
         (testing "displayLanguage falls back to primary display when no match"
-          (let [r (protos/cs-lookup codesystem
+          (let [r (protos/cs-lookup provider
                     {:system "http://example.org/cs/colours" :code "red"
                      :displayLanguage "de"})]
             (is (= "Red" (:display r)))))
         (testing "no displayLanguage → primary display"
-          (let [r (protos/cs-lookup codesystem
+          (let [r (protos/cs-lookup provider
                     {:system "http://example.org/cs/colours" :code "red"})]
             (is (= "Red" (:display r)))))
         (testing "language with quality factors picks highest match"
-          (let [r (protos/cs-lookup codesystem
+          (let [r (protos/cs-lookup provider
                     {:system "http://example.org/cs/colours" :code "red"
                      :displayLanguage "de;q=1.0,cy;q=0.5"})]
             (is (= "Coch" (:display r))))))
@@ -93,12 +92,12 @@
   (let [path (new-temp-path)]
     (try
       (build-stored-vs-db path)
-      (let [{:keys [valueset datasource]} (ftrm-provider/open-providers path)
-            svc (composite/from-providers [valueset])]
+      (let [provider (ftrm-provider/open path)
+            svc (composite/from-providers [provider])]
         (try
           (testing "no displayLanguage pages stored membership and reports pre-page total"
             (let [{:keys [concepts total used-codesystems compose-pins]}
-                  (protos/vs-expand valueset svc {:url "http://example.org/vs/stored"
+                  (protos/vs-expand provider svc {:url "http://example.org/vs/stored"
                                                   :offset 1
                                                   :count 2})]
               (is (= 4 total))
@@ -108,7 +107,7 @@
               (is (empty? compose-pins))))
           (testing "displayLanguage is answered from embedded designations"
             (let [{:keys [concepts display-language]}
-                  (protos/vs-expand valueset svc {:url "http://example.org/vs/stored"
+                  (protos/vs-expand provider svc {:url "http://example.org/vs/stored"
                                                   :displayLanguage "en"
                                                   :offset 1
                                                   :count 1})]
@@ -116,7 +115,7 @@
               (is (= ["Bravo stored EN"] (mapv :display concepts)))))
           (testing "wildcard displayLanguage does not create a display preference"
             (let [{:keys [concepts display-language]}
-                  (protos/vs-expand valueset svc {:url "http://example.org/vs/stored"
+                  (protos/vs-expand provider svc {:url "http://example.org/vs/stored"
                                                   :displayLanguage "*"
                                                   :offset 1
                                                   :count 1})]
@@ -124,21 +123,21 @@
               (is (= ["Bravo"] (mapv :display concepts)))))
           (testing "filter matches stored code and display before pagination"
             (let [{:keys [concepts total]}
-                  (protos/vs-expand valueset svc {:url "http://example.org/vs/stored"
+                  (protos/vs-expand provider svc {:url "http://example.org/vs/stored"
                                                   :filter "char"
                                                   :count 1})]
               (is (= 1 total))
               (is (= ["charlie"] (mapv :code concepts)))))
           (finally
-            (ftrm-db/close! datasource))))
+            (.close ^java.io.Closeable svc))))
       (finally (delete-quietly path)))))
 
 (deftest cs-expand*-supports-code-eq-filter
   (let [path (new-temp-path)]
     (try
       (build-multilang-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)
-            r (protos/cs-expand* codesystem
+      (let [provider (ftrm-provider/open path)
+            r (protos/cs-expand* provider
                 {:system "http://example.org/cs/colours"
                  :filters [{:property "code" :op "=" :value "red"}]})]
         (is (= ["red"] (mapv :code (:concepts r)))))
@@ -176,28 +175,28 @@
   (let [path (new-temp-path)]
     (try
       (build-case-insensitive-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)]
+      (let [provider (ftrm-provider/open path)]
         (testing "case-insensitive CS resolves a different-case code"
-          (let [r (protos/cs-lookup codesystem
+          (let [r (protos/cs-lookup provider
                     {:system "http://example.org/cs/ci" :code "foo"})]
             (is (some? r))
             (is (= "Foo" (:display r)))))
         (testing "exact case still works"
-          (let [r (protos/cs-lookup codesystem
+          (let [r (protos/cs-lookup provider
                     {:system "http://example.org/cs/ci" :code "FOO"})]
             (is (= "Foo" (:display r))))))
       (finally (delete-quietly path))))
   (let [path (new-temp-path)]
     (try
       (build-case-sensitive-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)]
+      (let [provider (ftrm-provider/open path)]
         (testing "case-sensitive CS rejects different-case code"
           (is (= :unknown-code
                  (:not-found-reason
-                   (protos/cs-lookup codesystem
+                   (protos/cs-lookup provider
                      {:system "http://example.org/cs/cs" :code "foo"})))))
         (testing "exact case works"
-          (is (some? (protos/cs-lookup codesystem
+          (is (some? (protos/cs-lookup provider
                        {:system "http://example.org/cs/cs" :code "FOO"})))))
 	      (finally (delete-quietly path)))))
 
@@ -205,15 +204,15 @@
   (let [path (new-temp-path)]
     (try
       (build-case-insensitive-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)
-            meta (first (protos/cs-metadata codesystem {:url "http://example.org/cs/ci"}))]
+      (let [provider (ftrm-provider/open path)
+            meta (first (protos/cs-metadata provider {:url "http://example.org/cs/ci"}))]
         (is (= false (:case-sensitive meta))))
       (finally (delete-quietly path))))
   (let [path (new-temp-path)]
     (try
       (build-case-sensitive-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)
-            meta (first (protos/cs-metadata codesystem {:url "http://example.org/cs/cs"}))]
+      (let [provider (ftrm-provider/open path)
+            meta (first (protos/cs-metadata provider {:url "http://example.org/cs/cs"}))]
         (is (= true (:case-sensitive meta))))
       (finally (delete-quietly path)))))
 
@@ -221,16 +220,16 @@
   (let [path (new-temp-path)]
     (try
       (build-case-insensitive-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)]
+      (let [provider (ftrm-provider/open path)]
         (testing "wrong-case code validates and surfaces a code-rule info issue"
-          (let [r (protos/cs-validate-code codesystem
+          (let [r (protos/cs-validate-code provider
                     {:system "http://example.org/cs/ci" :code "foo"})]
             (is (true? (:result r)))
             (is (= :FOO (:normalized-code r)))
             (is (= "information" (-> r :issues first :severity)))
             (is (= "code-rule" (-> r :issues first :details-code)))))
         (testing "correct-case code: no case issue"
-          (let [r (protos/cs-validate-code codesystem
+          (let [r (protos/cs-validate-code provider
                     {:system "http://example.org/cs/ci" :code "FOO"})]
             (is (true? (:result r)))
             (is (nil? (:normalized-code r)))
@@ -241,21 +240,21 @@
   (let [path (new-temp-path)]
     (try
       (build-multilang-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)]
+      (let [provider (ftrm-provider/open path)]
         (testing "language-tagged designation is accepted as valid display"
-          (let [r (protos/cs-validate-code codesystem
+          (let [r (protos/cs-validate-code provider
                     {:system "http://example.org/cs/colours" :code "red"
                      :display "Rouge" :displayLanguage "fr"})]
             (is (true? (:result r)))
             (is (= "Rouge" (:display r)))))
         (testing "wrong display in requested language fails"
-          (let [r (protos/cs-validate-code codesystem
+          (let [r (protos/cs-validate-code provider
                     {:system "http://example.org/cs/colours" :code "red"
                      :display "Rojo" :displayLanguage "fr"})]
             (is (false? (:result r)))
             (is (= "invalid-display" (-> r :issues first :details-code)))))
         (testing "primary-language display still validates without displayLanguage"
-          (let [r (protos/cs-validate-code codesystem
+          (let [r (protos/cs-validate-code provider
                     {:system "http://example.org/cs/colours" :code "red"
                      :display "Red"})]
             (is (true? (:result r))))))
@@ -303,8 +302,8 @@
       (let [path (new-temp-path)]
         (try
           (build-versions-db path url versions)
-          (let [{:keys [codesystem]} (ftrm-provider/open-providers path)
-                r (protos/cs-lookup codesystem {:system url :code "C1"})]
+          (let [provider (ftrm-provider/open path)
+                r (protos/cs-lookup provider {:system url :code "C1"})]
             (is (= expected (:version r))
                 (str "for " url " with versions " (vec versions)
                      " the bare-URL lookup must return " expected
@@ -364,8 +363,8 @@
     (let [path (new-temp-path)]
       (try
         (build-baked-vs-db path)
-        (let [{:keys [valueset]} (ftrm-provider/open-providers path)
-              r (protos/vs-resource valueset {:url "http://example.com/baked-vs"
+        (let [provider (ftrm-provider/open path)
+              r (protos/vs-resource provider {:url "http://example.com/baked-vs"
                                               :version "1.0"})
               compose (:compose r)
               include (first (get compose "include"))]
@@ -380,10 +379,10 @@
     (let [path (new-temp-path)]
       (try
         (build-baked-vs-db path)
-        (let [{:keys [valueset]} (ftrm-provider/open-providers path)
-              svc (composite/from-providers [valueset])
+        (let [provider (ftrm-provider/open path)
+              svc (composite/from-providers [provider])
               {:keys [concepts total]}
-              (protos/vs-expand valueset svc {:url "http://example.com/baked-vs"
+              (protos/vs-expand provider svc {:url "http://example.com/baked-vs"
                                               :version "1.0"})]
           (is (= 5 (count concepts)))
           (is (= 5 total))
@@ -397,10 +396,10 @@
     (let [path (new-temp-path)]
       (try
         (build-baked-vs-db path)
-        (let [{:keys [valueset]} (ftrm-provider/open-providers path)
-              svc (composite/from-providers [valueset])
+        (let [provider (ftrm-provider/open path)
+              svc (composite/from-providers [provider])
               {:keys [concepts total]}
-              (protos/vs-expand valueset svc {:url "http://example.com/baked-vs"
+              (protos/vs-expand provider svc {:url "http://example.com/baked-vs"
                                               :version "1.0"
                                               :offset 1 :count 2})]
           (is (= 2 (count concepts)))
@@ -413,10 +412,10 @@
     (let [path (new-temp-path)]
       (try
         (build-baked-vs-db path)
-        (let [{:keys [valueset]} (ftrm-provider/open-providers path)
-              svc (composite/from-providers [valueset])
+        (let [provider (ftrm-provider/open path)
+              svc (composite/from-providers [provider])
               {:keys [concepts]}
-              (protos/vs-expand valueset svc {:url "http://example.com/baked-vs"
+              (protos/vs-expand provider svc {:url "http://example.com/baked-vs"
                                               :version "1.0"
                                               :filter "alp"})]
           (is (= ["alpha"] (mapv :code concepts))))
@@ -457,8 +456,7 @@
     {:loader-type loader-tag}))
 
 (defn- meta-content-from-sqlite [path]
-  (-> (ftrm-provider/open-providers path)
-      :codesystem
+  (-> (ftrm-provider/open path)
       (protos/cs-metadata {})
       first
       :content))
@@ -471,9 +469,9 @@
         (write-cs-rows! path "not-present" [] "stub-first")
         (write-cs-rows! path "complete" [{:code "A" :display "Alpha"}] "complete-second")
         (ftrm-index/index! path)
-        (let [{:keys [codesystem]} (ftrm-provider/open-providers path)]
+        (let [provider (ftrm-provider/open path)]
           (is (= "complete" (meta-content-from-sqlite path)))
-          (is (= "Alpha" (:display (protos/cs-lookup codesystem
+          (is (= "Alpha" (:display (protos/cs-lookup provider
                                      {:system dup-cs-url :code "A"})))))
         (finally (delete-quietly path))))))
 
@@ -487,10 +485,10 @@
         (write-cs-rows! path "complete" [{:code "A" :display "Alpha"}] "complete-first")
         (write-cs-rows! path "not-present" [] "stub-second")
         (ftrm-index/index! path)
-        (let [{:keys [codesystem]} (ftrm-provider/open-providers path)]
+        (let [provider (ftrm-provider/open path)]
           (is (= "complete" (meta-content-from-sqlite path))
               "non-stub meta must survive a later stub upsert")
-          (is (= "Alpha" (:display (protos/cs-lookup codesystem
+          (is (= "Alpha" (:display (protos/cs-lookup provider
                                      {:system dup-cs-url :code "A"})))))
         (finally (delete-quietly path))))))
 
@@ -507,13 +505,13 @@
                                          {:code "C" :display "Charlie"}]
                         "complete-second")
         (ftrm-index/index! path)
-        (let [{:keys [codesystem]} (ftrm-provider/open-providers path)]
+        (let [provider (ftrm-provider/open path)]
           (is (= "complete" (meta-content-from-sqlite path)))
-          (is (= "Alpha-2" (:display (protos/cs-lookup codesystem
+          (is (= "Alpha-2" (:display (protos/cs-lookup provider
                                        {:system dup-cs-url :code "A"}))))
-          (is (= "Beta"    (:display (protos/cs-lookup codesystem
+          (is (= "Beta"    (:display (protos/cs-lookup provider
                                        {:system dup-cs-url :code "B"}))))
-          (is (= "Charlie" (:display (protos/cs-lookup codesystem
+          (is (= "Charlie" (:display (protos/cs-lookup provider
                                        {:system dup-cs-url :code "C"})))))
         (finally (delete-quietly path))))))
 
@@ -551,8 +549,8 @@
   (let [path (new-temp-path)]
     (try
       (build-supplement-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)
-            entry (->> (protos/cs-metadata codesystem nil)
+      (let [provider (ftrm-provider/open path)
+            entry (->> (protos/cs-metadata provider nil)
                        (filter #(= "http://example.org/cs/supp" (:url %)))
                        first)]
         (is (= "supplement" (:content entry)))
@@ -563,8 +561,8 @@
   (let [path (new-temp-path)]
     (try
       (build-basic-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)
-            r (protos/cs-subsumes codesystem
+      (let [provider (ftrm-provider/open path)
+            r (protos/cs-subsumes provider
                 {:systemA "http://example.org/cs/nope"
                  :systemB "http://example.org/cs/nope"
                  :codeA "a" :codeB "b"})]
@@ -578,8 +576,8 @@
   (let [path (new-temp-path)]
     (try
       (build-basic-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)
-            r (protos/cs-subsumes codesystem
+      (let [provider (ftrm-provider/open path)
+            r (protos/cs-subsumes provider
                 {:systemA "http://example.org/cs/basic"
                  :systemB "http://example.org/cs/basic"
                  :version "1.0"
@@ -591,8 +589,8 @@
   (let [path (new-temp-path)]
     (try
       (build-basic-db path)
-      (let [{:keys [codesystem]} (ftrm-provider/open-providers path)
-            r (protos/cs-validate-code codesystem
+      (let [provider (ftrm-provider/open path)
+            r (protos/cs-validate-code provider
                 {:system "http://example.org/cs/nope"
                  :code "a"})]
         (is (s/valid? ::result/validate r) (s/explain-str ::result/validate r))
@@ -619,10 +617,10 @@
   (let [path (new-temp-path)]
     (try
       (build-vs-search-db path)
-      (let [{:keys [valueset]} (ftrm-provider/open-providers path)
-            urls (fn [opts] (set (map :url (protos/vs-metadata valueset opts))))]
+      (let [provider (ftrm-provider/open path)
+            urls (fn [opts] (set (map :url (protos/vs-metadata provider opts))))]
         (testing "no filter returns every ValueSet"
-          (is (= 4 (count (protos/vs-metadata valueset {})))))
+          (is (= 4 (count (protos/vs-metadata provider {})))))
         (testing "status is an exact token match"
           (is (= #{"http://example.org/vs/alpha" "http://example.org/vs/pct"
                    "http://example.org/vs/abc"}

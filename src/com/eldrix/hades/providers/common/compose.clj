@@ -463,9 +463,8 @@
         params (if (and compose-lang (not (:displayLanguage params)))
                  (assoc params :displayLanguage compose-lang)
                  params)
-        params (if-let [text (:filter params)]
-                 (assoc params :text text)
-                 params)
+        params (cond-> params
+                 (:filter params) (assoc :text (:filter params)))
         includes (get compose "include")
         excludes (get compose "exclude")
         inactive-allowed (get compose "inactive" true)

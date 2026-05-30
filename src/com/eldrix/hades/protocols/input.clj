@@ -3,7 +3,7 @@
   methods and into the public `core` operation functions.
 
   Every keyword in this namespace describes an *input* field. Sibling
-  result-shape specs live in `impl.protocols.result`. Splitting input
+  result-shape specs live in `protocols.result`. Splitting input
   and result spec namespaces avoids the keyword collisions that arise
   when the same field name (`:code`, `:properties`, `:designations`)
   has different shapes on the way in vs the way out."
@@ -34,9 +34,6 @@
 (s/def ::properties (s/coll-of ::code))
 
 (s/def ::useSupplements (s/coll-of ::canonical))
-;; Supplement canonicals declared on a ValueSet via the
-;; http://hl7.org/fhir/StructureDefinition/valueset-supplement extension.
-(s/def ::supplements (s/coll-of ::canonical))
 
 ;; ---------------------------------------------------------------------------
 ;; Operation parameter shapes

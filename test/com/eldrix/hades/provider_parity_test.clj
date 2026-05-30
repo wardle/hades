@@ -133,36 +133,28 @@
 (defn- delete-quietly [^String p]
   (let [^File f (io/file p)] (when (.exists f) (.delete f))))
 
-(defn- build-in-memory-providers
-  "Build a TerminologyService from `data` and pull the impls back out
-  by their canonical URLs. Self-contained — no global state touched."
+(defn- build-in-memory-service
+  "Build a TerminologyService from `data`. Self-contained — no global
+  state touched."
   [data]
-  (let [{:keys [providers supplements]} (load-fhir/build-from-fhir-data data)
-        svc (composite/from-providers providers {:supplements supplements})]
-    {:svc svc
-     :cs (composite/find-codesystem svc cs-url)
-     :vs (composite/find-valueset   svc vs-url)
-     :cm (some :impl (:conceptmaps svc))}))
+  {:svc (composite/from-providers
+          (:providers (load-fhir/build-from-fhir-data data)))})
 
-(defn- build-sqlite-providers [data]
+(defn- build-sqlite-service [data]
   (let [path (temp-db-path)]
     (ftrm-index/build! path data {:loader-type "parity-test"})
     (ftrm-index/index! path)
-    (let [{:keys [codesystem valueset conceptmap datasource]}
-          (ftrm-provider/open-providers path)
-          providers (filterv some? [codesystem valueset conceptmap])
-          svc (composite/from-providers providers)]
-      {:cs codesystem :vs valueset :cm conceptmap
-       :svc svc :ds datasource :path path})))
+    {:svc  (composite/from-providers [(ftrm-provider/open path)])
+     :path path}))
 
 (defn provider-fixture [f]
-  (let [in-mem (build-in-memory-providers fhir-data)
-        sqlite (build-sqlite-providers   fhir-data)]
+  (let [in-mem (build-in-memory-service fhir-data)
+        sqlite (build-sqlite-service   fhir-data)]
     (reset! state {:in-mem in-mem :sqlite sqlite})
     (try (f)
          (finally
-           (when-let [ds (:ds sqlite)]
-             (.close ^java.io.Closeable ds))
+           (when-let [svc (:svc sqlite)]
+             (.close ^java.io.Closeable svc))
            (delete-quietly (:path sqlite))
            (reset! state nil)))))
 
@@ -234,7 +226,7 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest parity-cs-lookup
-  (let [{{im :cs} :in-mem {sq :cs} :sqlite} @state]
+  (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state]
     (testing "lookup of a known concept"
       (parity-check "cs-lookup" protos/cs-lookup im sq
                     {:system cs-url :code "red"}))
@@ -258,7 +250,7 @@
                     {:system cs-url :code "violet"}))))
 
 (deftest parity-cs-validate-code
-  (let [{{im :cs} :in-mem {sq :cs} :sqlite} @state]
+  (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state]
     (testing "valid code"
       (parity-check "cs-validate-code" protos/cs-validate-code im sq
                     {:system cs-url :code "blue"}))
@@ -299,7 +291,7 @@
         (is (= im-r sq-r) (diff "cs-validate-code (case)" [params] im-r sq-r))))))
 
 (deftest parity-cs-subsumes
-  (let [{{im :cs} :in-mem {sq :cs} :sqlite} @state]
+  (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state]
     (testing "scarlet subsumed-by red"
       (parity-check "cs-subsumes" protos/cs-subsumes im sq
                     {:system cs-url :codeA "red" :codeB "scarlet"}))
@@ -341,10 +333,10 @@
       (check {:url vs-url :displayLanguage "fr"}))))
 
 (deftest parity-vs-validate-code
-  (let [{{im :vs im-svc :svc} :in-mem {sq :vs sq-svc :svc} :sqlite} @state
+  (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state
         check (fn [params]
-                (let [im-r (protos/vs-validate-code im im-svc (assoc params :url vs-url))
-                      sq-r (protos/vs-validate-code sq sq-svc (assoc params :url vs-url))
+                (let [im-r (protos/vs-validate-code im im (assoc params :url vs-url))
+                      sq-r (protos/vs-validate-code sq sq (assoc params :url vs-url))
                       im-n (normalise-result im-r)
                       sq-n (normalise-result sq-r)]
                   (is (= im-n sq-n)
@@ -369,17 +361,12 @@
       (check {:code "RED" :system cs-url}))))
 
 (deftest parity-code-filters-respect-case-sensitivity
-  (let [im-svc (get-in @state [:in-mem :svc])
-        sq-svc (get-in @state [:sqlite :svc])
-        im-ci (composite/find-codesystem im-svc ci-cs-url)
-        sq-ci (get-in @state [:sqlite :cs])
-        im-cs (get-in @state [:in-mem :cs])
-        sq-cs (get-in @state [:sqlite :cs])]
+  (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state]
     (testing "case-insensitive CodeSystem code filter accepts different case"
       (let [params {:system ci-cs-url
                     :filters [{:property "code" :op "=" :value "square"}]}
-            im-r (normalise-result (protos/cs-expand* im-ci params))
-            sq-r (normalise-result (protos/cs-expand* sq-ci params))]
+            im-r (normalise-result (protos/cs-expand* im params))
+            sq-r (normalise-result (protos/cs-expand* sq params))]
         (is (= ["Square"] (mapv :code (:concepts im-r))))
         (is (= (mapv :code (:concepts im-r))
                (mapv :code (:concepts sq-r)))
@@ -387,15 +374,15 @@
     (testing "case-sensitive CodeSystem code filter rejects different case"
       (let [params {:system cs-url
                     :filters [{:property "code" :op "=" :value "RED"}]}
-            im-r (normalise-result (protos/cs-expand* im-cs params))
-            sq-r (normalise-result (protos/cs-expand* sq-cs params))]
+            im-r (normalise-result (protos/cs-expand* im params))
+            sq-r (normalise-result (protos/cs-expand* sq params))]
         (is (empty? (:concepts im-r)))
         (is (= (mapv :code (:concepts im-r))
                (mapv :code (:concepts sq-r)))
             (diff "cs-expand* case-sensitive code filter" [params] im-r sq-r))))))
 
 (deftest parity-cm-translate
-  (let [{{im :cm} :in-mem {sq :cm} :sqlite} @state]
+  (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state]
     (testing "URL-only translate uses group source systems"
       (parity-check "cm-translate" protos/cm-translate im sq
                     {:url cm-url :code "red"}))

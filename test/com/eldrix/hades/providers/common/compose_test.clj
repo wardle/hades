@@ -301,8 +301,8 @@
     (let [path (temp-sqlite-path)]
       (try
         (build-draft-cs-db path)
-        (let [{:keys [codesystem]} (ftrm-provider/open-providers path)
-              svc (composite/from-providers [codesystem])
+        (let [provider (ftrm-provider/open path)
+              svc (composite/from-providers [provider])
               compose {"include" [{"system" "http://example.org/cs/draft"
                                    "version" "1.0"}]}
               {:keys [used-codesystems]} (compose/expand-compose svc compose {})

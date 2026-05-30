@@ -14,19 +14,17 @@
       {:codesystems    {url|version → provider, url → provider}
        :valuesets      {url|version → provider, url → provider}
        :conceptmaps    [{:impl provider :description {...}} ...]}
-    :supplements      [{:meta codesystem-meta-data
-                        :lookup {code → {:designations [...] :properties [...]}}} ...]
     :diagnostics      {:skipped [...]}
 
   CodeSystem-backed providers register against both :codesystems and
   :valuesets so the implicit ValueSet of a CodeSystem can answer
   `vs-validate-code` and `vs-expand`.
 
-  Supplement composition is *not* performed by the indexer; the consumer
-  (boot driver or request-scoped overlay interceptor) resolves bases and
-  constructs `SupplementedCodeSystem` wrappers. The indexer hands back
-  raw supplement data and metadata so the consumer can do this in one
-  pass."
+  Supplement composition is *not* performed by the indexer. A supplement
+  CodeSystem is built like any other provider — it carries its
+  `content`/`supplements` metadata and yields its augmentation table via
+  `supplement/SupplementSource`. The composite detects and wires
+  supplements onto their bases at registration."
   (:require [clojure.string :as str]
             [com.eldrix.hades.providers.common.fhir-extract :as fhir-extract]
             [com.eldrix.hades.providers.in-memory.provider :as in-memory]))
@@ -101,20 +99,6 @@
       {:parents {} :children {}}
       flat-concepts)))
 
-(defn- supplement-lookup
-  "Build a `{code → {:designations [...] :properties [...]}}` map from
-  the concept entries of a supplement CodeSystem."
-  [concepts]
-  (reduce (fn [m c]
-            (let [extras (cond-> {}
-                           (seq (:designations c)) (assoc :designations (:designations c))
-                           (seq (:properties c))   (assoc :properties (:properties c)))]
-              (if (seq extras)
-                (assoc m (:code c) extras)
-                m)))
-          {}
-          concepts))
-
 (defn- meta->cs-map
   "Reconstruct a partial FHIR CodeSystem map (string-keyed) for the
   property-uri-map helper. Only the property-defs are needed."
@@ -181,8 +165,9 @@
 (defn- index-codesystems
   "Group concepts by their parent CS meta entry. Build a provider for
   every CodeSystem (regular AND supplement) and register them all in
-  the overlay under their own URLs. Emit each supplement's per-code
-  lookup separately so the consumer can wrap matching bases."
+  the overlay under their own URLs. Supplement providers carry their
+  `content`/`supplements` metadata; the composite detects and wires
+  them via `supplement/SupplementSource` at registration."
   [fhir-data]
   (let [metas    (filterv #(= :codesystem-meta (:type %)) fhir-data)
         designations-by-concept
@@ -211,15 +196,8 @@
                        (let [k (group-key meta)
                              provider (build-codesystem-provider meta (get by-parent k []))]
                          (assoc-versioned acc (:url meta) (:version meta) provider)))
-                     {} collapsed-metas)
-        supplements (->> metas
-                         (filter #(= "supplement" (:content %)))
-                         (mapv (fn [meta]
-                                 (let [k (group-key meta)]
-                                   {:meta   meta
-                                    :lookup (supplement-lookup (get by-parent k []))}))))]
-    {:cs-overlay cs-overlay
-     :supplements supplements}))
+                     {} collapsed-metas)]
+    {:cs-overlay cs-overlay}))
 
 (defn- index-valuesets
   [fhir-data]
@@ -252,7 +230,6 @@
 
   Returns:
     {:providers   {:codesystems {...} :valuesets {...} :conceptmaps [...]}
-     :supplements [...]
      :diagnostics {:skipped [...]}}
 
   CodeSystem-backed providers are registered under both :codesystems and
@@ -260,15 +237,14 @@
   `vs-validate-code` / `vs-expand`. ValueSet-only providers are merged
   on top, so a ValueSet declared at the same URL as a CodeSystem wins.
 
-  `opts` is reserved for future use (supplement resolver, strict mode
-  etc.) and currently ignored."
+  `opts` is reserved for future use (strict mode etc.) and currently
+  ignored."
   ([store] (index store nil))
   ([{:keys [fhir-data]} _opts]
-   (let [{:keys [cs-overlay supplements]} (index-codesystems fhir-data)
+   (let [{:keys [cs-overlay]} (index-codesystems fhir-data)
          vs-overlay (index-valuesets fhir-data)
          cm-providers (index-conceptmaps fhir-data)]
      {:providers {:codesystems cs-overlay
                   :valuesets   (merge cs-overlay vs-overlay)
                   :conceptmaps cm-providers}
-      :supplements supplements
       :diagnostics {:skipped [] :duplicates []}})))

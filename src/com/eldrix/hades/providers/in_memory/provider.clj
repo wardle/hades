@@ -2,11 +2,13 @@
   "In-memory provider deftypes that satisfy `CodeSystem`, `ValueSet`, and
   `ConceptMap` against indexed concept data.
 
-  Three deftypes plus a wrapper:
+  Three deftypes:
 
     `MemoryCodeSystem` — backs a CodeSystem and the implicit ValueSet
     of that CodeSystem from a `:codesystem-meta` plus the concepts
-    belonging to it.
+    belonging to it. A `content=\"supplement\"` instance also satisfies
+    `supplement/SupplementSource`, yielding its augmentation table for
+    the composite to wire onto the base it supplements.
 
     `MemoryValueSet` — backs a compose-driven ValueSet from a
     `:valueset` fhir-data entry.
@@ -14,14 +16,9 @@
     `MemoryConceptMap` — backs a ConceptMap with forward and reverse
     translation from a `:conceptmap` fhir-data entry.
 
-    `SupplementedCodeSystem` — wraps any `CodeSystem` provider with a
-    supplement lookup map; augments designation and property results
-    via the public protocol surface only. Works against any base
-    provider (in-memory, Hermes, future remote).
-
-  Convenience helpers `from-fhir` / `from-fhir-resources` exist for
-  tests and ad-hoc construction; the production path goes through
-  `loaders/fhir` + `index/memory`."
+  The convenience helper `from-fhir` exists for tests and ad-hoc
+  construction; the production path goes through `loaders/fhir` +
+  `index/memory`."
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [com.eldrix.hades.providers.common.compose :as compose]
@@ -31,6 +28,7 @@
             [com.eldrix.hades.providers.common.property-filter :as property-filter]
             [com.eldrix.hades.providers.common.search-filter :as search-filter]
             [com.eldrix.hades.protocols :as protos]
+            [com.eldrix.hades.providers.common.supplement :as supplement]
             [com.eldrix.hades.providers.common.vs-validate :as vs-validate])
   (:import (com.google.re2j Pattern)))
 
@@ -483,8 +481,7 @@
       (when (or (nil? system) (= system url))
         (if-let [concept (get code-index code)]
           (let [inactive? (concept-inactive? concept)
-                lenient-display-validation (if (contains? params :lenient-display-validation)
-                                             (:lenient-display-validation params) true)
+                lenient-display-validation (get params :lenient-display-validation true)
                 display-langs (display/parse-display-language displayLanguage)
                 lang-display (when (seq display-langs)
                                (display/find-display-for-language (:designations concept) display-langs))
@@ -497,13 +494,12 @@
                          inactive? (assoc :inactive true
                                           :inactive-status (concept-inactive-status concept)))]
             (if (and display (not (display/display-matches? concept display display-langs)))
-              (let [lenient? lenient-display-validation
-                    msg (issues/format-display-mismatch display url code
+              (let [msg (issues/format-display-mismatch display url code
                           (:display concept) (:designations concept) displayLanguage
                           (meta-language meta))]
-                (assoc result :result (boolean lenient?)
+                (assoc result :result (boolean lenient-display-validation)
                               :message msg
-                              :issues [{:severity     (if lenient? "warning" "error")
+                              :issues [{:severity     (if lenient-display-validation "warning" "error")
                                         :type         "invalid"
                                         :details-code "invalid-display"
                                         :text         msg
@@ -523,7 +519,12 @@
                                 :details-code "invalid-code"
                                 :text         msg
                                 :expression   ["Coding.code"]}]}
-              (not fragment?) (assoc :message msg))))))))
+              (not fragment?) (assoc :message msg)))))))
+
+  supplement/SupplementSource
+  (supplement-lookup-table [_]
+    (when (= "supplement" (:content meta))
+      (supplement/concepts->lookup (vals code-index)))))
 
 (s/def ::parents  (s/map-of string? set?))
 (s/def ::children (s/map-of string? set?))

@@ -21,19 +21,19 @@
      (when-not version
        (throw (ex-info (str "Invalid LOINC distribution: " dir) {:dir dir})))
      (jdbc/with-transaction [tx conn]
-       (loop [ch (stream-blocks dir opts)
-              counts {}]
-         (if-let [{:keys [type data ex] :as block} (async/<!! ch)]
-           (if (= type ::loader/error)
-             (throw ex)
+       (let [ch (stream-blocks dir opts)]
+         (loop [counts {}]
+           (if-let [{:keys [type data ex] :as block} (async/<!! ch)]
+             (if (= type ::loader/error)
+               (throw ex)
+               (do
+                 (store/write-batch! tx block)
+                 (recur (update counts type (fnil + 0) (count data)))))
              (do
-               (store/write-batch! tx block)
-               (recur ch (update counts type (fnil + 0) (count data)))))
-           (do
-             (store/upsert-meta! tx :loinc_version version)
-             (store/upsert-meta! tx :schema_version store/schema-version)
-             (store/upsert-meta! tx :imported_at (Instant/now))
-             counts)))))))
+               (store/upsert-meta! tx :loinc_version version)
+               (store/upsert-meta! tx :schema_version store/schema-version)
+               (store/upsert-meta! tx :imported_at (Instant/now))
+               counts))))))))
 
 (defn import-release!
   "Create/open a LOINC SQLite store at `db-path`, import `dir`, and close

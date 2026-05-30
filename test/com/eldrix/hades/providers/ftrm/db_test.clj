@@ -151,7 +151,6 @@
 (deftest fhir-tx-db?-accepts-stamped-file
   (let [path (temp-db-path)]
     (try
-      (let [ds (db/create! path)]
-        (db/close! ds))
+      (with-open [_ds (db/create! path)])
       (is (true? (db/fhir-tx-db? (io/file path))))
       (finally (delete-quietly path)))))

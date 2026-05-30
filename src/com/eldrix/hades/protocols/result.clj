@@ -2,7 +2,7 @@
   "Specs for protocol return values — the data contracts between
   layers. Every keyword in this namespace describes an output field
   produced by a protocol method or a `core` operation. Sibling input
-  specs live in `impl.protocols.input`. Splitting input vs result
+  specs live in `protocols.input`. Splitting input vs result
   spec namespaces eliminates the field-name collisions that come from
   using the same word (`:code`, `:properties`, `:designations`) for
   different shapes."
@@ -221,12 +221,22 @@
 ;; the tuple level.
 (s/def ::implicit? boolean?)
 
+;; `:identifiers` lists additional identifiers (OIDs, URNs, legacy
+;; URIs) that resolve to this CodeSystem's canonical URL. Composite
+;; indexes them at construction so a lookup against any identifier
+;; routes to the same provider — providers stay alias-blind because
+;; the composite substitutes the canonical before dispatching.
+;; Identifiers are also surfaced as `identifier` entries on the FHIR
+;; CodeSystem resource, so catalogue listings need no special
+;; filtering: one entry per CodeSystem, identifiers as resource data.
+(s/def ::identifiers (s/coll-of string? :min-count 1))
+
 ;; CodeSystem metadata — `:content` distinguishes regular vs supplement
 ;; CodeSystems; `:supplements` is the canonical of the base when
 ;; `:content` is "supplement".
 (s/def ::cs-metadata
   (s/keys :req-un [::url]
-          :opt-un [::version ::content ::supplements ::implicit?]))
+          :opt-un [::version ::content ::supplements ::implicit? ::identifiers]))
 
 ;; ValueSet metadata — only `:url`/`:version` for now; future fields
 ;; (binding strength, jurisdiction) can land here without changing the
@@ -245,5 +255,6 @@
           :opt-un [::title ::description ::version]))
 
 ;; Used by the supplement provider metadata: `:supplements` is the
-;; canonical of the base CodeSystem when `:content` is "supplement".
-(s/def ::supplements (s/coll-of string?))
+;; canonical of the base CodeSystem (FHIR `CodeSystem.supplements`,
+;; 0..1) when `:content` is "supplement".
+(s/def ::supplements string?)

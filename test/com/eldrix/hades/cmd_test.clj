@@ -70,15 +70,16 @@
   f)
 
 (defn- close-bundle!
-  "Run every closer in `bundle`. Tests that open real artefacts must
-  call this so we don't leak file handles or LMDB envs."
+  "Close every `Closeable` provider in `bundle`. Tests that open real
+  artefacts must call this so we don't leak file handles or LMDB envs."
   [bundle]
-  (run! #(try (%) (catch Exception _)) (:closers bundle)))
+  (run! #(when (instance? java.io.Closeable %)
+           (try (.close ^java.io.Closeable %) (catch Exception _)))
+        (:providers bundle)))
 
 (defn- mk-empty-ftrm! ^File [^File f]
-  (let [ds (db/create! (.getPath f))]
-    (db/close! ds)
-    f))
+  (with-open [_ds (db/create! (.getPath f))])
+  f)
 
 (defn- canonical-rf2-name [component]
   (str "sct2_" component "_Snapshot_INT_20250201.txt"))
@@ -141,15 +142,14 @@
         (finally (delete-tree! root))))))
 
 (deftest providers-for-path-opens-empty-ftrm
-  (testing "an FTRM container with no resources still returns a closer"
+  (testing "an FTRM container with no resources still opens cleanly"
     (let [root (mk-tmp-dir "ftrm-only")
           ftrm (mk-empty-ftrm! (io/file root "tx.db"))]
       (try
         (let [bundle (paths/bundle-for-path (.getPath ftrm))]
-          ;; Empty FTRM has no providers (no CodeSystems/ValueSets/CMs)
-          ;; but it still opens, and the datasource closer must come back.
-          (is (= [] (:providers bundle)))
-          (is (= 1 (count (:closers bundle))))
+          ;; Empty FTRM still produces an FtrmProvider — its protocol
+          ;; methods just return empty results.
+          (is (= 1 (count (:providers bundle))))
           (close-bundle! bundle))
         (finally (delete-tree! root))))))
 
@@ -160,8 +160,8 @@
         (mk-empty-ftrm! (io/file root "a.db"))
         (mk-empty-ftrm! (io/file root "b.db"))
         (let [bundle (paths/bundle-for-path (.getPath root))]
-          (is (= 2 (count (:closers bundle)))
-              "one closer per FTRM artefact")
+          (is (= 2 (count (:providers bundle)))
+              "one provider per FTRM artefact")
           (close-bundle! bundle))
         (finally (delete-tree! root))))))
 
@@ -173,10 +173,8 @@
         (spit-file! (io/file root "extra" "cs.json")
                     "{\"resourceType\":\"CodeSystem\",\"url\":\"http://example.com/extra\",\"content\":\"complete\"}")
         (let [bundle (paths/bundle-for-path (.getPath root))]
-          ;; FTRM is empty (no providers from it); the JSON contributes one.
+          ;; Both the FTRM and the aggregated JSON register as providers.
           (is (pos? (count (:providers bundle))))
-          (is (= 1 (count (:closers bundle)))
-              "FTRM datasource closer; JSON providers are pure-memory")
           (close-bundle! bundle))
         (finally (delete-tree! root))))))
 

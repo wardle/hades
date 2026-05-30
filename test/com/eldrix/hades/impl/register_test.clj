@@ -41,9 +41,8 @@
   "Build a service from `resource-maps` via `build-from-fhir-data` and
   `composite/from-providers`."
   [resource-maps]
-  (let [{:keys [providers supplements]} (load-fhir/build-from-fhir-data
-                                          (fhir-data resource-maps))]
-    (composite/from-providers providers {:supplements supplements})))
+  (composite/from-providers
+    (:providers (load-fhir/build-from-fhir-data (fhir-data resource-maps)))))
 
 ;; ---------------------------------------------------------------------------
 
@@ -172,8 +171,8 @@
 
 (deftest end-to-end-fixture-directory-test
   (let [data (loaders/load-paths "test/resources/fhir-resources/good")
-        {:keys [providers supplements totals]} (load-fhir/build-from-fhir-data data)
-        svc (composite/from-providers providers {:supplements supplements})]
+        {:keys [providers totals]} (load-fhir/build-from-fhir-data data)
+        svc (composite/from-providers providers)]
     (testing "fixture directory loads"
       (is (>= (:codesystems totals) 3)
           (str "totals: " totals)))
@@ -322,24 +321,27 @@
           "CS-only provider must not appear in the ValueSet catalogue")
       (is (nil? (composite/find-valueset svc "http://example.com/cs-only"))))))
 
-(deftest naming-system-resolves-alias-to-canonical
-  (let [resolver (fn [id]
-                   (case id
-                     "urn:oid:1.2.3" "http://example.com/r/cs"
-                     nil))
-        {:keys [providers]} (load-fhir/build-from-fhir-data (fhir-data [cs-v1]))
-        svc (composite/from-providers providers {:naming-systems [resolver]})]
-    (testing "alias resolves to canonical when no direct match exists"
+(deftest cs-identifiers-route-to-canonical-provider
+  ;; Aliases (OIDs/URNs) ride on each CodeSystem's `:identifiers`
+  ;; metadata. The composite indexes them alongside the canonical URL
+  ;; so a lookup against any identifier finds the same provider —
+  ;; routing only, no separate alias registration.
+  (let [alias-provider (reify protos/CodeSystem
+                         (cs-metadata [_ {:keys [url]}]
+                           (let [canonical "http://example.com/r/cs"
+                                 identifiers ["urn:oid:1.2.3"]]
+                             (when (or (nil? url)
+                                       (= url canonical)
+                                       (some #{url} identifiers))
+                               [{:url canonical :version "1.0"
+                                 :identifiers identifiers}]))))
+        svc (composite/from-providers [alias-provider])]
+    (testing "alias resolves to the provider"
       (is (some? (composite/find-codesystem svc "urn:oid:1.2.3"))))
-    (testing "direct canonical lookup is unaffected"
+    (testing "canonical lookup is unaffected"
       (is (some? (composite/find-codesystem svc "http://example.com/r/cs"))))
-    (testing "unknown alias does not match"
-      (is (nil? (composite/find-codesystem svc "urn:oid:9.9.9"))))
-    (testing "resolve-canonical returns input on unmatched non-blank id"
-      (is (= "passthrough" (composite/resolve-canonical [resolver] "passthrough"))))
-    (testing "resolve-canonical returns nil on blank/nil"
-      (is (nil? (composite/resolve-canonical [resolver] nil)))
-      (is (nil? (composite/resolve-canonical [resolver] ""))))))
+    (testing "unknown URL does not match"
+      (is (nil? (composite/find-codesystem svc "urn:oid:9.9.9"))))))
 
 ;; ---------------------------------------------------------------------------
 ;; CodeSystem.content precedence on duplicate (url, version)

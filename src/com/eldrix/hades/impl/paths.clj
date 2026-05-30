@@ -8,7 +8,6 @@
             [com.eldrix.hades.providers.common.fhir-loader :as fhir-loader]
             [com.eldrix.hades.providers.snomed.provider :as snomed]
             [com.eldrix.hades.impl.sources :as sources]
-            [com.eldrix.hades.providers.ftrm.db :as ftrm-db]
             [com.eldrix.hades.providers.ftrm.provider :as ftrm-provider]
             [com.eldrix.hades.providers.loinc.provider :as loinc-provider]
             [com.eldrix.hermes.core :as hermes])
@@ -17,20 +16,14 @@
 (set! *warn-on-reflection* true)
 
 (def empty-bundle
-  {:providers [] :closers [] :naming-systems [] :supplements []})
-
-(defn- summarise-resources
-  [resources]
-  (let [by-type (group-by :resource-type resources)]
-    {:codesystems (count (get by-type "CodeSystem" []))
-     :valuesets   (count (get by-type "ValueSet" []))
-     :conceptmaps (count (get by-type "ConceptMap" []))}))
+  {:providers []})
 
 (defn- close-bundle!
   [bundle]
-  (doseq [closer (reverse (:closers bundle))]
+  (doseq [p (reverse (:providers bundle))
+          :when (instance? Closeable p)]
     (try
-      (closer)
+      (.close ^Closeable p)
       (catch Exception e
         (log/warn e "error closing provider while unwinding failed open")))))
 
@@ -59,45 +52,29 @@
            releases   (mapv :term (hermes/release-information hermes-svc))]
        (log/info "registered provider"
                  {:source path :kind :hermes-db :releases releases})
-       {:providers [(snomed/->HermesService hermes-svc)]
-        :closers   [#(.close hermes-svc)]})
+       {:providers [(snomed/->HermesService hermes-svc)]})
 
      :fhir-tx-db
-     (let [path (.getPath file)
-           {:keys [datasource codesystem valueset conceptmap naming-system]}
-           (ftrm-provider/open-providers path)
-           providers (filterv some? [codesystem valueset conceptmap])]
-       (log/info "registered provider"
-                 (merge {:source path :kind :fhir-tx-db
-                         :naming-system? (some? naming-system)}
-                        (summarise-resources (ftrm-db/list-resources datasource))))
-       {:providers      providers
-        :naming-systems (when naming-system [naming-system])
-        :closers        (when (instance? Closeable datasource)
-                          [#(.close ^Closeable datasource)])})
+     (let [path     (.getPath file)
+           provider (ftrm-provider/open path)]
+       {:providers [provider]})
 
      :loinc-db
-     (let [path (.getPath file)
-           {:keys [datasource codesystem valueset conceptmap naming-system]} (loinc-provider/open-providers path)]
+     (let [path     (.getPath file)
+           provider (loinc-provider/open path)]
        (log/info "registered provider" {:source path :kind :loinc-db})
-       {:providers (filterv some? [codesystem valueset conceptmap])
-        :naming-systems (when naming-system [naming-system])
-        :closers   (when (instance? Closeable datasource)
-                     [#(.close ^Closeable datasource)])}))))
+       {:providers [provider]}))))
 
 (defn- aggregate-fhir-json
   "Build one in-memory provider set from FHIR JSON files."
   [root files]
   (let [data (fhir-loader/load-files files)
-        {:keys [providers supplements totals]}
-        (load-fhir/build-from-fhir-data data)]
+        {:keys [providers totals]} (load-fhir/build-from-fhir-data data)]
     (log/info "registered provider"
               (merge {:source root :kind :fhir-json
-                      :files (count files)
-                      :supplements (count supplements)}
-                     (select-keys totals [:codesystems :valuesets :conceptmaps])))
-    {:providers   providers
-     :supplements supplements}))
+                      :files (count files)}
+                     (select-keys totals [:codesystems :valuesets :conceptmaps :supplements])))
+    {:providers providers}))
 
 (defn bundle-for-path
   "Walk `path` and return the provider bundle for every recognised built
@@ -144,21 +121,16 @@
   extracted files aren't needed afterwards — archived sources must be
   release/JSON sources, not databases opened in place.
 
-  Options match `com.eldrix.hades.core/open`; any `:supplements`,
-  `:naming-systems` or `:closers` supplied by the caller are appended to
-  those discovered from the paths. `:default-locale` is forwarded to
-  `hermes/open` for SNOMED entries."
+  Options match `com.eldrix.hades.core/open`. `:default-locale` is
+  forwarded to `hermes/open` for SNOMED entries. Supplements among the
+  opened providers are detected and wired by `from-providers`."
   ([paths] (open-paths paths {}))
   ([paths opts]
    (let [{:keys [paths temp-dirs]} (archive/resolve-sources paths)]
      (try
-       (let [bundle (bundle-for-paths paths (select-keys opts [:default-locale]))
-             opts'  (-> opts
-                        (update :supplements (fnil into []) (:supplements bundle))
-                        (update :naming-systems (fnil into []) (:naming-systems bundle))
-                        (update :closers (fnil into []) (:closers bundle)))]
+       (let [bundle (bundle-for-paths paths (select-keys opts [:default-locale]))]
          (try
-           (composite/from-providers (:providers bundle) opts')
+           (composite/from-providers (:providers bundle) opts)
            (catch Throwable t
              (close-bundle! bundle)
              (throw t))))

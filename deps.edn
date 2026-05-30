@@ -99,6 +99,15 @@
             :exec-fn     cognitect.test-runner.api/test
             :exec-args   {:patterns [".*\\.bench$" ".*-bench$"]}}
 
+           ;; Flame-graph profiling from the REPL. Compose with the bench
+           ;; REPL: `clj -M:bench:profile:nrepl`. The jvm-opts enable
+           ;; self-attach and accurate (non-safepoint-biased) stacks.
+           :profile
+           {:extra-deps {com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.7.0"}}
+            :jvm-opts   ["-Djdk.attach.allowAttachSelf"
+                         "-XX:+UnlockDiagnosticVMOptions"
+                         "-XX:+DebugNonSafepoints"]}
+
            :lint/kondo
            {:extra-deps {clj-kondo/clj-kondo {:mvn/version "RELEASE"}}
             :main-opts  ["-m" "clj-kondo.main" "--lint" "src"]}

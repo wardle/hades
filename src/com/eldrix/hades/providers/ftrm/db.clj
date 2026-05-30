@@ -24,7 +24,7 @@
             [clojure.string :as str]
             [next.jdbc :as jdbc])
   (:import (com.zaxxer.hikari HikariConfig HikariDataSource)
-           (java.io Closeable File FileInputStream)
+           (java.io File FileInputStream)
            (java.nio.charset StandardCharsets)
            (java.util Arrays)))
 
@@ -199,13 +199,6 @@
 ;; Public API
 ;; ---------------------------------------------------------------------------
 
-(defn close!
-  "Close a pooled datasource. Required on shutdown — pool threads keep
-  the JVM alive otherwise. Safe to call on any `Closeable` datasource."
-  [ds]
-  (when (instance? Closeable ds)
-    (.close ^Closeable ds)))
-
 (defn create!
   "Create (or initialise) a FHIR terminology container at `path`. Stamps
   `application_id` + `user_version` and applies the v1 schema. Idempotent
@@ -213,14 +206,14 @@
   DDL when the schema is current).
 
   Throws if `path` exists and is a non-FHIR-terminology SQLite database.
-  Returns a pooled `HikariDataSource` — callers MUST `close!` it on
-  shutdown.
+  Returns a pooled `HikariDataSource` — `Closeable`, so callers must
+  `.close` it (or manage it with `with-open`) on shutdown.
 
   Schema bootstrap runs against an unpooled connection so that the
   `application_id` + `user_version` writes happen before any pooled
   connection observes the file. The pool is opened afterwards and
   applies the runtime pragmas to every handout."
-  [^String path]
+  ^HikariDataSource [^String path]
   (let [f (io/file path)
         fresh? (empty-file? f)]
     (when fresh?
@@ -238,9 +231,9 @@
 
 (defn open
   "Open an existing FHIR terminology container. Throws if missing or not
-  a v1 file. Returns a pooled `HikariDataSource` — callers MUST
-  `close!` it on shutdown."
-  [^String path]
+  a v1 file. Returns a pooled `HikariDataSource` — `Closeable`, so
+  callers must `.close` it (or manage it with `with-open`) on shutdown."
+  ^HikariDataSource [^String path]
   (let [f (io/file path)]
     (when (empty-file? f)
       (throw (ex-info (str "FHIR terminology container does not exist or is empty: " path)
@@ -255,15 +248,16 @@
   rows from `tx_resource`. Used by the SQLite provider to publish its
   metadata at registration time."
   [ds]
-  (mapv (fn [{:tx_resource/keys [resource_type url version concept_count imported_at]}]
-          {:resource-type resource_type
-           :url url
-           :version (when-not (str/blank? version) version)
-           :concept-count concept_count
-           :imported-at imported_at})
-        (jdbc/execute! ds ["SELECT resource_type, url, version, concept_count, imported_at
-                            FROM tx_resource
-                            ORDER BY resource_type, url, version"])))
+  (into []
+        (map (fn [{:tx_resource/keys [resource_type url version concept_count imported_at]}]
+               {:resource-type resource_type
+                :url url
+                :version (when-not (str/blank? version) version)
+                :concept-count concept_count
+                :imported-at imported_at}))
+        (jdbc/plan ds ["SELECT resource_type, url, version, concept_count, imported_at
+                        FROM tx_resource
+                        ORDER BY resource_type, url, version"])))
 
 (defn read-meta
   "Return the `tx_meta` map (key → value)."
@@ -297,6 +291,25 @@
     (str/starts-with? id "urn:uuid:") (subs id 9)
     :else id))
 
+(defn identifiers-by-codesystem
+  "Return `{canonical-url → #{identifier-strs...}}` for every CodeSystem
+  that has rows in `naming_system_id`. OID/UUID rows produce two
+  identifier entries — the bare value and the `urn:oid:`/`urn:uuid:`
+  URN form — so a lookup against either form resolves to the canonical
+  via the composite's alias index."
+  [ds]
+  (reduce
+    (fn [acc {:keys [ns_url identifier_type value]}]
+      (update acc ns_url (fnil into #{})
+              (case identifier_type
+                "oid"  #{value (str "urn:oid:" value)}
+                "uuid" #{value (str "urn:uuid:" value)}
+                #{value})))
+    {}
+    (jdbc/plan ds ["SELECT ns_url, identifier_type, value
+                    FROM naming_system_id
+                    ORDER BY ns_url"])))
+
 (defn resolve-system
   "Resolve an identifier (canonical URL, bare OID/URN, `urn:oid:`/
   `urn:uuid:` URN form, or other URI alias) to its canonical URL via
@@ -304,7 +317,7 @@
   row matches the supplied id (or its URN-stripped form), or nil. Blank
   input returns nil immediately."
   [ds id]
-  (when-not (or (nil? id) (str/blank? id))
+  (when-not (str/blank? id)
     (let [bare (strip-urn-prefix id)
           row (or (jdbc/execute-one! ds
                     ["SELECT ns_url FROM naming_system_id WHERE value = ?
@@ -342,27 +355,21 @@
   "Run `VACUUM` on the container, reclaiming free pages and reducing
   the on-disk size. Opens its own short-lived datasource."
   [^String path]
-  (let [ds (open path)]
-    (try
-      (with-open [conn (jdbc/get-connection ds)]
-        (jdbc/execute! conn ["VACUUM"]))
-      (finally
-        (close! ds)))))
+  (with-open [ds (open path)
+              conn (jdbc/get-connection ds)]
+    (jdbc/execute! conn ["VACUUM"])))
 
 (defn container-status
   "Return a status map summarising container contents: file size,
   schema version, resource counts by type, total concept rows."
   [^String path]
-  (let [ds (open path)]
-    (try
-      (let [resources (list-resources ds)
-            by-type (group-by :resource-type resources)]
-        {:path           path
-         :file-size      (.length (io/file path))
-         :schema-version (read-meta ds)
-         :resources      {:CodeSystem (count (get by-type "CodeSystem" []))
-                          :ValueSet   (count (get by-type "ValueSet"   []))
-                          :ConceptMap (count (get by-type "ConceptMap" []))}
-         :concept-count  (reduce + 0 (keep :concept-count resources))})
-      (finally
-        (close! ds)))))
+  (with-open [ds (open path)]
+    (let [resources (list-resources ds)
+          by-type (group-by :resource-type resources)]
+      {:path           path
+       :file-size      (.length (io/file path))
+       :schema-version (read-meta ds)
+       :resources      {:CodeSystem (count (get by-type "CodeSystem" []))
+                        :ValueSet   (count (get by-type "ValueSet"   []))
+                        :ConceptMap (count (get by-type "ConceptMap" []))}
+       :concept-count  (reduce + 0 (keep :concept-count resources))})))

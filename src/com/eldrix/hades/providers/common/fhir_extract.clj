@@ -35,7 +35,7 @@
                      (when (= valueset-supplement-ext (get ext "url"))
                        (get ext "valueCanonical")))
                    (get metadata "extension"))]
-    (when (seq refs) (vec refs))))
+    (when (seq refs) refs)))
 
 (defn extract-property-value
   "Extract the value from a FHIR concept property, which uses one of

@@ -778,7 +778,7 @@
         (async/close! fhir-data-ch)
         (throw t))
       (finally
-        (db/close! ds)))))
+        (.close ds)))))
 
 (defn build!
   "Stream a fhir-data seq into the SQLite container at `db-path`. Creates
@@ -798,7 +798,7 @@
 
   `build!` is a one-shot operation: it opens its own pooled datasource,
   runs the transaction, and closes the pool before returning. Callers
-  query the file by reopening via `ftrm-provider/open-providers` (or
+  query the file by reopening via `ftrm-provider/open` (or
   `db/open`)."
   [^String db-path data-source opts]
   (let [data-fn (if (fn? data-source) data-source (fn [] data-source))
@@ -833,7 +833,7 @@
          :totals {:targets (count targets)
                   :codesystem-targets (count (filter #(= "CodeSystem" (first %)) targets))}})
       (finally
-        (db/close! ds)))))
+        (.close ds)))))
 
 (defn index!
   "Rebuild derived structures for an existing terminology container:
@@ -854,4 +854,4 @@
         (jdbc/execute! conn ["ANALYZE"]))
       {:db-path db-path}
       (finally
-        (db/close! ds)))))
+        (.close ds)))))

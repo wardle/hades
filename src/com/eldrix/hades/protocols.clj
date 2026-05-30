@@ -2,17 +2,17 @@
   "Protocols defining a terminology service.
 
   Implementations participate in a Hades service by satisfying one or
-  more of `CodeSystem`, `ValueSet`, and `ConceptMap`. The composite
-  layer dispatches on URL/version, calls the matching protocol method,
-  and aggregates cross-provider concerns.
+  more of `CodeSystem`, `ValueSet`, `ConceptMap`. The composite layer
+  dispatches on URL/version, calls the matching protocol method, and
+  aggregates cross-provider concerns.
 
   Spec definitions are split across three sibling namespaces so input
   and output field names don't collide:
 
-    `impl.protocols`         — protocols + the loader/indexer
-                                interchange (`::fhir-data`).
-    `impl.protocols.input`   — operation parameter specs.
-    `impl.protocols.result`  — protocol return-value specs.
+    `protocols`         — protocols + the loader/indexer interchange
+                          (`::fhir-data`).
+    `protocols.input`   — operation parameter specs.
+    `protocols.result`  — protocol return-value specs.
 
   The HL7 FHIR TerminologyService is defined in
   https://hl7.org/fhir/terminology-service.html. These protocols are

@@ -14,7 +14,7 @@
             [com.eldrix.hades.providers.in-memory.index :as index]
             [com.eldrix.hades.providers.common.fhir-loader :as loaders]))
 
-(declare from-fhir from-fhir-resources build-from-fhir-data)
+(declare from-fhir build-from-fhir-data)
 
 (s/fdef from-fhir
   :args (s/cat :resource-map map?))
@@ -41,20 +41,6 @@
                          (get-in result [:providers :conceptmaps]))
       nil)))
 
-(s/fdef from-fhir-resources
-  :args (s/cat :resources (s/coll-of map?)))
-
-(defn from-fhir-resources
-  "Build a map keyed by resource type of in-memory providers, given a
-  seq of parsed FHIR JSON resources."
-  [resources]
-  (let [store  {:fhir-data (vec (loaders/resources->fhir-data resources :tx-resource))}
-        result (index/index store nil)]
-    {:codesystems (get-in result [:providers :codesystems])
-     :valuesets   (get-in result [:providers :valuesets])
-     :conceptmaps (get-in result [:providers :conceptmaps])
-     :supplements (:supplements result)}))
-
 ;; ---------------------------------------------------------------------------
 ;; Indexer consumer that orders providers and surfaces a load report.
 ;; ---------------------------------------------------------------------------
@@ -67,12 +53,11 @@
   "Index a fhir-data seq into providers, ready to be passed to
   `core/open`. Distinct CodeSystem providers register under both
   `:codesystems` and `:valuesets` (the implicit ValueSet of a
-  CodeSystem). Returns:
+  CodeSystem). A `content=\"supplement\"` CodeSystem is returned as an
+  ordinary provider; `from-providers` detects and wires it. Returns:
 
     {:providers   [impl ...]                   ; distinct provider impls
-     :supplements [{:meta :lookup} ...]        ; for `core/open` opts
      :skipped     [...]                        ; loader diagnostics
-     :supplements-resolved [...]
      :totals      {...}}
 
   When two source files publish the same `[resource-type url version]`,
@@ -82,7 +67,7 @@
   per-code concept map; no special dedup phase is needed here."
   [fhir-data]
   (let [skipped (filterv #(= :skipped (:type %)) fhir-data)
-        {:keys [providers supplements]} (index/index {:fhir-data fhir-data} nil)
+        {:keys [providers]} (index/index {:fhir-data fhir-data} nil)
         cs-overlay (:codesystems providers)
         vs-overlay (:valuesets providers)
         ;; Walk fhir-data in original order and pull each impl out of
@@ -103,16 +88,11 @@
         cm-impls (map :impl (:conceptmaps providers))
         distinct-impls (distinct (concat ordered-cs ordered-vs cm-impls))]
     {:providers   distinct-impls
-     :supplements (vec supplements)
      :skipped     skipped
-     :supplements-resolved
-                  (mapv (fn [{:keys [meta]}]
-                          {:supplement-url (:url meta)
-                           :supplement-version (:version meta)
-                           :base (:supplements-target meta)})
-                        supplements)
      :totals     {:codesystems (count (filter #(= :codesystem-meta (:type %)) fhir-data))
                   :valuesets   (count (filter #(= :valueset (:type %)) fhir-data))
                   :conceptmaps (count (filter #(= :conceptmap (:type %)) fhir-data))
-                  :supplements (count supplements)}}))
+                  :supplements (count (filter #(and (= :codesystem-meta (:type %))
+                                                    (= "supplement" (:content %)))
+                                              fhir-data))}}))
 

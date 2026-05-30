@@ -95,7 +95,7 @@
                               [{"url"         "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id"
                                 "valueString" message-id}])
       (seq details)    (assoc "details" details)
-      (seq expression) (assoc "expression" (vec expression)))))
+      (seq expression) (assoc "expression" expression))))
 
 (defn operation-outcome
   "Build a FHIR OperationOutcome map from a seq of keyword-keyed issue maps."
@@ -475,7 +475,7 @@
                                concepts)
         expansion (cond-> {"identifier" (str "urn:uuid:" (java.util.UUID/randomUUID))
                            "timestamp"  (str (java.time.Instant/now))
-                           "parameter"  (vec expansion-params)
+                           "parameter"  expansion-params
                            "contains"   contains-entries}
                     total        (assoc "total" (int total))
                     offset-value (assoc "offset" (int offset-value)))]

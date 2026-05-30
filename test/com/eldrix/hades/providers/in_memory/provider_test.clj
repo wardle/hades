@@ -485,9 +485,10 @@
 
 (deftest supplement-wrapper-equivalence-test
   (let [base (load-fhir/from-fhir supplement-base-cs)
-        ;; Build supplement lookup directly, mirroring the indexer.
-        supp-resources (load-fhir/from-fhir-resources [supplement-cs])
-        supp-lookup (-> supp-resources :supplements first :lookup)
+        ;; The supplement provider yields its augmentation table via
+        ;; SupplementSource — the same table from-providers wires.
+        supp-provider (load-fhir/from-fhir supplement-cs)
+        supp-lookup (supplement/supplement-lookup-table supp-provider)
         wrapped (supplement/supplemented-codesystem base supp-lookup)]
 
     (testing "cs-lookup augments designations on covered concept"

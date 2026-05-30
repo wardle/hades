@@ -22,6 +22,7 @@
   case-insensitive lookup, supplements, and fragment-CS warnings."
   (:require [charred.api :as charred]
             [clojure.string :as str]
+            [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.providers.common.canonical :as canonical]
             [com.eldrix.hades.providers.common.search-filter :as search-filter]
             [com.eldrix.hades.providers.common.compose :as compose]
@@ -32,7 +33,8 @@
             [com.eldrix.hades.providers.ftrm.db :as db]
             [com.eldrix.hades.providers.common.vs-validate :as vs-validate]
             [next.jdbc :as jdbc])
-  (:import (com.google.re2j Pattern PatternSyntaxException)))
+  (:import (com.google.re2j Pattern PatternSyntaxException)
+           (java.io Closeable)))
 
 (set! *warn-on-reflection* true)
 
@@ -119,10 +121,10 @@
               WHERE source_system IS NOT NULL AND target_system IS NOT NULL"]))]
     (into {}
           (map (fn [row]
-                 (let [k (key-for (:conceptmap/url row) (:conceptmap/version row))]
+                 (let [k     (key-for (:conceptmap/url row) (:conceptmap/version row))
+                       pairs (get pairs-by-key k)]
                    [k (cond-> (conceptmap-row->entry row)
-                        (seq (get pairs-by-key k))
-                        (assoc :pairs (vec (distinct (get pairs-by-key k)))))])))
+                        (seq pairs) (assoc :pairs (vec (distinct pairs))))])))
           (jdbc/execute! ds ["SELECT * FROM conceptmap"]))))
 
 ;; ---------------------------------------------------------------------------
@@ -414,7 +416,7 @@
         {:sql (if (= "code" property)
                 (str (code-sql col case-sensitive?) " IN (" (code-in-list-placeholders (count parts) case-sensitive?) ")")
                 (str col " IN (" (in-list-placeholders (count parts)) ")"))
-         :params (vec parts)}
+         :params parts}
         {:sql (str "EXISTS (SELECT 1 FROM concept_property p "
                    "WHERE p.cs_url=c.cs_url AND p.cs_version=c.cs_version "
                    "AND p.code=c.code AND p.prop_code=? "
@@ -428,7 +430,7 @@
         {:sql (if (= "code" property)
                 (str (code-sql col case-sensitive?) " NOT IN (" (code-in-list-placeholders (count parts) case-sensitive?) ")")
                 (str col " NOT IN (" (in-list-placeholders (count parts)) ")"))
-         :params (vec parts)}
+         :params parts}
         {:sql (str "NOT EXISTS (SELECT 1 FROM concept_property p "
                    "WHERE p.cs_url=c.cs_url AND p.cs_version=c.cs_version "
                    "AND p.code=c.code AND p.prop_code=? "
@@ -579,244 +581,6 @@
     hierarchy-meaning      (assoc :hierarchy-meaning hierarchy-meaning)
     standards-status       (assoc :standards-status standards-status)))
 
-(deftype FtrmCodeSystemCatalogue [ds cache]
-  protos/CodeSystem
-  (cs-metadata [_ {:keys [url version] :as opts}]
-    ;; Cache is keyed by `[url version]`, so we filter the raw key
-    ;; before allocating a tuple map. URL hot-path: walks the cache
-    ;; doing key compares, allocates a tuple only for the survivor.
-    (eduction
-     (filter (fn [[[k-url k-ver] entry]]
-               (and (or (nil? url)     (= url k-url))
-                    (or (nil? version) (= version k-ver))
-                    (search-filter/matches-resource-filters?
-                     (select-keys entry [:status :name :title :description]) opts))))
-     (map (fn [[[k-url k-ver] entry]]
-            (cond-> {:url k-url}
-              (not (str/blank? k-ver)) (assoc :version k-ver)
-              (:content entry)         (assoc :content (:content entry))
-              (some? (:case-sensitive entry)) (assoc :case-sensitive (:case-sensitive entry))
-              (:supplements entry)     (assoc :supplements (:supplements entry)))))
-     cache))
-
-  (cs-resource [_ params]
-    (let [meta (lookup-entry cache (:url params) (params-version params))]
-      (cs-resource-from-meta meta)))
-
-  (cs-lookup [_ {:keys [system code displayLanguage properties] :as params}]
-    (let [meta (lookup-entry cache system (params-version params))
-          {:keys [url version name case-sensitive]} meta]
-      (if-not meta
-        (issues/unknown-system-lookup system code)
-        (with-open [conn (jdbc/get-connection ds)]
-          (if-let [row (fetch-concept-row conn url version code case-sensitive)]
-            (let [actual-code (:concept/code row)
-                  inactive? (int->bool (:concept/inactive row))
-                  abstract? (int->bool (:concept/abstract row))
-                  {:keys [want? want-typed?]} (property-filter/parse properties)
-                  display-langs (display/parse-display-language displayLanguage)
-                  ;; If the caller asks for designations explicitly we
-                  ;; must return all of them. When designations are only
-                  ;; needed to pick a display for the supplied
-                  ;; `displayLanguage`, restrict the SQL to those
-                  ;; languages — turns a 66-row scan into a 2-3 row
-                  ;; lookup on the same index.
-                  designation-langs (when (and (seq display-langs) (not (want? "designation")))
-                                      (mapv :lang display-langs))
-                  fetch-desigs? (or (want? "designation") (seq display-langs))
-                  designations (when fetch-desigs?
-                                 (fetch-designations conn url version actual-code
-                                                     designation-langs))
-                  parents      (when (want? "parent")
-                                 (fetch-parents conn url version actual-code))
-                  children     (when (want? "child")
-                                 (fetch-children conn url version actual-code))
-                  prop-rows    (when want-typed?
-                                 (fetch-properties conn url version actual-code))
-                  lang-display (when (seq display-langs)
-                                 (display/find-display-for-language designations display-langs))]
-              {:name        name
-               :version     version
-               :display     (or lang-display (:concept/display row))
-               :system      url
-               :code        (keyword actual-code)
-               :definition  (:concept/definition row)
-               :abstract    (boolean abstract?)
-               :properties  (concat
-                              ;; `inactive` is a typed concept property
-                              ;; (http://hl7.org/fhir/concept-properties#inactive),
-                              ;; not a slice — gate by name not by the
-                              ;; slice flag.
-                              (when (want? "inactive")
-                                [{:code :inactive :value (boolean inactive?)}])
-                              (when parents
-                                (mapv (fn [{:keys [code display]}]
-                                        (cond-> {:code :parent :value (keyword code)}
-                                          display (assoc :description display)))
-                                      parents))
-                              (when children
-                                (mapv (fn [{:keys [code display]}]
-                                        (cond-> {:code :child :value (keyword code)}
-                                          display (assoc :description display)))
-                                      children))
-                              (when prop-rows
-                                (keep property->lookup-entry prop-rows)))
-               ;; Designations fetched solely for display selection are
-               ;; consumed by `find-display-for-language` and dropped
-               ;; — only emit them on the wire when the caller asked.
-               :designations (if (want? "designation") (or designations []) [])})
-            (issues/unknown-code-lookup url code))))))
-
-  (cs-validate-code [_ {:keys [system code display displayLanguage] :as params}]
-    (let [meta (lookup-entry cache system (params-version params))
-          {:keys [url version case-sensitive]} meta]
-      (if (nil? meta)
-        (issues/unknown-system-validate system code)
-        (with-open [conn (jdbc/get-connection ds)]
-          (let [row (fetch-concept-row conn url version code case-sensitive)]
-            (if (nil? row)
-              (not-found-result meta code)
-              (let [actual-code (:concept/code row)
-                    case-differs? (and (false? case-sensitive) (not= code actual-code))
-                    primary-display (:concept/display row)
-                    inactive-row?  (= 1 (:concept/inactive row))
-                    status-row     (:concept/status row)
-                    inactive-status (when (#{"retired" "inactive"} status-row) status-row)
-                    inactive?      (or inactive-row? (some? inactive-status))
-                    display-langs (display/parse-display-language displayLanguage)
-                    ;; Designations are only needed to (a) verify the
-                    ;; supplied display, or (b) pick a language-specific
-                    ;; display. Skip the read entirely otherwise. The
-                    ;; SQL language filter is only applied on the (b)
-                    ;; path; when `display` is set, the unhappy path
-                    ;; passes the full designation set to
-                    ;; `format-display-mismatch` so it can enumerate
-                    ;; alternatives across languages.
-                    need-designations? (or display (seq display-langs))
-                    designation-langs (when (and (seq display-langs) (nil? display))
-                                        (mapv :lang display-langs))
-                    designations (when need-designations?
-                                   (fetch-designations conn url version actual-code
-                                                       designation-langs))
-                    concept {:code actual-code :display primary-display :designations designations}
-                    best-display (or (when (seq display-langs)
-                                       (display/find-display-for-language designations display-langs))
-                                     primary-display)
-                    base (cond-> {:result true
-                                  :display best-display
-                                  :code (keyword code)
-                                  :system url
-                                  :version version}
-                           inactive?     (assoc :inactive true
-                                                :inactive-status (or inactive-status "inactive"))
-                           case-differs? (assoc :normalized-code (keyword actual-code)))
-                    case-issue (when case-differs?
-                                 {:severity     "information"
-                                  :type         "business-rule"
-                                  :details-code "code-rule"
-                                  :text         (issues/format-case-mismatch
-                                                 code actual-code url version)
-                                  :expression   ["Coding.code"]})
-                    display-issue (when (and display (not (display/display-matches? concept display display-langs)))
-                                    {:severity     "error"
-                                     :type         "invalid"
-                                     :details-code "invalid-display"
-                                     :text         (issues/format-display-mismatch
-                                                    display url code primary-display designations
-                                                    displayLanguage
-                                                    (get-in meta [:metadata "language"]))
-                                     :expression   ["Coding.display"]})
-                    issues (filterv some? [case-issue display-issue])]
-                (cond-> base
-                  display-issue (assoc :result false :message (:text display-issue))
-                  (seq issues) (assoc :issues issues)))))))))
-
-  (cs-subsumes [_ {:keys [systemA system codeA codeB] :as params}]
-    ;; FHIR's $subsumes carries `systemA` / `systemB` (the composite has
-    ;; already verified they're equal). Older callers may pass a single
-    ;; `:system`; accept either spelling.
-    (let [system'    (or systemA system)
-          meta       (lookup-entry cache system' (params-version params))
-          {:keys [url version case-sensitive]} meta]
-      (if (nil? meta)
-        (issues/unknown-system-subsumes system')
-        (with-open [conn (jdbc/get-connection ds)]
-          (let [rowA (fetch-concept-row conn url version codeA case-sensitive)
-                rowB (fetch-concept-row conn url version codeB case-sensitive)]
-            (cond
-              (nil? rowA) (issues/unknown-code-subsumes url codeA "codeA")
-              (nil? rowB) (issues/unknown-code-subsumes url codeB "codeB")
-              :else
-              {:outcome
-               (let [actualA (:concept/code rowA)
-                     actualB (:concept/code rowB)]
-                 (cond
-                   (= actualA actualB) "equivalent"
-                   (jdbc/execute-one! conn
-                     ["SELECT 1 FROM concept_ancestor
-                       WHERE cs_url=? AND cs_version=? AND ancestor_code=? AND descendent_code=? LIMIT 1"
-                      url (v version) actualA actualB])
-                   "subsumes"
-                   (jdbc/execute-one! conn
-                     ["SELECT 1 FROM concept_ancestor
-                       WHERE cs_url=? AND cs_version=? AND ancestor_code=? AND descendent_code=? LIMIT 1"
-                      url (v version) actualB actualA])
-                   "subsumed-by"
-                   :else "not-subsumed"))}))))))
-
-  (cs-expand* [_ {:keys [system version filters text active-only max-hits displayLanguage]
-                         :as query}]
-    (let [meta (lookup-entry cache (or system (:url query)) (or version (params-version query)))]
-      (if (nil? meta)
-        {:concepts []}
-        (let [url (:url meta)
-              ver (:version meta)
-              {:keys [sql params post-filters issues]}
-              (search-concepts-sql url ver filters text active-only max-hits (:case-sensitive meta))
-              regex-on-property? (some (fn [{:keys [op property]}]
-                                         (and (= "regex" op)
-                                              (nil? (direct-column property))))
-                                       filters)
-              display-langs (display/parse-display-language displayLanguage)
-              ;; Materialise each result-set row to a plain map so it
-              ;; outlives the cursor step, then push post-filtering and
-              ;; max-hits capping into the transducer so `plan` can stop
-              ;; reading the DB once enough survivors are seen. Without
-              ;; this the DB allocates the full candidate set even when
-              ;; the caller asked for `count=10`.
-              materialise (map (fn [row]
-                                 {:concept/code           (:concept/code row)
-                                  :concept/display        (:concept/display row)
-                                  :concept/definition     (:concept/definition row)
-                                  :concept/inactive       (:concept/inactive row)
-                                  :concept/abstract       (:concept/abstract row)
-                                  :concept/not_selectable (:concept/not_selectable row)
-                                  :concept/status         (:concept/status row)}))
-              ;; SQL applies LIMIT only when no post-filters; otherwise
-              ;; we must cap survivors after filtering, which is what
-              ;; lets `plan` short-circuit.
-              limit-xf (when (and max-hits (seq post-filters))
-                         (take (long max-hits)))]
-          ;; `plan` keeps using `ds` (cursor lives on its own pool
-          ;; check-out); per-row `fetch-properties` and `fetch-designations`
-          ;; share `conn` so we collapse N pool check-outs to one.
-          (with-open [conn (jdbc/get-connection ds)]
-            (let [post-filter-xf (when (seq post-filters)
-                                   (filter (fn [row]
-                                             (let [enriched (cond-> row
-                                                              regex-on-property?
-                                                              (assoc ::row-properties
-                                                                     (fetch-properties conn url ver (:concept/code row))))]
-                                               (every? #(% enriched) post-filters)))))
-                  xform (apply comp (filterv some? [materialise post-filter-xf limit-xf]))
-                  survivors (into [] xform (jdbc/plan ds (into [sql] params)))
-                  concepts (mapv (fn [row]
-                                   (let [desigs (when (seq display-langs)
-                                                  (fetch-designations conn url ver (:concept/code row)))]
-                                     (search-concepts-row->concept url ver display-langs row desigs)))
-                                 survivors)]
-              (cond-> {:concepts concepts}
-                (seq issues) (assoc :issues issues)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; ValueSet catalogue
@@ -972,7 +736,262 @@
     [(str "lower(json_extract(r.metadata,'$." json-key "')) LIKE ? ESCAPE '\\'")
      (like-pattern f)]))
 
-(deftype FtrmValueSetCatalogue [ds]
+
+;; ---------------------------------------------------------------------------
+;; ConceptMap catalogue
+;; ---------------------------------------------------------------------------
+
+
+;; ---------------------------------------------------------------------------
+;; Public constructor
+;; ---------------------------------------------------------------------------
+
+(deftype FtrmProvider [^Closeable ds cs-cache cm-cache identifiers-by-url aliases-by-id]
+  Closeable
+  (close [_] (.close ds))
+
+  protos/CodeSystem
+  (cs-metadata [_ {:keys [url version] :as opts}]
+    ;; Cache is keyed by `[url version]`, so we filter the raw key
+    ;; before allocating a tuple map. URL hot-path: walks the cs-cache
+    ;; doing key compares, allocates a tuple only for the survivor.
+    ;; `:identifiers` carries the OID/URN aliases this CodeSystem ships
+    ;; (when any), so the composite can build its alias index in one
+    ;; pass over cs-metadata.
+    (eduction
+     (filter (fn [[[k-url k-ver] entry]]
+               (and (or (nil? url)     (= url k-url))
+                    (or (nil? version) (= version k-ver))
+                    (search-filter/matches-resource-filters?
+                     (select-keys entry [:status :name :title :description]) opts))))
+     (map (fn [[[k-url k-ver] entry]]
+            (cond-> {:url k-url}
+              (not (str/blank? k-ver))        (assoc :version k-ver)
+              (:content entry)                (assoc :content (:content entry))
+              (some? (:case-sensitive entry)) (assoc :case-sensitive (:case-sensitive entry))
+              (:supplements entry)            (assoc :supplements (:supplements entry))
+              (get identifiers-by-url k-url)  (assoc :identifiers (get identifiers-by-url k-url)))))
+     cs-cache))
+
+  (cs-resource [_ params]
+    (let [meta (lookup-entry cs-cache (get aliases-by-id (:url params)) (params-version params))]
+      (cs-resource-from-meta meta)))
+
+  (cs-lookup [_ {:keys [system code displayLanguage properties] :as params}]
+    (let [meta (lookup-entry cs-cache (get aliases-by-id system) (params-version params))
+          {:keys [url version name case-sensitive]} meta]
+      (if-not meta
+        (issues/unknown-system-lookup system code)
+        (with-open [conn (jdbc/get-connection ds)]
+          (if-let [row (fetch-concept-row conn url version code case-sensitive)]
+            (let [actual-code (:concept/code row)
+                  inactive? (int->bool (:concept/inactive row))
+                  abstract? (int->bool (:concept/abstract row))
+                  {:keys [want? want-typed?]} (property-filter/parse properties)
+                  display-langs (display/parse-display-language displayLanguage)
+                  ;; If the caller asks for designations explicitly we
+                  ;; must return all of them. When designations are only
+                  ;; needed to pick a display for the supplied
+                  ;; `displayLanguage`, restrict the SQL to those
+                  ;; languages — turns a 66-row scan into a 2-3 row
+                  ;; lookup on the same index.
+                  designation-langs (when (and (seq display-langs) (not (want? "designation")))
+                                      (mapv :lang display-langs))
+                  fetch-desigs? (or (want? "designation") (seq display-langs))
+                  designations (when fetch-desigs?
+                                 (fetch-designations conn url version actual-code
+                                                     designation-langs))
+                  parents      (when (want? "parent")
+                                 (fetch-parents conn url version actual-code))
+                  children     (when (want? "child")
+                                 (fetch-children conn url version actual-code))
+                  prop-rows    (when want-typed?
+                                 (fetch-properties conn url version actual-code))
+                  lang-display (when (seq display-langs)
+                                 (display/find-display-for-language designations display-langs))]
+              {:name        name
+               :version     version
+               :display     (or lang-display (:concept/display row))
+               :system      url
+               :code        (keyword actual-code)
+               :definition  (:concept/definition row)
+               :abstract    (boolean abstract?)
+               :properties  (concat
+                              ;; `inactive` is a typed concept property
+                              ;; (http://hl7.org/fhir/concept-properties#inactive),
+                              ;; not a slice — gate by name not by the
+                              ;; slice flag.
+                              (when (want? "inactive")
+                                [{:code :inactive :value (boolean inactive?)}])
+                              (when parents
+                                (mapv (fn [{:keys [code display]}]
+                                        (cond-> {:code :parent :value (keyword code)}
+                                          display (assoc :description display)))
+                                      parents))
+                              (when children
+                                (mapv (fn [{:keys [code display]}]
+                                        (cond-> {:code :child :value (keyword code)}
+                                          display (assoc :description display)))
+                                      children))
+                              (when prop-rows
+                                (keep property->lookup-entry prop-rows)))
+               ;; Designations fetched solely for display selection are
+               ;; consumed by `find-display-for-language` and dropped
+               ;; — only emit them on the wire when the caller asked.
+               :designations (if (want? "designation") (or designations []) [])})
+            (issues/unknown-code-lookup url code))))))
+
+  (cs-validate-code [_ {:keys [system code display displayLanguage] :as params}]
+    (let [meta (lookup-entry cs-cache (get aliases-by-id system) (params-version params))
+          {:keys [url version case-sensitive]} meta]
+      (if (nil? meta)
+        (issues/unknown-system-validate system code)
+        (with-open [conn (jdbc/get-connection ds)]
+          (let [row (fetch-concept-row conn url version code case-sensitive)]
+            (if (nil? row)
+              (not-found-result meta code)
+              (let [actual-code (:concept/code row)
+                    case-differs? (and (false? case-sensitive) (not= code actual-code))
+                    primary-display (:concept/display row)
+                    inactive-row?  (= 1 (:concept/inactive row))
+                    status-row     (:concept/status row)
+                    inactive-status (when (#{"retired" "inactive"} status-row) status-row)
+                    inactive?      (or inactive-row? (some? inactive-status))
+                    display-langs (display/parse-display-language displayLanguage)
+                    ;; Designations are only needed to (a) verify the
+                    ;; supplied display, or (b) pick a language-specific
+                    ;; display. Skip the read entirely otherwise. The
+                    ;; SQL language filter is only applied on the (b)
+                    ;; path; when `display` is set, the unhappy path
+                    ;; passes the full designation set to
+                    ;; `format-display-mismatch` so it can enumerate
+                    ;; alternatives across languages.
+                    need-designations? (or display (seq display-langs))
+                    designation-langs (when (and (seq display-langs) (nil? display))
+                                        (mapv :lang display-langs))
+                    designations (when need-designations?
+                                   (fetch-designations conn url version actual-code
+                                                       designation-langs))
+                    concept {:code actual-code :display primary-display :designations designations}
+                    best-display (or (when (seq display-langs)
+                                       (display/find-display-for-language designations display-langs))
+                                     primary-display)
+                    base (cond-> {:result true
+                                  :display best-display
+                                  :code (keyword code)
+                                  :system url
+                                  :version version}
+                           inactive?     (assoc :inactive true
+                                                :inactive-status (or inactive-status "inactive"))
+                           case-differs? (assoc :normalized-code (keyword actual-code)))
+                    case-issue (when case-differs?
+                                 {:severity     "information"
+                                  :type         "business-rule"
+                                  :details-code "code-rule"
+                                  :text         (issues/format-case-mismatch
+                                                 code actual-code url version)
+                                  :expression   ["Coding.code"]})
+                    display-issue (when (and display (not (display/display-matches? concept display display-langs)))
+                                    {:severity     "error"
+                                     :type         "invalid"
+                                     :details-code "invalid-display"
+                                     :text         (issues/format-display-mismatch
+                                                    display url code primary-display designations
+                                                    displayLanguage
+                                                    (get-in meta [:metadata "language"]))
+                                     :expression   ["Coding.display"]})
+                    issues (filterv some? [case-issue display-issue])]
+                (cond-> base
+                  display-issue (assoc :result false :message (:text display-issue))
+                  (seq issues) (assoc :issues issues)))))))))
+
+  (cs-subsumes [_ {:keys [systemA system codeA codeB] :as params}]
+    ;; FHIR's $subsumes carries `systemA` / `systemB` (the composite has
+    ;; already verified they're equal). Older callers may pass a single
+    ;; `:system`; accept either spelling.
+    (let [system'    (or systemA system)
+          meta       (lookup-entry cs-cache (get aliases-by-id system') (params-version params))
+          {:keys [url version case-sensitive]} meta]
+      (if (nil? meta)
+        (issues/unknown-system-subsumes system')
+        (with-open [conn (jdbc/get-connection ds)]
+          (let [rowA (fetch-concept-row conn url version codeA case-sensitive)
+                rowB (fetch-concept-row conn url version codeB case-sensitive)]
+            (cond
+              (nil? rowA) (issues/unknown-code-subsumes url codeA "codeA")
+              (nil? rowB) (issues/unknown-code-subsumes url codeB "codeB")
+              :else
+              {:outcome
+               (let [actualA (:concept/code rowA)
+                     actualB (:concept/code rowB)]
+                 (cond
+                   (= actualA actualB) "equivalent"
+                   (jdbc/execute-one! conn
+                     ["SELECT 1 FROM concept_ancestor
+                       WHERE cs_url=? AND cs_version=? AND ancestor_code=? AND descendent_code=? LIMIT 1"
+                      url (v version) actualA actualB])
+                   "subsumes"
+                   (jdbc/execute-one! conn
+                     ["SELECT 1 FROM concept_ancestor
+                       WHERE cs_url=? AND cs_version=? AND ancestor_code=? AND descendent_code=? LIMIT 1"
+                      url (v version) actualB actualA])
+                   "subsumed-by"
+                   :else "not-subsumed"))}))))))
+
+  (cs-expand* [_ {:keys [system version filters text active-only max-hits displayLanguage]
+                         :as query}]
+    (let [meta (lookup-entry cs-cache (get aliases-by-id (or system (:url query))) (or version (params-version query)))]
+      (if (nil? meta)
+        {:concepts []}
+        (let [url (:url meta)
+              ver (:version meta)
+              {:keys [sql params post-filters issues]}
+              (search-concepts-sql url ver filters text active-only max-hits (:case-sensitive meta))
+              regex-on-property? (some (fn [{:keys [op property]}]
+                                         (and (= "regex" op)
+                                              (nil? (direct-column property))))
+                                       filters)
+              display-langs (display/parse-display-language displayLanguage)
+              ;; Materialise each result-set row to a plain map so it
+              ;; outlives the cursor step, then push post-filtering and
+              ;; max-hits capping into the transducer so `plan` can stop
+              ;; reading the DB once enough survivors are seen. Without
+              ;; this the DB allocates the full candidate set even when
+              ;; the caller asked for `count=10`.
+              materialise (map (fn [row]
+                                 {:concept/code           (:concept/code row)
+                                  :concept/display        (:concept/display row)
+                                  :concept/definition     (:concept/definition row)
+                                  :concept/inactive       (:concept/inactive row)
+                                  :concept/abstract       (:concept/abstract row)
+                                  :concept/not_selectable (:concept/not_selectable row)
+                                  :concept/status         (:concept/status row)}))
+              ;; SQL applies LIMIT only when no post-filters; otherwise
+              ;; we must cap survivors after filtering, which is what
+              ;; lets `plan` short-circuit.
+              limit-xf (when (and max-hits (seq post-filters))
+                         (take (long max-hits)))]
+          ;; `plan` keeps using `ds` (cursor lives on its own pool
+          ;; check-out); per-row `fetch-properties` and `fetch-designations`
+          ;; share `conn` so we collapse N pool check-outs to one.
+          (with-open [conn (jdbc/get-connection ds)]
+            (let [post-filter-xf (when (seq post-filters)
+                                   (filter (fn [row]
+                                             (let [enriched (cond-> row
+                                                              regex-on-property?
+                                                              (assoc ::row-properties
+                                                                     (fetch-properties conn url ver (:concept/code row))))]
+                                               (every? #(% enriched) post-filters)))))
+                  xform (apply comp (filterv some? [materialise post-filter-xf limit-xf]))
+                  survivors (into [] xform (jdbc/plan ds (into [sql] params)))
+                  concepts (mapv (fn [row]
+                                   (let [desigs (when (seq display-langs)
+                                                  (fetch-designations conn url ver (:concept/code row)))]
+                                     (search-concepts-row->concept url ver display-langs row desigs)))
+                                 survivors)]
+              (cond-> {:concepts concepts}
+                (seq issues) (assoc :issues issues))))))))
+
   protos/ValueSet
   (vs-metadata [_ {:keys [url version status name title description]}]
     (let [string-clauses (cond-> []
@@ -1025,13 +1044,8 @@
   (vs-validate-code [_ svc params]
     (when-let [{:keys [version]} (resolve-vs ds (:url params)
                                              (or (:valueSetVersion params) (params-version params)))]
-      (vs-validate/validate-code svc (load-vs-entry ds (:url params) version) params))))
+      (vs-validate/validate-code svc (load-vs-entry ds (:url params) version) params)))
 
-;; ---------------------------------------------------------------------------
-;; ConceptMap catalogue
-;; ---------------------------------------------------------------------------
-
-(deftype FtrmConceptMapCatalogue [ds cache]
   protos/ConceptMap
   (cm-metadata [_ {:keys [url version]}]
     (eduction
@@ -1044,11 +1058,11 @@
                      :target target-uri}
               (not (str/blank? k-ver)) (assoc :version k-ver)
               (seq pairs)              (assoc :pairs pairs))))
-     cache))
+     cm-cache))
 
   (cm-resource [_ params]
     (let [{:keys [url version name title status source-uri target-uri metadata]}
-          (lookup-entry cache (:url params) (params-version params))
+          (lookup-entry cm-cache (:url params) (params-version params))
           description (get metadata "description")]
       (cond-> {:url url}
         version     (assoc :version version)
@@ -1060,7 +1074,7 @@
         target-uri  (assoc :target-uri target-uri))))
 
   (cm-translate [_ {:keys [code system target] :as params}]
-    (let [entry (lookup-entry cache (:url params) (params-version params))
+    (let [entry (lookup-entry cm-cache (:url params) (params-version params))
           {:keys [url version]} entry
           target-system (when (not= target (:target-uri entry)) target)
           rows (when entry
@@ -1091,33 +1105,38 @@
         {:result true :matches matches}
         {:result false :message "No matches found"}))))
 
-;; ---------------------------------------------------------------------------
-;; Public constructor
-;; ---------------------------------------------------------------------------
+(defn open
+  "Open a FHIR terminology SQLite container and return the
+  `FtrmProvider`. The provider is `Closeable` and satisfies
+  CodeSystem + ValueSet + ConceptMap; resource-type methods return
+  empty results when the container holds no rows of that type.
 
-(defn open-providers
-  "Open a FHIR terminology SQLite container and return:
+  OID/URN/alias resolution rides on the provider's own `cs-metadata`:
+  each CodeSystem entry carries its aliases on `:identifiers`, and
+  the composite indexes those alongside the canonical URL so a
+  request against any alias routes here.
 
-    {:codesystem    ?cs-impl     ; nil when the .db has no CodeSystems
-     :valueset      ?vs-impl
-     :conceptmap    ?cm-impl
-     :naming-system fn            ; (fn [id] -> canonical-url-or-nil)
-     :datasource    ds}
-
-  Each impl is one catalogue that serves every resource of its type
-  in the file. The `:naming-system` fn closes over the datasource and
-  resolves OID/URN aliases to canonical URLs via the `naming_system_id`
-  table. Boot drivers register all four keys with the registry."
+  Logs a per-resource-type tally at boot."
   [path]
-  (let [ds (db/open path)
-        cs-cache (load-codesystem-cache ds)
-        cm-cache (load-conceptmap-cache ds)
-        ;; ValueSets are served straight off the `(url, version)` PK index,
-        ;; not cached — the compose blobs are large (tens of MB) and a
-        ;; given request touches one. Probe once to decide registration.
-        valuesets? (some? (jdbc/execute-one! ds ["SELECT 1 FROM valueset LIMIT 1"]))]
-    {:datasource ds
-     :codesystem (when (seq cs-cache) (->FtrmCodeSystemCatalogue ds cs-cache))
-     :valueset   (when valuesets? (->FtrmValueSetCatalogue ds))
-     :conceptmap (when (seq cm-cache) (->FtrmConceptMapCatalogue ds cm-cache))
-     :naming-system (fn [id] (db/resolve-system ds id))}))
+  (let [ds                 (db/open path)
+        cs-cache           (load-codesystem-cache ds)
+        cm-cache           (load-conceptmap-cache ds)
+        identifiers-by-url (db/identifiers-by-codesystem ds)
+        ;; Substitution table for "any URL the provider answers to ⇒
+        ;; canonical." Seeded with every canonical in `cs-cache` as an
+        ;; identity entry, then alias entries layered on top. A hit
+        ;; means "this is one of mine"; nil means "unknown system."
+        aliases-by-id      (let [canonicals (into #{} (map first) (keys cs-cache))]
+                             (reduce-kv
+                               (fn [acc canonical identifiers]
+                                 (reduce #(assoc %1 %2 canonical) acc identifiers))
+                               (zipmap canonicals canonicals)
+                               identifiers-by-url))
+        by-type            (group-by :resource-type (db/list-resources ds))]
+    (log/info "opened FTRM container"
+              {:source path
+               :codesystems (count (get by-type "CodeSystem" []))
+               :valuesets   (count (get by-type "ValueSet" []))
+               :conceptmaps (count (get by-type "ConceptMap" []))
+               :identifiers (reduce + (map count (vals identifiers-by-url)))})
+    (->FtrmProvider ds cs-cache cm-cache identifiers-by-url aliases-by-id)))

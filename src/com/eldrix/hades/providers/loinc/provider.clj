@@ -21,6 +21,15 @@
 
 (def ^:private loinc-oid "2.16.840.1.113883.6.1")
 
+(def ^:private loinc-systems
+  "Every URL the LoincProvider answers to — the canonical and its OID
+  aliases (bare and urn:oid: form). All other system params get
+  rejected as `unknown-system`."
+  #{loinc-url loinc-oid (str "urn:oid:" loinc-oid)})
+
+(defn- loinc-system? [system]
+  (contains? loinc-systems system))
+
 (def ^:private loinc-vs-prefix "http://loinc.org/vs/")
 
 (def ^:private implicit-loinc-vs-url "http://loinc.org/vs")
@@ -512,145 +521,6 @@
               displayLanguage nil)
        :expression ["Coding.display"]})))
 
-(defrecord LoincCodeSystem [ds version]
-  Closeable
-  (close [_] (store/close! ds))
-
-  protos/CodeSystem
-  (cs-metadata [this {:keys [url version] :as opts}]
-    (when (and (or (nil? url) (= loinc-url url))
-               (or (nil? version) (= (:version this) version))
-               (search-filter/matches-resource-filters?
-                {:name "LOINC" :title "Logical Observation Identifiers Names and Codes"
-                 :status "active"} opts))
-      [(cond-> {:url loinc-url
-                :name "LOINC"
-                :title "Logical Observation Identifiers Names and Codes"
-                :status "active"
-                :content "complete"
-                :case-sensitive false}
-         (:version this) (assoc :version (:version this)))]))
-
-  (cs-resource [this params]
-    (first (protos/cs-metadata this params)))
-
-  (cs-lookup [_ {:keys [system code displayLanguage properties]}]
-    (if (not= loinc-url system)
-      (issues/unknown-system-lookup system code)
-      (with-open [conn (jdbc/get-connection ds)]
-        (let [code' (canonical-code code)]
-          (if-let [row (code-row conn code')]
-            (let [{:keys [want?] :as property-filter} (property-filter/parse properties)
-                  display-langs (display/parse-display-language displayLanguage)
-                  variant-rows (when (or (want? "designation")
-                                         (seq display-langs))
-                                 (fetch-variant-rows conn (:loinc_num row)
-                                                     (when (seq display-langs)
-                                                       (mapv :lang display-langs))))
-                  designations (variant-designations variant-rows)
-                  lang-display (preferred-designation designations display-langs)
-                  parents (when (want? "parent")
-                            (fetch-parents conn (:loinc_num row)))
-                  children (when (want? "child")
-                             (fetch-children conn (:loinc_num row)))
-                  part-by-type (when (:want-typed? property-filter)
-                                 (fetch-primary-parts conn row))
-                  inactive? (= "DEPRECATED" (:status row))]
-              (cond-> {:name "LOINC"
-                       :version version
-                       :display (or lang-display (:long_common_name row))
-                       :system loinc-url
-                       :code (:loinc_num row)
-                       :definition (variant-value row :definition_description)
-                       :abstract false
-                       :properties (vec
-                                    (concat
-                                     (wanted-properties row part-by-type property-filter)
-                                     (when (and inactive? (want? "inactive"))
-                                       [{:code :inactive :value true}])
-                                     (map (fn [{:keys [code display]}]
-                                            {:code :parent
-                                             :value {:system loinc-url
-                                                     :code code
-                                                     :display display}})
-                                          parents)
-                                     (map (fn [{:keys [code display]}]
-                                            {:code :child
-                                             :value {:system loinc-url
-                                                     :code code
-                                                     :display display}})
-                                          children)))
-                       :designations (if (want? "designation")
-                                       designations
-                                       [])}
-                inactive? (assoc :inactive true :inactive-status "inactive")))
-            (if-let [row (answer-code-row conn code')]
-              (answer-lookup-result row version)
-              (if-let [row (part-code-row conn code')]
-                (part-lookup-result row version)
-                (if-let [row (group-code-row conn code')]
-                  (group-lookup-result row version)
-                  (issues/unknown-code-lookup loinc-url code)))))))))
-
-  (cs-validate-code [this {:keys [system code display displayLanguage]}]
-    (if-let [r (protos/cs-lookup this {:system system :code code :displayLanguage displayLanguage
-                                       :properties (when display ["designation"])})]
-      (if (:not-found r)
-        (if (= :unknown-system (:not-found-reason r))
-          (issues/unknown-system-validate system code)
-          {:result false
-           :system system
-           :code code
-           :message (:message r)
-           :issues (:issues r)})
-        (let [display-issue (display-issue loinc-url code r
-                                           {:display display
-                                            :displayLanguage displayLanguage})]
-          (cond-> {:result (nil? display-issue)
-                   :system loinc-url
-                   :code (:code r)
-                   :display (:display r)
-                   :version version}
-            (:inactive r) (assoc :inactive true)
-            (:inactive-status r) (assoc :inactive-status (:inactive-status r))
-            display-issue (assoc :message (:text display-issue)
-                                 :issues [display-issue]))))
-      {:result false :system system :code code}))
-
-  (cs-subsumes [_ {:keys [codeA codeB]}]
-    (with-open [conn (jdbc/get-connection ds)]
-      (let [codeA' (canonical-code codeA)
-            codeB' (canonical-code codeB)]
-        (cond
-          (not (code-exists? conn codeA'))
-          (issues/unknown-code-subsumes loinc-url codeA "codeA")
-          (not (code-exists? conn codeB'))
-          (issues/unknown-code-subsumes loinc-url codeB "codeB")
-          :else
-          {:outcome
-           (cond
-             (= codeA' codeB') "equivalent"
-             (hierarchy-related? conn codeA' codeB' false) "subsumes"
-             (hierarchy-related? conn codeB' codeA' false) "subsumed-by"
-             :else "not-subsumed")}))))
-
-  (cs-expand* [_ {:keys [system text displayLanguage filters active-only max-hits]
-                  requested-version :version}]
-    (if (or (and requested-version (not= version requested-version))
-            (and system (not= loinc-url system)))
-      {:concepts []}
-      (let [display-langs (display/parse-display-language displayLanguage)
-            {:keys [sql params post-filters issues]} (search-sql text display-langs filters active-only max-hits)]
-        (with-open [conn (jdbc/get-connection ds)]
-          (let [rows (cond->> (jdbc/execute! conn (into [sql] params) (row-builder))
-                       (seq post-filters) (filter #(every? (fn [f] (f %)) post-filters)))]
-            (cond-> {:concepts (mapv #(concept-from-row conn display-langs %) rows)}
-              (seq issues) (assoc :issues issues))))))))
-
-(defn- loinc-naming-system [id]
-  (let [id (some-> id str (str/replace #"^urn:oid:" ""))]
-    (when (= loinc-oid id)
-      loinc-url)))
 
 (defn- answer-list-meta-row [ds id]
   (jdbc/execute-one! ds
@@ -799,22 +669,21 @@
                               part part (str part ".%") (str "%." part) (str "%." part ".%")]
                              (row-builder)))))
 
-(defn- hierarchy-concepts [ds part {:keys [offset count displayLanguage activeOnly]}]
+(defn- hierarchy-concepts [conn part {:keys [offset count displayLanguage activeOnly]}]
   (let [display-langs (display/parse-display-language displayLanguage)
         offset (or offset 0)
         limit (or count -1)]
-    (with-open [conn (jdbc/get-connection ds)]
-      (mapv #(concept-from-row conn display-langs %)
-            (jdbc/execute! conn
-                           [(str "SELECT DISTINCT l.*"
-                                 " FROM component_hierarchy_by_system h"
-                                 " JOIN loinc l ON l.loinc_num = h.code"
-                                 " WHERE " (hierarchy-token-clause "h.immediate_parent")
-                                 (when activeOnly " AND l.status <> 'DEPRECATED'")
-                                 " ORDER BY l.loinc_num"
-                                 " LIMIT ? OFFSET ?")
-                            part part (str part ".%") (str "%." part) (str "%." part ".%") limit offset]
-                           (row-builder))))))
+    (mapv #(concept-from-row conn display-langs %)
+          (jdbc/execute! conn
+                         [(str "SELECT DISTINCT l.*"
+                               " FROM component_hierarchy_by_system h"
+                               " JOIN loinc l ON l.loinc_num = h.code"
+                               " WHERE " (hierarchy-token-clause "h.immediate_parent")
+                               (when activeOnly " AND l.status <> 'DEPRECATED'")
+                               " ORDER BY l.loinc_num"
+                               " LIMIT ? OFFSET ?")
+                          part part (str part ".%") (str "%." part) (str "%." part ".%") limit offset]
+                         (row-builder)))))
 
 (defn- loinc-count
   ([ds] (loinc-count ds false))
@@ -863,13 +732,13 @@
       issue (assoc :message (:text issue)
                    :issues [issue]))))
 
-(defn- loinc-code-validation [ds version {:keys [system code] :as params}]
-  (if (not= loinc-url system)
+(defn- loinc-code-validation [provider {:keys [system code] :as params}]
+  (if (not (loinc-system? system))
     {:result false
      :system system
      :code code
      :message (str "CodeSystem '" system "' is not valid for LOINC")}
-    (protos/cs-validate-code (->LoincCodeSystem ds version) params)))
+    (protos/cs-validate-code provider params)))
 
 (defn- code-like [filter-text]
   (when-not (str/blank? filter-text)
@@ -1071,13 +940,12 @@
                    [implicit-loinc-page-sql active-only? active-only? active-only? limit offset]
                    (row-builder))))
 
-(defn- unfiltered-implicit-loinc-concepts [ds {:keys [offset count displayLanguage activeOnly]}]
+(defn- unfiltered-implicit-loinc-concepts [conn {:keys [offset count displayLanguage activeOnly]}]
   (let [display-langs (display/parse-display-language displayLanguage)]
-    (with-open [conn (jdbc/get-connection ds)]
-      (mapv #(implicit-concept-from-row conn display-langs %)
-            (implicit-loinc-page-rows conn {:offset offset
-                                            :count count
-                                            :activeOnly activeOnly})))))
+    (mapv #(implicit-concept-from-row conn display-langs %)
+          (implicit-loinc-page-rows conn {:offset offset
+                                          :count count
+                                          :activeOnly activeOnly}))))
 
 (defn- filtered-concept-rank [filter-text concept]
   (let [needle (some-> filter-text str/lower-case str/trim)
@@ -1088,27 +956,26 @@
       (and display (str/starts-with? display needle)) 1
       :else 2)))
 
-(defn- implicit-loinc-concepts [ds {:keys [filter offset count displayLanguage activeOnly] :as params}]
+(defn- implicit-loinc-concepts [conn {:keys [filter offset count displayLanguage activeOnly] :as params}]
   (if (str/blank? filter)
-    (unfiltered-implicit-loinc-concepts ds params)
+    (unfiltered-implicit-loinc-concepts conn params)
     (let [display-langs (display/parse-display-language displayLanguage)
           lnc-limit (+ (or count 50) (or offset 0))
           {:keys [sql post-filters]
-           sql-params :params} (search-sql filter display-langs nil activeOnly lnc-limit)]
-      (with-open [conn (jdbc/get-connection ds)]
-        (let [rows (cond->> (jdbc/execute! conn (into [sql] sql-params) (row-builder))
-                     (seq post-filters) (filter #(every? (fn [f] (f %)) post-filters)))
-              lnc (mapv #(concept-from-row conn display-langs %) rows)
-              concepts (concat lnc
-                               (answer-code-concepts ds {:filter filter})
-                               (part-code-concepts ds {:filter filter :activeOnly activeOnly})
-                               (group-code-concepts ds {:filter filter :activeOnly activeOnly}))]
-          (->> (sort-by (juxt #(filtered-concept-rank filter %)
-                              #(str (:code %)))
-                        concepts)
-               (drop (or offset 0))
-               (take (or count 50))
-               vec))))))
+           sql-params :params} (search-sql filter display-langs nil activeOnly lnc-limit)
+          rows (cond->> (jdbc/execute! conn (into [sql] sql-params) (row-builder))
+                 (seq post-filters) (filter #(every? (fn [f] (f %)) post-filters)))
+          lnc (mapv #(concept-from-row conn display-langs %) rows)
+          concepts (concat lnc
+                           (answer-code-concepts conn {:filter filter})
+                           (part-code-concepts conn {:filter filter :activeOnly activeOnly})
+                           (group-code-concepts conn {:filter filter :activeOnly activeOnly}))]
+      (->> (sort-by (juxt #(filtered-concept-rank filter %)
+                          #(str (:code %)))
+                    concepts)
+           (drop (or offset 0))
+           (take (or count 50))
+           vec))))
 
 (defn- requested-version [{:keys [version valueSetVersion]}]
   (or valueSetVersion version))
@@ -1122,159 +989,6 @@
   [opts name title status]
   (search-filter/matches-resource-filters? {:name name :title title :status status} opts))
 
-(defrecord LoincValueSet [ds version]
-  protos/ValueSet
-  (vs-metadata [_ {url-q :url version-q :version include-implicit? :include-implicit?
-                   :or {include-implicit? true} :as opts}]
-    (let [tuple    (fn [url] (cond-> {:url url} version (assoc :version version)))
-          implicit (fn [] (when (vs-meta-match? opts "LOINC" "All LOINC codes" "active")
-                            [(tuple implicit-loinc-vs-url)]))
-          answers  (fn [rows] (keep (fn [{:keys [answer_list_id answer_list_name]}]
-                                      (when (vs-meta-match? opts answer_list_name answer_list_name "active")
-                                        (tuple (answer-list-id->url answer_list_id))))
-                                    rows))
-          groups   (fn [rows] (keep (fn [{:keys [group_id group_name status]}]
-                                      (when (vs-meta-match? opts group_name group_name (group-vs-status status))
-                                        (tuple (group-id->url group_id))))
-                                    rows))
-          roots    (fn [rows] (keep (fn [{:keys [code code_text]}]
-                                      (when (vs-meta-match? opts code_text code_text "active")
-                                        (tuple (group-id->url code))))
-                                    rows))]
-      (when (version-matches? version version-q)
-        (cond
-          (implicit-loinc-vs? url-q)
-          (vec (implicit))
-
-          ;; A specific URL is resolved on demand — this is how every LOINC
-          ;; implicit ValueSet (answer list, group, multi-axial part) is
-          ;; routed and expanded. They are never enumerated.
-          url-q
-          (cond
-            (answer-list-id url-q) (vec (answers (answer-list-metadata ds (answer-list-id url-q))))
-            (group-id url-q)       (vec (groups (some-> (group-meta-row ds (group-id url-q)) vector)))
-            (part-id url-q)        (vec (roots (some-> (hierarchy-root-row ds (part-id url-q)) vector)))
-            :else nil)
-
-          ;; Catalogue enumeration. Every LOINC ValueSet is implicit, so the
-          ;; listing carries only the `http://loinc.org/vs` anchor — and only
-          ;; when implicit entries are wanted (the routing index; not browse).
-          include-implicit?
-          (vec (implicit))))))
-
-  (vs-resource [_ {:keys [url] :as params}]
-    (when (version-matches? version (requested-version params))
-      (cond
-        (implicit-loinc-vs? url)
-        (implicit-loinc-resource version)
-
-        (answer-list-id url)
-        (some->> url answer-list-id (answer-list-meta-row ds) (answer-list-resource version))
-
-        (group-id url)
-        (some->> url group-id (group-meta-row ds) (group-resource version))
-
-        (part-id url)
-        (some->> url part-id (hierarchy-root-row ds) (hierarchy-resource version)))))
-
-  (vs-expand [_ _svc {:keys [url filter activeOnly] :as params}]
-    (when (version-matches? version (requested-version params))
-      (cond
-        (implicit-loinc-vs? url)
-        {:url url
-         :version version
-         :total (if (str/blank? filter)
-                  (implicit-loinc-count ds activeOnly)
-                  (filtered-implicit-loinc-count ds params))
-         :concepts (implicit-loinc-concepts ds params)}
-
-        (part-id url)
-        (let [id (part-id url)]
-          (when (hierarchy-root-row ds id)
-            {:url url
-             :version version
-             :total (hierarchy-total ds id activeOnly)
-             :concepts (hierarchy-concepts ds id params)}))
-
-        (group-id url)
-        (let [id (group-id url)]
-          (when (group-meta-row ds id)
-            {:url url
-             :version version
-             :total (group-total ds id activeOnly)
-             :concepts (group-concepts ds id params)}))
-
-        :else
-        (when-let [id (answer-list-id url)]
-          (when (answer-list-meta-row ds id)
-            {:url url
-             :version version
-             :total (answer-list-total ds id filter)
-             :concepts (answer-list-concepts ds id params)})))))
-
-  (vs-validate-code [_ _svc {:keys [url system code] :as params}]
-    (when (version-matches? version (requested-version params))
-      (cond
-        (implicit-loinc-vs? url)
-        (loinc-code-validation ds version params)
-
-        (part-id url)
-        (let [id (part-id url)]
-          (if (not= loinc-url system)
-            {:result false
-             :system system
-             :code code
-             :message (str "CodeSystem '" system "' is not valid for LOINC hierarchy " id)}
-            (let [code' (canonical-code code)
-                  result (hierarchy-related? ds id code' false)]
-              (cond-> {:result result
-                       :system loinc-url
-                       :code code'
-                       :version version}
-                (not result) (assoc :message (str "Code '" code "' is not in LOINC hierarchy " id))))))
-
-        (group-id url)
-        (let [id (group-id url)]
-          (if (not= loinc-url system)
-            {:result false
-             :system system
-             :code code
-             :message (str "CodeSystem '" system "' is not valid for LOINC group " id)}
-            (let [row (jdbc/execute-one! ds
-                                         ["SELECT loinc_number, long_common_name
-                                           FROM group_loinc_term
-                                           WHERE group_id = ?
-                                             AND loinc_number = ?"
-                                          id (canonical-code code)]
-                                         (row-builder))]
-              (if row
-                (validation-result loinc-url (:loinc_number row) {:display (:long_common_name row)}
-                                   version params)
-                {:result false
-                 :system loinc-url
-                 :code code
-                 :message (str "Code '" code "' is not in LOINC group " id)}))))
-
-        :else
-        (when-let [id (answer-list-id url)]
-          (if (not= loinc-url system)
-            {:result false
-             :system system
-             :code code
-             :message (str "CodeSystem '" system "' is not valid for LOINC answer list " id)}
-            (if-let [row (jdbc/execute-one! ds
-                                            ["SELECT answer_string_id, display_text
-                                              FROM answer_list
-                                              WHERE answer_list_id = ?
-                                                AND answer_string_id = ?"
-                                             id (canonical-code code)]
-                                            (row-builder))]
-              (validation-result loinc-url (:answer_string_id row) {:display (:display_text row)}
-                                 version params)
-              {:result false
-               :system loinc-url
-               :code code
-               :message (str "Code '" code "' is not in LOINC answer list " id)})))))))
 
 (def ^:private symmetric-equivalences
   #{"equivalent" "equal" "relatedto" "related-to" "inexact" "unmatched"
@@ -1328,8 +1042,8 @@
 
 (defn- requested-part-related-target [{:keys [url system target]}]
   (or (model/part-related-conceptmap-target url)
-      (when (= loinc-url system) target)
-      (when (= loinc-url target) system)))
+      (when (loinc-system? system) target)
+      (when (loinc-system? target) system)))
 
 (defn- conceptmap-kind [{:keys [url system target] :as params}]
   (let [map-to (model/conceptmap :map-to)
@@ -1519,7 +1233,298 @@
                   :code loinc_number}
            long_common_name (assoc :display long_common_name)))))))
 
-(defrecord LoincConceptMap [ds version]
+
+(defrecord LoincProvider [ds version]
+  Closeable
+  (close [_] (store/close! ds))
+
+  protos/CodeSystem
+  (cs-metadata [this {:keys [url version] :as opts}]
+    (when (and (or (nil? url) (loinc-system? url))
+               (or (nil? version) (= (:version this) version))
+               (search-filter/matches-resource-filters?
+                {:name "LOINC" :title "Logical Observation Identifiers Names and Codes"
+                 :status "active"} opts))
+      [(cond-> {:url loinc-url
+                :name "LOINC"
+                :title "Logical Observation Identifiers Names and Codes"
+                :status "active"
+                :content "complete"
+                :case-sensitive false
+                :identifiers #{loinc-oid (str "urn:oid:" loinc-oid)}}
+         (:version this) (assoc :version (:version this)))]))
+
+  (cs-resource [this params]
+    (first (protos/cs-metadata this params)))
+
+  (cs-lookup [_ {:keys [code displayLanguage properties]}]
+    (with-open [conn (jdbc/get-connection ds)]
+      (let [code' (canonical-code code)]
+        (if-let [row (code-row conn code')]
+            (let [{:keys [want?] :as property-filter} (property-filter/parse properties)
+                  display-langs (display/parse-display-language displayLanguage)
+                  variant-rows (when (or (want? "designation")
+                                         (seq display-langs))
+                                 (fetch-variant-rows conn (:loinc_num row)
+                                                     (when (seq display-langs)
+                                                       (mapv :lang display-langs))))
+                  designations (variant-designations variant-rows)
+                  lang-display (preferred-designation designations display-langs)
+                  parents (when (want? "parent")
+                            (fetch-parents conn (:loinc_num row)))
+                  children (when (want? "child")
+                             (fetch-children conn (:loinc_num row)))
+                  part-by-type (when (:want-typed? property-filter)
+                                 (fetch-primary-parts conn row))
+                  inactive? (= "DEPRECATED" (:status row))]
+              (cond-> {:name "LOINC"
+                       :version version
+                       :display (or lang-display (:long_common_name row))
+                       :system loinc-url
+                       :code (:loinc_num row)
+                       :definition (variant-value row :definition_description)
+                       :abstract false
+                       :properties (vec
+                                    (concat
+                                     (wanted-properties row part-by-type property-filter)
+                                     (when (and inactive? (want? "inactive"))
+                                       [{:code :inactive :value true}])
+                                     (map (fn [{:keys [code display]}]
+                                            {:code :parent
+                                             :value {:system loinc-url
+                                                     :code code
+                                                     :display display}})
+                                          parents)
+                                     (map (fn [{:keys [code display]}]
+                                            {:code :child
+                                             :value {:system loinc-url
+                                                     :code code
+                                                     :display display}})
+                                          children)))
+                       :designations (if (want? "designation")
+                                       designations
+                                       [])}
+                inactive? (assoc :inactive true :inactive-status "inactive")))
+            (if-let [row (answer-code-row conn code')]
+              (answer-lookup-result row version)
+              (if-let [row (part-code-row conn code')]
+                (part-lookup-result row version)
+                (if-let [row (group-code-row conn code')]
+                  (group-lookup-result row version)
+                  (issues/unknown-code-lookup loinc-url code))))))))
+
+  (cs-validate-code [this {:keys [system code display displayLanguage]}]
+    (if-let [r (protos/cs-lookup this {:system system :code code :displayLanguage displayLanguage
+                                       :properties (when display ["designation"])})]
+      (if (:not-found r)
+        (if (= :unknown-system (:not-found-reason r))
+          (issues/unknown-system-validate system code)
+          {:result false
+           :system system
+           :code code
+           :message (:message r)
+           :issues (:issues r)})
+        (let [display-issue (display-issue loinc-url code r
+                                           {:display display
+                                            :displayLanguage displayLanguage})]
+          (cond-> {:result (nil? display-issue)
+                   :system loinc-url
+                   :code (:code r)
+                   :display (:display r)
+                   :version version}
+            (:inactive r) (assoc :inactive true)
+            (:inactive-status r) (assoc :inactive-status (:inactive-status r))
+            display-issue (assoc :message (:text display-issue)
+                                 :issues [display-issue]))))
+      {:result false :system system :code code}))
+
+  (cs-subsumes [_ {:keys [codeA codeB]}]
+    (with-open [conn (jdbc/get-connection ds)]
+      (let [codeA' (canonical-code codeA)
+            codeB' (canonical-code codeB)]
+        (cond
+          (not (code-exists? conn codeA'))
+          (issues/unknown-code-subsumes loinc-url codeA "codeA")
+          (not (code-exists? conn codeB'))
+          (issues/unknown-code-subsumes loinc-url codeB "codeB")
+          :else
+          {:outcome
+           (cond
+             (= codeA' codeB') "equivalent"
+             (hierarchy-related? conn codeA' codeB' false) "subsumes"
+             (hierarchy-related? conn codeB' codeA' false) "subsumed-by"
+             :else "not-subsumed")}))))
+
+  (cs-expand* [_ {:keys [text displayLanguage filters active-only max-hits]
+                  requested-version :version}]
+    (if (and requested-version (not= version requested-version))
+      {:concepts []}
+      (let [display-langs (display/parse-display-language displayLanguage)
+            {:keys [sql params post-filters issues]} (search-sql text display-langs filters active-only max-hits)]
+        (with-open [conn (jdbc/get-connection ds)]
+          (let [rows (cond->> (jdbc/execute! conn (into [sql] params) (row-builder))
+                       (seq post-filters) (filter #(every? (fn [f] (f %)) post-filters)))]
+            (cond-> {:concepts (mapv #(concept-from-row conn display-langs %) rows)}
+              (seq issues) (assoc :issues issues)))))))
+
+  protos/ValueSet
+  (vs-metadata [_ {url-q :url version-q :version include-implicit? :include-implicit?
+                   :or {include-implicit? true} :as opts}]
+    (let [tuple    (fn [url] (cond-> {:url url} version (assoc :version version)))
+          implicit (fn [] (when (vs-meta-match? opts "LOINC" "All LOINC codes" "active")
+                            [(tuple implicit-loinc-vs-url)]))
+          answers  (fn [rows] (keep (fn [{:keys [answer_list_id answer_list_name]}]
+                                      (when (vs-meta-match? opts answer_list_name answer_list_name "active")
+                                        (tuple (answer-list-id->url answer_list_id))))
+                                    rows))
+          groups   (fn [rows] (keep (fn [{:keys [group_id group_name status]}]
+                                      (when (vs-meta-match? opts group_name group_name (group-vs-status status))
+                                        (tuple (group-id->url group_id))))
+                                    rows))
+          roots    (fn [rows] (keep (fn [{:keys [code code_text]}]
+                                      (when (vs-meta-match? opts code_text code_text "active")
+                                        (tuple (group-id->url code))))
+                                    rows))]
+      (when (version-matches? version version-q)
+        (cond
+          (implicit-loinc-vs? url-q)
+          (implicit)
+
+          ;; A specific URL is resolved on demand — this is how every LOINC
+          ;; implicit ValueSet (answer list, group, multi-axial part) is
+          ;; routed and expanded. They are never enumerated.
+          url-q
+          (cond
+            (answer-list-id url-q) (answers (answer-list-metadata ds (answer-list-id url-q)))
+            (group-id url-q)       (groups (some-> (group-meta-row ds (group-id url-q)) vector))
+            (part-id url-q)        (roots (some-> (hierarchy-root-row ds (part-id url-q)) vector))
+            :else nil)
+
+          ;; Catalogue enumeration. Every LOINC ValueSet is implicit, so the
+          ;; listing carries only the `http://loinc.org/vs` anchor — and only
+          ;; when implicit entries are wanted (the routing index; not browse).
+          include-implicit?
+          (implicit)))))
+
+  (vs-resource [_ {:keys [url] :as params}]
+    (when (version-matches? version (requested-version params))
+      (cond
+        (implicit-loinc-vs? url)
+        (implicit-loinc-resource version)
+
+        (answer-list-id url)
+        (some->> url answer-list-id (answer-list-meta-row ds) (answer-list-resource version))
+
+        (group-id url)
+        (some->> url group-id (group-meta-row ds) (group-resource version))
+
+        (part-id url)
+        (some->> url part-id (hierarchy-root-row ds) (hierarchy-resource version)))))
+
+  (vs-expand [_ _svc {:keys [url filter activeOnly] :as params}]
+    (when (version-matches? version (requested-version params))
+      ;; One pooled connection + read transaction for the whole expand: the
+      ;; discovery probe, the total and the concept page share a single
+      ;; check-out and a single SQLite read-lock instead of 2-4 of each.
+      (with-open [conn (jdbc/get-connection ds)]
+        (jdbc/with-transaction [tx conn]
+          (cond
+            (implicit-loinc-vs? url)
+            {:url url
+             :version version
+             :total (if (str/blank? filter)
+                      (implicit-loinc-count tx activeOnly)
+                      (filtered-implicit-loinc-count tx params))
+             :concepts (implicit-loinc-concepts tx params)}
+
+            (part-id url)
+            (let [id (part-id url)]
+              (when (hierarchy-root-row tx id)
+                {:url url
+                 :version version
+                 :total (hierarchy-total tx id activeOnly)
+                 :concepts (hierarchy-concepts tx id params)}))
+
+            (group-id url)
+            (let [id (group-id url)]
+              (when (group-meta-row tx id)
+                {:url url
+                 :version version
+                 :total (group-total tx id activeOnly)
+                 :concepts (group-concepts tx id params)}))
+
+            :else
+            (when-let [id (answer-list-id url)]
+              (when (answer-list-meta-row tx id)
+                {:url url
+                 :version version
+                 :total (answer-list-total tx id filter)
+                 :concepts (answer-list-concepts tx id params)})))))))
+
+  (vs-validate-code [this _svc {:keys [url system code] :as params}]
+    (when (version-matches? version (requested-version params))
+      (cond
+        (implicit-loinc-vs? url)
+        (loinc-code-validation this params)
+
+        (part-id url)
+        (let [id (part-id url)]
+          (if (not (loinc-system? system))
+            {:result false
+             :system system
+             :code code
+             :message (str "CodeSystem '" system "' is not valid for LOINC hierarchy " id)}
+            (let [code' (canonical-code code)
+                  result (hierarchy-related? ds id code' false)]
+              (cond-> {:result result
+                       :system loinc-url
+                       :code code'
+                       :version version}
+                (not result) (assoc :message (str "Code '" code "' is not in LOINC hierarchy " id))))))
+
+        (group-id url)
+        (let [id (group-id url)]
+          (if (not (loinc-system? system))
+            {:result false
+             :system system
+             :code code
+             :message (str "CodeSystem '" system "' is not valid for LOINC group " id)}
+            (let [row (jdbc/execute-one! ds
+                                         ["SELECT loinc_number, long_common_name
+                                           FROM group_loinc_term
+                                           WHERE group_id = ?
+                                             AND loinc_number = ?"
+                                          id (canonical-code code)]
+                                         (row-builder))]
+              (if row
+                (validation-result loinc-url (:loinc_number row) {:display (:long_common_name row)}
+                                   version params)
+                {:result false
+                 :system loinc-url
+                 :code code
+                 :message (str "Code '" code "' is not in LOINC group " id)}))))
+
+        :else
+        (when-let [id (answer-list-id url)]
+          (if (not (loinc-system? system))
+            {:result false
+             :system system
+             :code code
+             :message (str "CodeSystem '" system "' is not valid for LOINC answer list " id)}
+            (if-let [row (jdbc/execute-one! ds
+                                            ["SELECT answer_string_id, display_text
+                                              FROM answer_list
+                                              WHERE answer_list_id = ?
+                                                AND answer_string_id = ?"
+                                             id (canonical-code code)]
+                                            (row-builder))]
+              (validation-result loinc-url (:answer_string_id row) {:display (:display_text row)}
+                                 version params)
+              {:result false
+               :system loinc-url
+               :code code
+               :message (str "Code '" code "' is not in LOINC answer list " id)}))))))
+
   protos/ConceptMap
   (cm-metadata [_ {url-q :url version-q :version}]
     (when (version-matches? version version-q)
@@ -1545,11 +1550,14 @@
         :rsna-rpid (translate-rsna-rpid ds params))
       {:result false :message "Unsupported LOINC ConceptMap request"})))
 
-(defn open-providers [path]
+(defn open
+  "Open a LOINC SQLite container and return the `LoincProvider`. The
+  provider is `Closeable` and satisfies CodeSystem + ValueSet +
+  ConceptMap. The provider's `cs-metadata` returns one entry whose
+  `:identifiers` set carries the LOINC OID aliases (bare and
+  `urn:oid:` form); the composite indexes those alongside the
+  canonical URL so lookups against any of them route here."
+  [path]
   (let [ds (store/open path)
         version (meta-value ds :loinc_version)]
-    {:datasource ds
-     :codesystem (->LoincCodeSystem ds version)
-     :valueset (->LoincValueSet ds version)
-     :conceptmap (->LoincConceptMap ds version)
-     :naming-system loinc-naming-system}))
+    (->LoincProvider ds version)))

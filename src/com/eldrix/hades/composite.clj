@@ -5,23 +5,31 @@
   `open-with`):
 
     :codesystems    {url|version → provider} ; bare URL also keyed when
-                                               single-version
+                                               single-version; OID/URN
+                                               identifiers from each
+                                               CodeSystem's `:identifiers`
+                                               metadata field land here
+                                               too — one URL, one lookup
     :valuesets      {url|version → provider}
     :conceptmaps    [{:impl :description}]   ; multi-axis lookup
-    :naming-systems [resolver-fn ...]        ; OID/URN → canonical
     :cs-providers / :vs-providers            ; unique provider vectors
-    :metadata       {…}                      ; load report
 
   The record satisfies `protos/CodeSystem`, `protos/ValueSet`,
-  `protos/ConceptMap`. Each method dispatches to a child provider by URL
-  / version / NamingSystem alias, then invokes the matching protocol
-  method on the child. Cross-provider concerns — version-override
-  application, supplements check, inactive warnings, status warnings,
-  CodeableConcept aggregation — live on the composite, not on leaves.
+  `protos/ConceptMap`, and `java.io.Closeable`. Each protocol method
+  dispatches to a child provider by URL/version and invokes the
+  matching protocol method on the child — providers accept any URL
+  they registered (canonical or identifier alias) and substitute
+  internally. `.close` walks
+  the distinct providers held by this composite and closes any that are
+  themselves `Closeable` — opening owns closing. Cross-provider concerns
+  — version-override application, supplements check, inactive warnings,
+  status warnings, CodeableConcept aggregation — live on the composite,
+  not on leaves.
 
   `with-overlays` returns a derived composite layered on top of a base.
-  Overlay catalogues take precedence; closers and the load report are
-  inherited from the base only (overlays don't own them)."
+  Overlay catalogues take precedence; the derived composite's `.close`
+  closes only the overlay-introduced providers, never the base — the
+  base owns its own lifecycle."
   (:require [clojure.spec.alpha :as s]
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
@@ -39,40 +47,26 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- lookup-impl
-  "Look up an implementation from an overlay map and a base map.
-  Tries the key as-is, then url|version, then the wildcard url|*, then
-  strips query params."
-  [overlay base key]
-  (or (get overlay key)
-      (get base key)
+  "Look up an implementation in a catalogue map. Tries the key as-is,
+  then the wildcard url|*, then strips query params. Overlays are
+  pre-merged into the catalogue by `with-overlays`, so there is no
+  separate overlay map at lookup time."
+  [base key]
+  (or (get base key)
       (let [[base-url version] (canonical/parse-versioned-uri key)]
         (when version
-          (or (get overlay (canonical/versioned-uri base-url version))
-              (get base (canonical/versioned-uri base-url version))
-              (get overlay (canonical/versioned-uri base-url canonical/wildcard-version))
-              (get base (canonical/versioned-uri base-url canonical/wildcard-version)))))
+          (get base (canonical/versioned-uri base-url canonical/wildcard-version))))
       (when-let [u (canonical/uri-without-query key)]
         (when (not= key u)
-          (or (get overlay u) (get base u))))))
-
-(defn resolve-canonical
-  "Resolve an identifier (OID, URN, URI alias, canonical URL) to a
-  canonical URL via the registered NamingSystem resolvers. Returns the
-  canonical URL when one resolves, or `id` unchanged when no resolver
-  matches. Blank/nil input returns nil."
-  [resolvers id]
-  (when-not (or (nil? id) (and (string? id) (str/blank? id)))
-    (or (some (fn [resolver] (resolver id)) resolvers)
-        id)))
+          (get base u)))))
 
 (defn find-codesystem
-  "Find a CodeSystem provider by URL, with NamingSystem alias fallback.
-  `svc` is the TerminologyService record."
-  [{:keys [codesystems naming-systems]} key]
-  (or (lookup-impl nil codesystems key)
-      (let [resolved (resolve-canonical naming-systems key)]
-        (when (and resolved (not= resolved key))
-          (lookup-impl nil codesystems resolved)))))
+  "Find a CodeSystem provider by URL. The URL index holds both
+  canonical and identifier URLs for every CodeSystem, so a lookup
+  against any of them succeeds in one step. `svc` is the
+  TerminologyService record."
+  [{:keys [codesystems]} key]
+  (lookup-impl codesystems key))
 
 (defn- dynamic-valueset
   [valueset-providers key]
@@ -83,17 +77,13 @@
           valueset-providers)))
 
 (defn find-valueset
-  [{:keys [valuesets vs-providers naming-systems]} key]
+  [{:keys [valuesets vs-providers]} key]
   ;; `valuesets` can contain one entry per canonical ValueSet URL, while a
   ;; catalogue provider such as FTRM can serve hundreds of thousands of URLs.
   ;; Dynamic fallback must therefore scan providers, not valueset-map values.
   (let [dynamic-providers (or vs-providers (distinct (vals valuesets)))]
-    (or (lookup-impl nil valuesets key)
-        (dynamic-valueset dynamic-providers key)
-        (let [resolved (resolve-canonical naming-systems key)]
-          (when (and resolved (not= resolved key))
-            (or (lookup-impl nil valuesets resolved)
-                (dynamic-valueset dynamic-providers resolved)))))))
+    (or (lookup-impl valuesets key)
+        (dynamic-valueset dynamic-providers key))))
 
 (defn available-versions
   "List all registered versions for a system URL."
@@ -137,10 +127,10 @@
 
 (defn- candidate-cm-entries
   [conceptmaps request]
-  (vec (distinct
-         (for [{:keys [impl description]} conceptmaps
-               :when (matches-cm-request? description request)]
-           {:impl impl :description description}))))
+  (distinct
+    (for [{:keys [impl description]} conceptmaps
+          :when (matches-cm-request? description request)]
+           {:impl impl :description description})))
 
 (defn- candidate-cm-impls
   [conceptmaps request]
@@ -198,18 +188,18 @@
   serving provider and asks it directly. Use this in cross-cutting
   helpers instead of calling `find-codesystem` + `protos/cs-resource`
   separately."
-  [{:keys [naming-systems] :as svc} system]
+  [svc system]
   (when-let [cs (find-codesystem svc system)]
-    (let [[url version] (canonical/parse-versioned-uri (or (resolve-canonical naming-systems system) system))]
+    (let [[url version] (canonical/parse-versioned-uri system)]
       (protos/cs-resource cs (cond-> {:url url :system url}
                                version (assoc :version version))))))
 
 (defn vs-meta
   "Return the `vs-resource` map for `url` (optionally with `|version`),
   or nil if no provider serves it. Asks the serving provider directly."
-  [{:keys [naming-systems] :as svc} url]
+  [svc url]
   (when-let [vs (find-valueset svc url)]
-    (let [[u version] (canonical/parse-versioned-uri (or (resolve-canonical naming-systems url) url))]
+    (let [[u version] (canonical/parse-versioned-uri url)]
       (protos/vs-resource vs (cond-> {:url u}
                                version (assoc :version version))))))
 
@@ -235,7 +225,7 @@
                           :details-code "status-check"
                           :text (str "Reference to experimental CodeSystem " cs-ref)}))]
       (if (seq issues)
-        (update result :issues (fn [existing] (vec (concat issues (or existing [])))))
+        (update result :issues (fn [existing] (into issues existing)))
         result))
     result))
 
@@ -255,7 +245,7 @@
                           :details-code "status-check"
                           :text (str "Reference to draft ValueSet " vs-ref)}))]
       (if (seq issues)
-        (update result :issues (fn [existing] (vec (concat (or existing []) issues))))
+        (update result :issues (fn [existing] (into (vec existing) issues)))
         result))
     result))
 
@@ -329,46 +319,44 @@
 ;; Type is intentionally not part of the public namespace. External
 ;; callers treat the handle as opaque and use functions in
 ;; `com.eldrix.hades.core` (or, where they truly want to extend the
-;; service, the protocols in `impl/protocols`). The record satisfies
+;; service, the protocols in `com.eldrix.hades.protocols`). The record satisfies
 ;; the three protocols itself, so the composite is substitutable for
 ;; any single provider.
 ;; ---------------------------------------------------------------------------
 
-(defn- run-closers [closers]
-  (run! (fn [f]
-          (try (f) (catch Exception _ nil)))
-        closers))
+(defn- close-provider!
+  "Close `p` if it is `Closeable`; swallow close-time exceptions."
+  [p]
+  (when (instance? java.io.Closeable p)
+    (try (.close ^java.io.Closeable p) (catch Exception _ nil))))
 
 (defrecord TerminologyService
-  [codesystems valuesets conceptmaps naming-systems
+  [codesystems valuesets conceptmaps
    cs-providers vs-providers
-   metadata closers]
+   owned-providers]
 
   java.io.Closeable
-  (close [_] (run-closers closers))
+  (close [_] (run! close-provider! (reverse owned-providers)))
 
   protos/CodeSystem
   (cs-metadata [_ opts]
     (eduction (mapcat #(protos/cs-metadata % opts)) cs-providers))
 
   (cs-resource [this {:keys [system version] :as params}]
-    (let [canonical (resolve-canonical naming-systems system)
-          key (canonical/versioned-uri canonical version)]
-      (when-let [cs (find-codesystem this key)]
-        (protos/cs-resource cs (assoc params :system canonical)))))
+    (let [lookup-key (canonical/versioned-uri system version)]
+      (when-let [cs (find-codesystem this lookup-key)]
+        (protos/cs-resource cs params))))
 
   (cs-lookup [this {:keys [system code version] :as params}]
-    (let [canonical (resolve-canonical naming-systems system)
-          lookup-key (canonical/versioned-uri canonical version)]
+    (let [lookup-key (canonical/versioned-uri system version)]
       (if-let [cs (find-codesystem this lookup-key)]
-        (protos/cs-lookup cs (assoc params :system canonical))
+        (protos/cs-lookup cs params)
         (issues/unknown-system-lookup system code))))
 
   (cs-validate-code [this {:keys [system code version] :as params}]
-    (let [canonical (resolve-canonical naming-systems system)
-          lookup-key (canonical/versioned-uri canonical version)]
+    (let [lookup-key (canonical/versioned-uri system version)]
       (if-let [cs (find-codesystem this lookup-key)]
-        (-> (protos/cs-validate-code cs (assoc params :system canonical))
+        (-> (protos/cs-validate-code cs params)
             (issues/add-inactive-warning))
         (issues/unknown-system-validate system code))))
 
@@ -484,7 +472,9 @@
     version (assoc :version version)))
 
 (defn- compare-by-url-version
-  "Sort comparator: alphabetic on URL, then `semver-compare` on version."
+  "Sort comparator: alphabetic on URL, then `semver-compare` on version.
+  The URL compare short-circuits, so versions are only parsed for the
+  rare same-URL ties."
   [a b]
   (let [c (compare (:url a) (:url b))]
     (if (zero? c)
@@ -538,20 +528,20 @@
   [providers metadata-fn resource-fn {:keys [_count _offset _summary] :as params}]
   (let [filters (dissoc params :_count :_offset :_summary)
         opts    (into {:include-implicit? false} filters)
-        sorted  (->> (pair-seq providers metadata-fn opts)
+        deduped (->> (pair-seq providers metadata-fn opts)
                      (reduce (fn [m [_ t :as pair]]
                                (let [k [(:url t) (:version t)]]
                                  (cond-> m (not (contains? m k)) (assoc k pair))))
                              {})
-                     vals
-                     (sort compare-pair-by-url-version))
-        resources (if (= "count" _summary)
-                    []
+                     vals)
+        ;; `_summary=count` needs only the total, so skip the sort entirely.
+        resources (when-not (= "count" _summary)
                     (into [] (comp (keep (fn [[p t]] (resource-fn p (key->params t))))
                                    (map #(summarise-resource params %)))
-                          (page-of _count (or _offset 0) sorted)))]
+                          (page-of _count (or _offset 0)
+                                   (sort compare-pair-by-url-version deduped))))]
     (s/assert ::result/search-result
-              {:total (count sorted) :resources resources})))
+              {:total (count deduped) :resources (or resources [])})))
 
 (defn search-code-systems
   "Search registered CodeSystem resources. `params` is a
@@ -677,11 +667,19 @@
   [url version]
   (str url "|" (or version "")))
 
-(defn- collect-cs-entries [providers]
+(defn- collect-cs-entries
+  "Walk every CodeSystem provider's cs-metadata and produce one entry
+  per URL it serves. A CodeSystem with `:identifiers` (OIDs, URNs,
+  legacy URIs) emits one entry per identifier in addition to its
+  canonical URL — all pointing to the same provider — so the URL
+  index resolves any of them in one lookup. Providers accept any URL
+  they registered and substitute internally."
+  [providers]
   (for [p providers
         :when (satisfies? protos/CodeSystem p)
-        m (protos/cs-metadata p {})]
-    {:provider p :url (:url m) :version (:version m)
+        m (protos/cs-metadata p {})
+        url (cons (:url m) (:identifiers m))]
+    {:provider p :url url :version (:version m)
      :content (:content m) :supplements (:supplements m)}))
 
 (defn- collect-vs-entries [providers]
@@ -847,17 +845,35 @@
                             entries)))]
     (merge by-url-ver wildcard-bindings bare-bindings)))
 
+(defn- supplement-specs
+  "Derive `supplement/resolve-supplements` input from CodeSystem entries
+  whose provider is a `content=\"supplement\"` CodeSystem able to yield
+  its augmentation table. One spec per supplement provider."
+  [cs-entries]
+  (->> cs-entries
+       (filter (fn [{:keys [content supplements provider]}]
+                 (and (= "supplement" content)
+                      supplements
+                      (satisfies? supplement/SupplementSource provider))))
+       (group-by :provider)
+       vals
+       (map (fn [entries]
+              (let [{:keys [provider supplements]} (first entries)]
+                {:meta   {:supplements-target supplements}
+                 :lookup (supplement/supplement-lookup-table provider)})))))
+
 (defn from-providers
   "Build a TerminologyService from a sequence of provider impls.
   Each provider must satisfy at least one of CodeSystem, ValueSet,
   ConceptMap. Catalogues are populated from `*-metadata` calls.
 
+  A `content=\"supplement\"` CodeSystem among `providers` is detected
+  here (via `supplement/SupplementSource`) and its augmentation table is
+  wired onto the base it supplements, replacing that base with a
+  `SupplementedCodeSystem` wrapper. Bases are looked up in `providers`
+  first, then via `:lookup-fallback`.
+
   Options:
-    :naming-systems — vector of resolver fns `(fn [id] → canonical-or-nil)`
-    :supplements    — vector of `{:meta :lookup}` maps from the indexer.
-                      Each wraps the matching base provider with a
-                      SupplementedCodeSystem. Bases are looked up in the
-                      providers list first, then via `:lookup-fallback`.
     :lookup-fallback — fn `(fn [key] → impl-or-nil)` consulted when a
                        supplement's base isn't in `providers`. Used during
                        layered boot (e.g. supplement loaded after a Hermes
@@ -866,12 +882,16 @@
                       specific version. Required when two or more
                       providers serve the same canonical and the
                       semver-latest is ambiguous.
-    :metadata       — load report attached to the service.
-    :closers        — extra close fns. Providers that satisfy Closeable
-                      are auto-closed; explicit closers extend that."
+
+  The service owns the providers passed in: `.close` closes every one
+  that is `Closeable`, in reverse registration order.
+
+  Aliases (OIDs/URNs/legacy URIs) ride on each CodeSystem's
+  `:identifiers` metadata field — the composite indexes them here so a
+  lookup against any identifier substitutes the canonical URL before
+  dispatching to the provider."
   ([providers] (from-providers providers {}))
-  ([providers {:keys [naming-systems supplements lookup-fallback defaults
-                      metadata closers]}]
+  ([providers {:keys [lookup-fallback defaults]}]
    (let [defaults   (or defaults {})
          cs-entries (collect-cs-entries providers)
          vs-entries (collect-vs-entries providers)
@@ -900,58 +920,50 @@
                                     (index-by-key cs-as-vs-entries defaults :CodeSystem))
                  :conceptmaps (mapv (fn [e] {:impl (:provider e)
                                              :description (:description e)})
-                                    cm-entries)
-                 :naming-systems (or naming-systems [])}
-           ;; Resolve supplements: replace each base impl with a
-           ;; SupplementedCodeSystem wrapper.
+                                    cm-entries)}
+           ;; Detect content="supplement" providers and wrap the bases
+           ;; they supplement with a SupplementedCodeSystem.
+           supps (supplement-specs cs-entries)
            with-supps
-           (if (seq supplements)
+           (if (seq supps)
              (let [resolved (supplement/resolve-supplements
                               (select-keys base [:codesystems :valuesets])
-                              supplements
+                              supps
                               lookup-fallback)]
                (assoc base
                       :codesystems (:codesystems resolved)
                       :valuesets (:valuesets resolved)))
              base)
-           auto-closers (sequence
-                          (comp (filter #(instance? java.io.Closeable %))
-                                (map (fn [p] #(.close ^java.io.Closeable p))))
-                          (reverse providers))
-           all-closers (concat auto-closers closers)
            cs-providers (distinct (vals (:codesystems with-supps)))
            vs-providers (distinct (vals (:valuesets with-supps)))]
        (->TerminologyService
          (:codesystems with-supps)
          (:valuesets with-supps)
          (:conceptmaps with-supps)
-         (:naming-systems with-supps)
          cs-providers
          vs-providers
-         (or metadata {})
-         all-closers)))))
+         (distinct providers))))))
 
 (defn with-overlays
   "Return a derived TerminologyService layering `providers` on top of
   `base`. Overlay entries take precedence on exact-key match. Used
-  per-request for `tx-resource` parameters."
-  ([base providers] (with-overlays base providers nil))
-  ([base providers {:keys [supplements naming-systems]}]
-   (let [overlay (from-providers providers
-                                  (cond-> {:lookup-fallback #(find-codesystem base %)}
-                                    (seq supplements) (assoc :supplements supplements)
-                                    (seq naming-systems) (assoc :naming-systems naming-systems)))
-         codesystems (merge (:codesystems base) (:codesystems overlay))
-         valuesets (merge (:valuesets base) (:valuesets overlay))]
-     ;; Overlay-first ordering for `:conceptmaps` and `:naming-systems`:
-     ;; `candidate-cm-impls` and `resolve-canonical` both walk in order
-     ;; and pick the first match, so overlay entries shadow base entries.
-     (->TerminologyService
-       codesystems
-       valuesets
-       (into (vec (:conceptmaps overlay))    (:conceptmaps base))
-       (into (vec (:naming-systems overlay)) (:naming-systems base))
-       (distinct (concat (:cs-providers overlay) (:cs-providers base)))
-       (distinct (concat (:vs-providers overlay) (:vs-providers base)))
-       (:metadata base)
-       nil))))
+  per-request for `tx-resource` parameters. A `content=\"supplement\"`
+  overlay provider is detected by `from-providers` and wired onto its
+  base (in the overlay or, via `lookup-fallback`, in `base`)."
+  [base providers]
+  (let [overlay (from-providers providers {:lookup-fallback #(find-codesystem base %)})
+        codesystems (merge (:codesystems base) (:codesystems overlay))
+        valuesets (merge (:valuesets base) (:valuesets overlay))]
+    ;; Overlay-first ordering for `:conceptmaps`: `candidate-cm-impls`
+    ;; walks in order and picks the first match, so overlay entries
+    ;; shadow base entries.
+    (->TerminologyService
+      codesystems
+      valuesets
+      (into (:conceptmaps overlay) (:conceptmaps base))
+      (distinct (concat (:cs-providers overlay) (:cs-providers base)))
+      (distinct (concat (:vs-providers overlay) (:vs-providers base)))
+      ;; A derived view owns no providers: the base owns its own and the
+      ;; request-scoped overlay providers are released by GC. Closing the
+      ;; view must not close the base.
+      nil)))

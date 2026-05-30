@@ -227,14 +227,12 @@
     (when (seq cm) (println "\nConceptMaps:") (pp/print-table cm))))
 
 (defn- list-fhir-tx-db [path]
-  (let [ds (ftrm-db/open path)]
-    (try
-      (let [resources (ftrm-db/list-resources ds)]
-        (println (str "\n=== FHIR terminology container " path " ==="))
-        (println (str "  Resources: " (count resources)))
-        (pp/print-table (map #(select-keys % [:resource-type :url :version :concept-count])
-                             resources)))
-      (finally (ftrm-db/close! ds)))))
+  (with-open [ds (ftrm-db/open path)]
+    (let [resources (ftrm-db/list-resources ds)]
+      (println (str "\n=== FHIR terminology container " path " ==="))
+      (println (str "  Resources: " (count resources)))
+      (pp/print-table (map #(select-keys % [:resource-type :url :version :concept-count])
+                           resources)))))
 
 (defn- list-hermes-db [path]
   (let [st (hermes/status path {:counts? true :log? false})]

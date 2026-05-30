@@ -54,7 +54,7 @@
       (let [p-parts (str/split pattern #"\.")
             c-parts (str/split concrete #"\.")
             p-padded (if (< (count p-parts) (count c-parts))
-                       (into (vec p-parts) (repeat (- (count c-parts) (count p-parts)) "x"))
+                       (into p-parts (repeat (- (count c-parts) (count p-parts)) "x"))
                        p-parts)]
         (and (= (count p-padded) (count c-parts))
              (every? true? (map (fn [p c] (or (= "x" p) (= p c)))

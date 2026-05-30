@@ -151,15 +151,14 @@
     :else       (try (Integer/parseInt (str s)) (catch Exception _ nil))))
 
 (defn- build-overlay-providers
-  "Build provider impls and supplement entries from a seq of FHIR JSON
-  resource maps (string-keyed). Returns `{:providers :supplements}`."
+  "Build provider impls from a seq of FHIR JSON resource maps
+  (string-keyed). A `content=\"supplement\"` resource is returned as an
+  ordinary provider; `with-overlays`/`from-providers` detect and wire
+  it. Returns a seq of provider impls."
   [resource-maps]
   (when (seq resource-maps)
-    (let [fhir-data (loaders/resources->fhir-data resource-maps :tx-resource)
-          {:keys [providers supplements]}
-          (load-fhir/build-from-fhir-data fhir-data)]
-      {:providers   providers
-       :supplements supplements})))
+    (:providers (load-fhir/build-from-fhir-data
+                  (loaders/resources->fhir-data resource-maps :tx-resource)))))
 
 (defn- supplements-missing-response
   "If any required supplement canonical is unresolved, return a 404
@@ -359,17 +358,14 @@
   {:name  ::tx-overlay
    :enter (fn [{:keys [request] :as context}]
             (let [fhir-params  (::fhir-params request)
-                  tx-built     (build-overlay-providers
+                  tx-providers (build-overlay-providers
                                 (fhir-param-resources fhir-params "tx-resource"))
                   inline       (inline-valueset-overlay fhir-params)
-                  providers    (into (vec (:providers tx-built))
-                                     (:providers inline))
-                  supplements  (:supplements tx-built)]
+                  providers    (into (vec tx-providers) (:providers inline))]
               (cond-> context
                 (seq providers)
                 (update-in [:request ::svc]
-                           #(hades/with-overlays % providers
-                              (cond-> {} supplements (assoc :supplements supplements))))
+                           #(hades/with-overlays % providers))
 
                 (:overlay-url inline)
                 (assoc-in [:request ::overlay-url] (:overlay-url inline)))))})
@@ -546,14 +542,11 @@
                             value-set-version (assoc :valueSetVersion value-set-version)
                             display-lang      (assoc :displayLanguage display-lang))
                           (merge-flags flags))
-              result  (cond
-                        codings
+              result  (if codings
                         (-> (hades/validate-codeable-concept svc
                                                              (cc-codings cc (fhir-param fhir-params "systemVersion"))
                                                              base)
                             (assoc :codeableConcept cc))
-
-                        :else
                         (let [system  (or (fhir-param fhir-params "system")
                                           (when coding? (get coding "system")))
                               code    (or (fhir-param fhir-params "code")

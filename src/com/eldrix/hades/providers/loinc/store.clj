@@ -145,14 +145,12 @@
 
 (defn- apply-column-transforms
   [columns column-transforms row]
-  (if (seq column-transforms)
-    (reduce-kv (fn [row column f]
-                 (if-let [idx (first (keep-indexed #(when (= column %2) %1) columns))]
-                   (update row idx f)
-                   row))
-               (vec row)
-               column-transforms)
-    (vec row)))
+  (reduce-kv (fn [row column f]
+               (if-let [idx (first (keep-indexed #(when (= column %2) %1) columns))]
+                 (update row idx f)
+                 row))
+             row
+             column-transforms))
 
 (defn- block->table
   [{:keys [headings data] :as block} {:keys [column-transforms table-transform]}]

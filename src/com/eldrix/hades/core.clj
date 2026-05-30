@@ -3,8 +3,8 @@
 
   A Hades service is an opaque handle returned by `open`. It carries
   every CodeSystem, ValueSet and ConceptMap provider the service
-  knows about, plus the cross-provider logic (NamingSystem alias
-  resolution, version dispatch, supplements check, status warnings,
+  knows about, plus the cross-provider logic (identifier-based URL
+  dispatch, version resolution, supplements check, status warnings,
   CodeableConcept aggregation) needed to behave like a single FHIR
   terminology service.
 
@@ -45,8 +45,9 @@
 
 ;; clojure.spec lookups go through the keyword's namespace; we re-name
 ;; the keywords here so callers can `(s/valid? ::core/lookup-result …)`
-;; without reaching into impl. The spec definitions live in
-;; `impl/protocols/result`; these forms create same-spec aliases.
+;; without reaching into the protocol-specs namespace. The spec
+;; definitions live in `protocols.result`; these forms create
+;; same-spec aliases.
 (s/def ::lookup-result      ::result/lookup)
 (s/def ::validate-result    ::result/validate)
 (s/def ::expansion-result   ::result/expansion)
@@ -72,16 +73,17 @@
   construction lives in `impl` namespaces.
 
   Options (second arity):
-    :supplements    — vector of `{:meta :lookup}` supplement entries
-    :naming-systems — vector of resolver fns for OID/URN aliases
     :defaults       — map of bare canonical URL to version for disambiguation
     :default-locale — fallback BCP 47 locale forwarded to `hermes/open`
-    :metadata       — load report (returned by `metadata`)
-    :closers        — extra close fns
+
+  OID/URN aliases ride on each CodeSystem provider's `:identifiers`
+  metadata — they're indexed alongside canonical URLs at composite
+  construction, so a lookup against any alias routes to the provider
+  natively. No separate alias registration.
 
   Returns an opaque, `Closeable` handle. Closing releases every
-  provider that implements `java.io.Closeable` in reverse order
-  plus any extra `:closers`. Subsequent closes are no-ops."
+  provider that implements `java.io.Closeable` in reverse order.
+  Subsequent closes are no-ops."
   ([paths] (paths/open-paths paths))
   ([paths opts] (paths/open-paths paths opts)))
 
@@ -96,10 +98,7 @@
   ConceptMap registered, composed live from each provider's
   `*-metadata`, plus totals. Entries are deduplicated and ordered by
   `url|version`: a resource served by more than one provider appears
-  once. `:totals` therefore counts the distinct served catalogue. Any
-  `:metadata` map passed at open time (e.g. a loader's skipped-entry
-  report) is merged in beneath the composed catalogue — live keys win
-  on conflict."
+  once. `:totals` therefore counts the distinct served catalogue."
   [svc]
   (let [distinct-by (fn [ms] (->> ms (sort-by (juxt :url :version))
                                   (partition-by (juxt :url :version))
@@ -107,13 +106,12 @@
         css (distinct-by (protos/cs-metadata svc {}))
         vss (distinct-by (protos/vs-metadata svc {}))
         cms (distinct-by (protos/cm-metadata svc {}))]
-    (merge (:metadata svc)
-           {:codesystems css
-            :valuesets   vss
-            :conceptmaps cms
-            :totals      {:codesystems (count css)
-                          :valuesets   (count vss)
-                          :conceptmaps (count cms)}})))
+    {:codesystems css
+     :valuesets   vss
+     :conceptmaps cms
+     :totals      {:codesystems (count css)
+                   :valuesets   (count vss)
+                   :conceptmaps (count cms)}}))
 
 (defn with-overlays
   "Return a derived service layering the given providers on top of
@@ -121,9 +119,9 @@
   it covers; overlays win on exact-key match. The derived handle is
   a view — closing the base releases resources, closing the view
   does nothing. Used by the HTTP layer to scope FHIR `tx-resource`
-  parameters to a single request."
-  ([svc providers] (composite/with-overlays svc providers))
-  ([svc providers opts] (composite/with-overlays svc providers opts)))
+  parameters to a single request. A `content=\"supplement\"` overlay
+  provider is detected and wired onto its base automatically."
+  [svc providers] (composite/with-overlays svc providers))
 
 ;; ---------------------------------------------------------------------------
 ;; Operations — convenience wrappers delegating to the protocols.

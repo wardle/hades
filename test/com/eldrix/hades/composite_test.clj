@@ -80,9 +80,8 @@
   (mapcat #(loaders/resource->fhir-data % "<test>") resource-maps))
 
 (defn- svc-of [resource-maps]
-  (let [{:keys [providers supplements]} (load-fhir/build-from-fhir-data
-                                          (fhir-data resource-maps))]
-    (composite/from-providers providers {:supplements supplements})))
+  (composite/from-providers
+    (:providers (load-fhir/build-from-fhir-data (fhir-data resource-maps)))))
 
 ;; ---------------------------------------------------------------------------
 ;; cs-meta / vs-meta resource resolution
@@ -116,11 +115,11 @@
 
 (defn- multi-cs-provider
   "Mock provider that serves multiple CodeSystems through one impl —
-  mirrors `FtrmCodeSystemCatalogue/cs-resource` (ftrm/provider.clj),
-  which dispatches on `(:url params)`. Returns nil from `cs-resource`
-  unless the call carries a `:url` matching one of the configured
-  entries. Empty params → nil, which is exactly the failure mode the
-  bug-fixed cache build now avoids."
+  mirrors `FtrmProvider/cs-resource` (ftrm/provider.clj), which
+  dispatches on `(:url params)`. Returns nil from `cs-resource` unless
+  the call carries a `:url` matching one of the configured entries.
+  Empty params → nil, which is exactly the failure mode the bug-fixed
+  cache build now avoids."
   [entries]
   (let [by-url (into {} (map (juxt :url identity)) entries)]
     (reify protos/CodeSystem
@@ -139,7 +138,7 @@
 
 (defn- multi-vs-provider
   "Mock provider that serves multiple ValueSets through one impl —
-  mirrors `FtrmValueSetCatalogue/vs-resource`."
+  mirrors `FtrmProvider/vs-resource`."
   [entries]
   (let [by-url (into {} (map (juxt :url identity)) entries)]
     (reify protos/ValueSet
@@ -198,12 +197,21 @@
       (is (nil? (composite/find-valueset svc "http://x/vs/missing")))
       (is (= 1 @calls)))))
 
-(deftest cs-meta-honours-naming-system-aliases-test
-  (let [resolver (fn [id]
-                   (when (= id "urn:oid:1.2.3") "http://example.com/r/cs"))
-        {:keys [providers]} (load-fhir/build-from-fhir-data (fhir-data [cs-v1]))
-        svc (composite/from-providers providers {:naming-systems [resolver]})]
-    (testing "alias resolves to the aliased CodeSystem's metadata"
+(deftest cs-meta-honours-cs-identifier-aliases-test
+  ;; A CodeSystem's `:identifiers` (OIDs, URNs) ride on its cs-metadata
+  ;; entry; the composite indexes them alongside the canonical URL, so a
+  ;; lookup against any identifier resolves the same resource as the
+  ;; canonical.
+  (let [canonical   "http://example.com/r/cs"
+        identifiers  #{"urn:oid:1.2.3"}
+        provider (reify protos/CodeSystem
+                   (cs-metadata [_ _]
+                     [{:url canonical :version "1.0" :identifiers identifiers}])
+                   (cs-resource [_ {:keys [url]}]
+                     (when (or (= canonical url) (identifiers url))
+                       {:url canonical :version "1.0" :status "active"})))
+        svc (composite/from-providers [provider])]
+    (testing "alias routes to the canonical resource"
       (is (= "1.0" (:version (composite/cs-meta svc "urn:oid:1.2.3")))))
     (testing "unknown alias returns nil"
       (is (nil? (composite/cs-meta svc "urn:oid:9.9.9"))))))

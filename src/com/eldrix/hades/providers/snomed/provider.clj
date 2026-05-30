@@ -15,7 +15,7 @@
             [com.eldrix.hermes.snomed :as snomed]
             [lambdaisland.uri :as uri])
   (:import (com.eldrix.hermes.snomed Description)
-           (java.io File)
+           (java.io Closeable File)
            (java.time.format DateTimeFormatter)
            (org.apache.lucene.search Query)))
 
@@ -248,7 +248,7 @@
           issues  (filter map? parts)
           queries (filter #(instance? Query %) parts)]
       (if (seq issues)
-        {:issues (vec issues)}
+        {:issues issues}
         {:query (cond
                   (empty? queries)      (hermes.search/q-any)
                   (= 1 (count queries)) (first queries)
@@ -434,8 +434,8 @@
       (historical-refset->equivalence refset-id)
       {:refset-id refset-id :direction :forward :kind :historical}
 
-      (external-refset->entry refset-id)
-      (let [{ext-target :target} (external-refset->entry refset-id)]
+      :else
+      (when-let [{ext-target :target} (external-refset->entry refset-id)]
         {:refset-id refset-id
          :direction (if reverse? :reverse :forward)
          :kind      :external
@@ -483,12 +483,12 @@
   return the external codes it maps to via the map refset."
   [svc refset-id code-id target-system equivalence]
   (let [items  (hermes/component-refset-items svc code-id refset-id)
-        matches (vec (for [item items
-                           :let [t (:mapTarget item)]
-                           :when (and t (not= "" t))]
-                       {:equivalence equivalence
-                        :system      target-system
-                        :code        t}))]
+        matches (for [item items
+                      :let [t (:mapTarget item)]
+                      :when (and t (not= "" t))]
+                  {:equivalence equivalence
+                   :system      target-system
+                   :code        t})]
     {:result (boolean (seq matches)) :matches matches}))
 
 (defn- translate-external-reverse
@@ -662,6 +662,9 @@
 
 (deftype HermesService
          [svc]
+  Closeable
+  (close [_] (.close ^Closeable svc))
+
   protos/CodeSystem
   (cs-metadata [_ {url-q :url ver-q :version include-implicit? :include-implicit?
                    :or {include-implicit? true} :as opts}]
