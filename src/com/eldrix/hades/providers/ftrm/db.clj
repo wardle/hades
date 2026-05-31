@@ -13,9 +13,9 @@
   unrelated SQLite database. `create!` stamps a fresh file and applies
   the v1 DDL.
 
-  Datasources are pooled via HikariCP. SQLite's WAL mode permits one
-  writer and many concurrent readers, so the pool is sized small (4
-  by default) to match. Per-connection runtime pragmas
+  Datasources are pooled via HikariCP — `journal_mode = WAL` permits
+  many concurrent readers. The pool cap (`default-pool-size`) bounds
+  concurrent in-flight SQLite reads. Per-connection runtime pragmas
   (`foreign_keys = ON`, `journal_mode = WAL`) are installed via
   HikariCP's `connectionInitSql` so every pooled connection enforces
   them. The returned datasource is `Closeable` — callers MUST close
@@ -46,17 +46,23 @@
   {:dbtype "sqlite" :dbname path})
 
 (def ^:private default-pool-size
-  "Default Hikari pool size: the cap on concurrent in-flight SQLite
-  reads per database. SQLite WAL permits unlimited concurrent readers,
-  so the binding limit is OS file descriptors and per-connection RAM
-  (~10 KB each), not the database.
+  "Default Hikari pool size: the cap on concurrent in-flight SQLite reads
+  per database. WAL permits many concurrent readers, so the database isn't
+  the limit — the host CPU is. The heavy reads (large `$expand`
+  materialisation) are CPU-bound, so concurrency beyond the core count only
+  oversubscribes the scheduler (measured: throughput flat from ~core-count
+  to 48 connections). Size to the available processors, with a floor for
+  tiny hosts."
+  (max 4 (.availableProcessors (Runtime/getRuntime))))
 
-  Sized by Little's Law (L = λW), not a CPU-count heuristic: 32 holds
-  peak concurrency for a typical 50-VU mixed-read workload (a heavier
-  multi-system text-filter `$expand` alongside fixed-code `$lookup`)
-  without VUs queueing on connection acquisition. The `default-` prefix
-  anticipates a forthcoming CLI/env override."
-  32)
+(defn- pool-size
+  "Hikari max pool size — normally `default-pool-size`. The
+  `hades.ftrm.pool-size` system property overrides it: an UNDOCUMENTED
+  internal escape hatch for benchmarking only, not public API and not for
+  release notes — don't rely on it."
+  []
+  (or (some-> (System/getProperty "hades.ftrm.pool-size") Long/parseLong)
+      default-pool-size))
 
 (def ^:private init-sql
   "Per-connection pragmas applied at handout via Hikari's
@@ -66,7 +72,7 @@
 (defn- pooled-datasource ^HikariDataSource [^String path]
   (let [cfg (doto (HikariConfig.)
               (.setJdbcUrl (str "jdbc:sqlite:" path))
-              (.setMaximumPoolSize (int default-pool-size))
+              (.setMaximumPoolSize (int (pool-size)))
               (.setMinimumIdle 1)
               ;; Load-shed at the pool boundary: under saturation surface a 503
               ;; instead of letting requests block on the 30 s default. Sits

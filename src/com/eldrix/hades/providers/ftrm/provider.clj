@@ -682,17 +682,23 @@
   (let [display-langs (display/parse-display-language displayLanguage)
         lim   (limit-offset-sql cnt offset)
         fts-q (fts-query filter)
-        [total rows]
+        ->concept #(member-row->concept display-langs %)
+        ;; `plan` + reduce: build concepts straight off the ResultSet, never
+        ;; allocating next.jdbc's intermediate per-row map. The page is
+        ;; `count`-bounded and consumed eagerly in-scope, so the connection
+        ;; closes with the reduction — no lazy row escapes the query.
+        [total concepts]
         (cond
           (str/blank? filter)
           [member-count
-           (jdbc/execute! ds [(str "SELECT system, system_version, code, display, designations "
-                                   "FROM valueset_member WHERE vs_url=? AND vs_version=?"
-                                   " ORDER BY ord" lim)
-                              url (v version)])]
+           (into [] (map ->concept)
+                 (jdbc/plan ds [(str "SELECT system, system_version, code, display, designations "
+                                     "FROM valueset_member WHERE vs_url=? AND vs_version=?"
+                                     " ORDER BY ord" lim)
+                                url (v version)]))]
 
           ;; filter present but no word tokens (e.g. punctuation) → no matches
-          (nil? fts-q) [0 nil]
+          (nil? fts-q) [0 []]
 
           :else
           (let [rng (when (and member-id-lo member-id-hi) [member-id-lo member-id-hi])
@@ -702,9 +708,17 @@
                          "WHERE f.valueset_member_fts MATCH ? AND m.vs_url=? AND m.vs_version=?"
                          (when rng " AND f.rowid BETWEEN ? AND ?")
                          " ORDER BY m.ord" lim)
-                rows (jdbc/execute! ds (into [sql fts-q url (v version)] rng))]
-            [(or (some-> (first rows) :total long) (when (zero? (or offset 0)) 0)) rows]))]
-    (cond-> {:concepts              (mapv #(member-row->concept display-langs %) rows)
+                ;; the windowed `total` repeats on every row — capture it in the
+                ;; same pass that builds the page.
+                total* (volatile! nil)
+                cs (persistent!
+                     (reduce (fn [acc row]
+                               (vreset! total* (:total row))
+                               (conj! acc (->concept row)))
+                             (transient [])
+                             (jdbc/plan ds (into [sql fts-q url (v version)] rng))))]
+            [(or (some-> @total* long) (when (zero? (or offset 0)) 0)) cs]))]
+    (cond-> {:concepts              concepts
              :used-codesystems      (mapv (fn [m]
                                             (let [sys (get m "system") sv (get m "version")]
                                               {:uri (if sv (str sys "|" sv) sys)}))
