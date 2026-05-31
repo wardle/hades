@@ -291,65 +291,50 @@
     (str/starts-with? id "urn:uuid:") (subs id 9)
     :else id))
 
-(defn identifiers-by-codesystem
-  "Return `{canonical-url → #{identifier-strs...}}` for every CodeSystem
-  that has rows in `naming_system_id`. OID/UUID rows produce two
-  identifier entries — the bare value and the `urn:oid:`/`urn:uuid:`
-  URN form — so a lookup against either form resolves to the canonical
-  via the composite's alias index."
-  [ds]
-  (reduce
-    (fn [acc {:keys [ns_url identifier_type value]}]
-      (update acc ns_url (fnil into #{})
-              (case identifier_type
-                "oid"  #{value (str "urn:oid:" value)}
-                "uuid" #{value (str "urn:uuid:" value)}
-                #{value})))
-    {}
-    (jdbc/plan ds ["SELECT ns_url, identifier_type, value
-                    FROM naming_system_id
-                    ORDER BY ns_url"])))
-
-(defn resolve-system
-  "Resolve an identifier (canonical URL, bare OID/URN, `urn:oid:`/
-  `urn:uuid:` URN form, or other URI alias) to its canonical URL via
-  the `naming_system_id` table. Returns the canonical `ns_url` when a
-  row matches the supplied id (or its URN-stripped form), or nil. Blank
-  input returns nil immediately."
+(defn resolve-identifier
+  "Resolve an identifier (bare OID/URN, `urn:oid:`/`urn:uuid:` URN form,
+  or other URI alias) to `{:url canonical :kind :codesystem|:valueset|
+  :conceptmap}` via the `naming_system` tables, or nil when no row
+  matches (the supplied id or its URN-stripped form). Blank input
+  returns nil immediately. Version-blind — an identifier names identity."
   [ds id]
   (when-not (str/blank? id)
+    ;; next.jdbc namespaces result keys by source table, ignoring SQL
+    ;; `AS` aliases — hence `:naming_system/url` / `:naming_system/kind`.
     (let [bare (strip-urn-prefix id)
-          row (or (jdbc/execute-one! ds
-                    ["SELECT ns_url FROM naming_system_id WHERE value = ?
-                      ORDER BY (preferred IS NULL), preferred DESC LIMIT 1"
-                     id])
-                  (when (not= bare id)
-                    (jdbc/execute-one! ds
-                      ["SELECT ns_url FROM naming_system_id WHERE value = ?
-                        ORDER BY (preferred IS NULL), preferred DESC LIMIT 1"
-                       bare])))]
-      (:naming_system_id/ns_url row))))
+          q    (fn [v]
+                 (jdbc/execute-one! ds
+                   ["SELECT ns.url, ns.kind
+                     FROM naming_system_id nsi
+                     JOIN naming_system ns ON ns.url = nsi.ns_url
+                     WHERE nsi.value = ?
+                     ORDER BY (nsi.preferred IS NULL), nsi.preferred DESC LIMIT 1"
+                    v]))
+          row  (or (q id) (when (not= bare id) (q bare)))]
+      (when-let [url (:naming_system/url row)]
+        {:url url :kind (keyword (:naming_system/kind row))}))))
 
-(defn add-naming-system!
-  "Upsert a NamingSystem row plus a single identifier alias. `id-type`
-  is one of `\"oid\"`, `\"uri\"`, `\"uuid\"`, `\"other\"`. Idempotent."
-  [ds {:keys [url name status kind id-type value preferred]}]
-  (with-open [conn (jdbc/get-connection ds)]
-    (jdbc/with-transaction [tx conn]
-      (jdbc/execute! tx
-        ["INSERT INTO naming_system(url, name, status, kind, metadata)
-          VALUES(?,?,?,?, NULL)
-          ON CONFLICT(url) DO UPDATE SET
-            name=COALESCE(excluded.name, naming_system.name),
-            status=COALESCE(excluded.status, naming_system.status),
-            kind=COALESCE(excluded.kind, naming_system.kind)"
-         url name status kind])
-      (jdbc/execute! tx
-        ["INSERT INTO naming_system_id(ns_url, identifier_type, value, preferred)
-          VALUES(?,?,?,?)
-          ON CONFLICT(ns_url, identifier_type, value) DO UPDATE SET
-            preferred=excluded.preferred"
-         url id-type value (cond (true? preferred) 1 (false? preferred) 0 :else nil)]))))
+(defn upsert-naming-system-id!
+  "Upsert a NamingSystem row plus one identifier alias using
+  `connectable` (a datasource, connection, or transaction). Performs no
+  transaction management — the caller owns the transaction boundary.
+  `id-type` is one of `\"oid\"`, `\"uri\"`, `\"uuid\"`, `\"other\"`; `kind`
+  defaults to `\"codesystem\"`. Idempotent."
+  [connectable {:keys [url name status kind id-type value preferred]}]
+  (jdbc/execute! connectable
+    ["INSERT INTO naming_system(url, name, status, kind, metadata)
+      VALUES(?,?,?,?, NULL)
+      ON CONFLICT(url) DO UPDATE SET
+        name=COALESCE(excluded.name, naming_system.name),
+        status=COALESCE(excluded.status, naming_system.status),
+        kind=COALESCE(excluded.kind, naming_system.kind)"
+     url name status (or kind "codesystem")])
+  (jdbc/execute! connectable
+    ["INSERT INTO naming_system_id(ns_url, identifier_type, value, preferred)
+      VALUES(?,?,?,?)
+      ON CONFLICT(ns_url, identifier_type, value) DO UPDATE SET
+        preferred=excluded.preferred"
+     url id-type value (cond (true? preferred) 1 (false? preferred) 0 :else nil)]))
 
 (defn vacuum!
   "Run `VACUUM` on the container, reclaiming free pages and reducing

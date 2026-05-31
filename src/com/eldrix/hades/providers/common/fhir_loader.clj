@@ -11,6 +11,8 @@
     :concept           one per concept (recursively flattened)
     :valueset          one per ValueSet
     :conceptmap        one per ConceptMap
+    :naming-system-id  one per `.identifier` (OID/URN alias) on a
+                       CodeSystem / ValueSet / ConceptMap
     :skipped           diagnostic for unsupported / .index.json /
                        nested-Bundle entries
 
@@ -37,6 +39,39 @@
   {:type :skipped :source-path source-path
    :resource-type resource-type :reason reason})
 
+(defn- identifier->ns-id
+  "Classify a FHIR `Identifier.value` into a `naming_system_id` spec
+  (`:id-type` + `:value`), or nil when it carries no value. OID/UUID URN
+  forms reduce to the bare value, matching what `canonical/identifier-aliases`
+  reconstructs."
+  [value]
+  (when-not (str/blank? value)
+    (cond
+      (str/starts-with? value "urn:oid:")  {:id-type "oid"  :value (subs value 8)}
+      (str/starts-with? value "urn:uuid:") {:id-type "uuid" :value (subs value 9)}
+      (str/starts-with? value "urn:")      {:id-type "uri"  :value value}
+      (str/starts-with? value "http")      {:id-type "uri"  :value value}
+      :else                                {:id-type "other" :value value})))
+
+(defn- identifier-entries
+  "Emit one `:naming-system-id` fhir-data entry per `.identifier` carrying a
+  value, aliasing the OID/URN to the resource's canonical URL. `kind` is the
+  resource-type string the URL denotes (\"codesystem\"/\"valueset\"/
+  \"conceptmap\"). `identifier` is the raw FHIR value: a vector (CS/VS,
+  `0..*`) or a lone object (CM, `0..1`) — both tolerated."
+  [kind resource identifier source-path]
+  (let [identifiers (if (map? identifier) [identifier] identifier)]
+    (keep (fn [ident]
+            (when-let [ns-id (identifier->ns-id (get ident "value"))]
+              (merge {:type        :naming-system-id
+                      :url         (get resource "url")
+                      :name        (get resource "name")
+                      :status      (get resource "status")
+                      :kind        kind
+                      :source-path source-path}
+                     ns-id)))
+          identifiers)))
+
 (defn- cs-resource->fhir-data [cs-map source-path]
   (let [behavioural (fhir-extract/behavioural-fields cs-map)
         meta-entry  (-> behavioural
@@ -53,7 +88,9 @@
                                     :version (:version behavioural)
                                     :source-path source-path))
                          (fhir-extract/flatten-concepts (get cs-map "concept")))]
-    (cons meta-entry concepts)))
+    (concat [meta-entry]
+            concepts
+            (identifier-entries "codesystem" cs-map (get cs-map "identifier") source-path))))
 
 (defn- flatten-contains
   "Recursively flatten an `expansion.contains` array. FHIR allows
@@ -126,12 +163,13 @@
         ;; the system.
         compose          (or authored-compose
                              (when expansion (synthesise-compose expansion)))]
-    [(cond-> {:type :valueset
-              :url         (get vs-map "url")
-              :metadata    (fhir-extract/vs-passthrough-metadata vs-map)
-              :source-path source-path}
-       (get vs-map "version") (assoc :version (get vs-map "version"))
-       compose                (assoc :compose compose))]))
+    (cons (cond-> {:type :valueset
+                   :url         (get vs-map "url")
+                   :metadata    (fhir-extract/vs-passthrough-metadata vs-map)
+                   :source-path source-path}
+            (get vs-map "version") (assoc :version (get vs-map "version"))
+            compose                (assoc :compose compose))
+          (identifier-entries "valueset" vs-map (get vs-map "identifier") source-path))))
 
 (defn- cm-group->fhir-data [g]
   (cond-> {:source         (get g "source")
@@ -157,16 +195,17 @@
                       :url     (get-in g ["unmapped" "url"])})))
 
 (defn- cm-resource->fhir-data [cm-map source-path]
-  [{:type           :conceptmap
-    :url            (get cm-map "url")
-    :version        (get cm-map "version")
-    :source-uri     (or (get cm-map "sourceUri") (get cm-map "sourceCanonical"))
-    :source-version (get cm-map "sourceVersion")
-    :target-uri     (or (get cm-map "targetUri") (get cm-map "targetCanonical"))
-    :target-version (get cm-map "targetVersion")
-    :metadata       cm-map
-    :groups         (mapv cm-group->fhir-data (get cm-map "group"))
-    :source-path    source-path}])
+  (cons {:type           :conceptmap
+         :url            (get cm-map "url")
+         :version        (get cm-map "version")
+         :source-uri     (or (get cm-map "sourceUri") (get cm-map "sourceCanonical"))
+         :source-version (get cm-map "sourceVersion")
+         :target-uri     (or (get cm-map "targetUri") (get cm-map "targetCanonical"))
+         :target-version (get cm-map "targetVersion")
+         :metadata       cm-map
+         :groups         (mapv cm-group->fhir-data (get cm-map "group"))
+         :source-path    source-path}
+        (identifier-entries "conceptmap" cm-map (get cm-map "identifier") source-path)))
 
 (declare resource->fhir-data)
 

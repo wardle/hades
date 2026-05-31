@@ -221,22 +221,12 @@
 ;; the tuple level.
 (s/def ::implicit? boolean?)
 
-;; `:identifiers` lists additional identifiers (OIDs, URNs, legacy
-;; URIs) that resolve to this CodeSystem's canonical URL. Composite
-;; indexes them at construction so a lookup against any identifier
-;; routes to the same provider — providers stay alias-blind because
-;; the composite substitutes the canonical before dispatching.
-;; Identifiers are also surfaced as `identifier` entries on the FHIR
-;; CodeSystem resource, so catalogue listings need no special
-;; filtering: one entry per CodeSystem, identifiers as resource data.
-(s/def ::identifiers (s/coll-of string? :min-count 1))
-
 ;; CodeSystem metadata — `:content` distinguishes regular vs supplement
 ;; CodeSystems; `:supplements` is the canonical of the base when
 ;; `:content` is "supplement".
 (s/def ::cs-metadata
   (s/keys :req-un [::url]
-          :opt-un [::version ::content ::supplements ::implicit? ::identifiers]))
+          :opt-un [::version ::content ::supplements ::implicit?]))
 
 ;; ValueSet metadata — only `:url`/`:version` for now; future fields
 ;; (binding strength, jurisdiction) can land here without changing the
@@ -258,3 +248,10 @@
 ;; canonical of the base CodeSystem (FHIR `CodeSystem.supplements`,
 ;; 0..1) when `:content` is "supplement".
 (s/def ::supplements string?)
+
+;; NamingSystem resolution — what a `NamingService` resolver returns for a
+;; known identifier (OID/URN/URI alias): the canonical URL it denotes plus
+;; the resource kind to route by. Version-blind — an identifier names
+;; identity, never a version.
+(s/def ::kind #{:codesystem :valueset :conceptmap})
+(s/def ::naming (s/keys :req-un [::url ::kind]))

@@ -68,6 +68,27 @@
                "in-memory only: " (pr-str (set/difference mem-cs sql-cs))
                "; ftrm only: "    (pr-str (set/difference sql-cs mem-cs)))))))
 
+(def ^:private known-alias
+  ;; v2-0203's OID — present in both engines, resolvable by bare + urn forms.
+  {:bare "2.16.840.1.113883.18.108"
+   :urn  "urn:oid:2.16.840.1.113883.18.108"
+   :canonical "http://terminology.hl7.org/CodeSystem/v2-0203"
+   :code "AM"})
+
+(deftest ^:live cs-alias-resolution-parity
+  (testing "both engines resolve a CodeSystem OID alias identically"
+    (let [{:keys [bare urn canonical code]} known-alias
+          ;; The canonical lookup is the control; both alias forms must
+          ;; match it on each engine, and the engines must match each other.
+          via (fn [svc system] (:display (hades/lookup svc {:system system :code code})))]
+      (doseq [[label svc] [["in-memory" *mem*] ["ftrm" *sql*]]]
+        (let [c (via svc canonical)]
+          (is (some? c) (str label ": canonical lookup must resolve"))
+          (is (= c (via svc bare)) (str label ": bare-OID alias must match canonical"))
+          (is (= c (via svc urn))  (str label ": urn:oid: alias must match canonical"))))
+      (is (= (via *mem* urn) (via *sql* urn))
+          "engines disagree resolving the urn:oid: alias"))))
+
 (deftest ^:live vs-metadata-parity
   (testing "in-memory and FTRM engines list the same ValueSets"
     (let [mem-vs (url-version-set (protos/vs-metadata *mem* {}))

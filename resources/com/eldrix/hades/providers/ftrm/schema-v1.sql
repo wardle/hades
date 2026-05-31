@@ -345,4 +345,4 @@ CREATE TABLE IF NOT EXISTS naming_system_id (
   PRIMARY KEY (ns_url, identifier_type, value),
   FOREIGN KEY (ns_url) REFERENCES naming_system(url)
 ) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS nsi_value ON naming_system_id(identifier_type, value);
+CREATE INDEX IF NOT EXISTS nsi_value ON naming_system_id(value);

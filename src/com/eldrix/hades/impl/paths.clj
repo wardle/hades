@@ -66,51 +66,67 @@
        {:providers [provider]}))))
 
 (defn- aggregate-fhir-json
-  "Build one in-memory provider set from FHIR JSON files."
-  [root files]
+  "Build one in-memory provider set from the FHIR JSON files gathered
+  across every opened path. Aggregating all loose resources into a single
+  in-memory container — rather than one container per path — mirrors the
+  FTRM container model: the indexer sees every version and every
+  `CodeSystem.identifier` of a canonical URL at once. OID/URN aliases
+  therefore resolve url-scoped (an alias declared on one version routes to
+  the canonical URL; normal version resolution then picks the version),
+  matching FTRM."
+  [roots files]
   (let [data (fhir-loader/load-files files)
         {:keys [providers totals]} (load-fhir/build-from-fhir-data data)]
     (log/info "registered provider"
-              (merge {:source root :kind :fhir-json
+              (merge {:source roots :kind :fhir-json
                       :files (count files)}
                      (select-keys totals [:codesystems :valuesets :conceptmaps :supplements])))
     {:providers providers}))
 
-(defn bundle-for-path
-  "Walk `path` and return the provider bundle for every recognised built
-  artefact under it.
-
-  Hermes DB directories and FHIR-tx SQLite containers open as closeable
-  providers. FHIR JSON resources are aggregated into one in-memory
-  provider set per input path. Release-only sources (RF2, LOINC) are
-  rejected — they must be imported before opening.
-
-  `opts` is forwarded to `open-database`."
-  ([path] (bundle-for-path path {}))
-  ([path opts]
-   (let [files     (sources/tx-file-seq path)
-         release   (filter #(and (:importable? %) (not (:database? %))) files)
-         databases (filter #(#{:hermes-db :fhir-tx-db :loinc-db} (:kind %)) files)
-         json      (filter #(= :fhir-json (:kind %)) files)]
-     (when (empty? files)
-       (throw (ex-info (str "Couldn't find any terminology sources under " path)
-                       {:reason :unknown-source-kind :path path})))
-     (when (seq release)
-       (throw (ex-info (str "Path contains release sources - run import first: " path)
-                       {:reason ::release-source-not-served
-                        :path path
-                        :release-paths (mapv #(.getPath ^File (:file %)) release)})))
-     (let [groups (cond-> (mapv #(open-database % opts) databases)
-                    (seq json)
-                    (conj (aggregate-fhir-json path (mapv :file json))))]
-       (reduce merge-bundles empty-bundle groups)))))
+(defn- classify-path
+  "Walk `path`, validate it, and split its recognised sources into
+  self-contained `:databases` (Hermes / FTRM / native LOINC, as
+  `::sources/entry` maps) and loose `:json-files` (FHIR JSON `File`s).
+  Throws when the path yields no sources, or contains release-only
+  sources (RF2, LOINC CSV) that must be imported before opening."
+  [path]
+  (let [files     (sources/tx-file-seq path)
+        release   (filter #(and (:importable? %) (not (:database? %))) files)
+        databases (filter #(#{:hermes-db :fhir-tx-db :loinc-db} (:kind %)) files)
+        json      (filter #(= :fhir-json (:kind %)) files)]
+    (when (empty? files)
+      (throw (ex-info (str "Couldn't find any terminology sources under " path)
+                      {:reason :unknown-source-kind :path path})))
+    (when (seq release)
+      (throw (ex-info (str "Path contains release sources - run import first: " path)
+                      {:reason ::release-source-not-served
+                       :path path
+                       :release-paths (mapv #(.getPath ^File (:file %)) release)})))
+    {:databases databases :json-files (mapv :file json)}))
 
 (defn bundle-for-paths
-  "Return a merged provider bundle for all `paths`. `opts` is forwarded
-  to `bundle-for-path`."
+  "Open `paths` into one merged provider bundle. Each path's self-contained
+  databases (Hermes / FTRM / native LOINC) open individually, but loose
+  FHIR JSON from every path is aggregated into a single in-memory provider
+  set (see `aggregate-fhir-json`) so cross-package concerns — version
+  aggregation, OID/URN alias resolution — resolve over the whole corpus.
+  `opts` is forwarded to `open-database`."
   ([paths] (bundle-for-paths paths {}))
   ([paths opts]
-   (reduce merge-bundles empty-bundle (map #(bundle-for-path % opts) paths))))
+   (let [classified  (mapv classify-path paths)
+         databases   (mapcat :databases classified)
+         json-files  (into [] (mapcat :json-files) classified)
+         db-bundles  (mapv #(open-database % opts) databases)
+         json-bundle (when (seq json-files)
+                       (aggregate-fhir-json (vec paths) json-files))]
+     (reduce merge-bundles empty-bundle
+             (cond-> db-bundles json-bundle (conj json-bundle))))))
+
+(defn bundle-for-path
+  "Open a single `path` into a provider bundle — convenience over
+  `bundle-for-paths`."
+  ([path] (bundle-for-path path {}))
+  ([path opts] (bundle-for-paths [path] opts)))
 
 (defn open-paths
   "Open a Hades service from built terminology artefact paths.

@@ -5,14 +5,11 @@
   `open-with`):
 
     :codesystems    {url|version → provider} ; bare URL also keyed when
-                                               single-version; OID/URN
-                                               identifiers from each
-                                               CodeSystem's `:identifiers`
-                                               metadata field land here
-                                               too — one URL, one lookup
+                                               single-version
     :valuesets      {url|version → provider}
     :conceptmaps    [{:impl :description}]   ; multi-axis lookup
     :cs-providers / :vs-providers            ; unique provider vectors
+    :naming-resolvers [ifn ...]              ; OID/URN → {:url :kind}
 
   The record satisfies `protos/CodeSystem`, `protos/ValueSet`,
   `protos/ConceptMap`, and `java.io.Closeable`. Each protocol method
@@ -60,13 +57,34 @@
         (when (not= key u)
           (get base u)))))
 
+(defn- resolve-alias
+  "Resolve an OID/URN/URI identifier to `{:url :kind}` by asking each
+  registered NamingService resolver in turn; first hit wins. Returns nil
+  for an unknown identifier. Each resolver is an IFn (a map or a fn)."
+  [naming-resolvers id]
+  (some #(% id) naming-resolvers))
+
+(defn- resolve-cs
+  "Return `[provider canonical-system]` for `system`+`version`, or nil.
+  Direct URL match first; on miss, resolve an OID/URN alias to its
+  canonical URL (when `:kind` is `:codesystem`) and retry. Lazy: the
+  alias resolvers (a DB query for FTRM) run only when the direct lookup
+  misses, so canonical-URL requests pay nothing."
+  [{:keys [codesystems naming-resolvers]} system version]
+  (or (when-let [p (lookup-impl codesystems (canonical/versioned-uri system version))]
+        [p system])
+      (let [{:keys [url kind]} (resolve-alias naming-resolvers system)]
+        (when (= :codesystem kind)
+          (when-let [p (lookup-impl codesystems (canonical/versioned-uri url version))]
+            [p url])))))
+
 (defn find-codesystem
-  "Find a CodeSystem provider by URL. The URL index holds both
-  canonical and identifier URLs for every CodeSystem, so a lookup
-  against any of them succeeds in one step. `svc` is the
-  TerminologyService record."
-  [{:keys [codesystems]} key]
-  (lookup-impl codesystems key))
+  "Find a CodeSystem provider by canonical URL, or by an OID/URN/URI
+  identifier that resolves to one. `key` may carry a `|version` suffix.
+  `svc` is the TerminologyService record."
+  [svc key]
+  (let [[base version] (canonical/parse-versioned-uri key)]
+    (first (resolve-cs svc base version))))
 
 (defn- dynamic-valueset
   [valueset-providers key]
@@ -76,14 +94,27 @@
               vs))
           valueset-providers)))
 
+(defn- resolve-vs
+  "Return `[provider canonical-url]` for `url`+`version`, or nil. Direct
+  match (catalogue map, then dynamic provider scan) first; on miss,
+  resolve an OID/URN alias to its canonical ValueSet URL (`:kind`
+  `:valueset`) and retry. Lazy — alias resolvers run only on miss.
+
+  `valuesets` holds one entry per canonical ValueSet URL, while a
+  catalogue provider such as FTRM serves hundreds of thousands of URLs;
+  the dynamic fallback therefore scans providers, not the map's values."
+  [{:keys [valuesets vs-providers naming-resolvers]} url version]
+  (let [dynamic (or vs-providers (distinct (vals valuesets)))
+        find-by (fn [k] (or (lookup-impl valuesets k) (dynamic-valueset dynamic k)))]
+    (or (when-let [p (find-by (canonical/versioned-uri url version))] [p url])
+        (let [{u :url kind :kind} (resolve-alias naming-resolvers url)]
+          (when (= :valueset kind)
+            (when-let [p (find-by (canonical/versioned-uri u version))] [p u]))))))
+
 (defn find-valueset
-  [{:keys [valuesets vs-providers]} key]
-  ;; `valuesets` can contain one entry per canonical ValueSet URL, while a
-  ;; catalogue provider such as FTRM can serve hundreds of thousands of URLs.
-  ;; Dynamic fallback must therefore scan providers, not valueset-map values.
-  (let [dynamic-providers (or vs-providers (distinct (vals valuesets)))]
-    (or (lookup-impl valuesets key)
-        (dynamic-valueset dynamic-providers key))))
+  [svc key]
+  (let [[base version] (canonical/parse-versioned-uri key)]
+    (first (resolve-vs svc base version))))
 
 (defn available-versions
   "List all registered versions for a system URL."
@@ -183,24 +214,26 @@
 ;; `vs-validate/validate-code` (ValueSet $validate-code).
 
 (defn cs-meta
-  "Return the `cs-resource` map for `system` (a URL, optionally with
-  `|version`), or nil if no provider serves this key. Resolves the
-  serving provider and asks it directly. Use this in cross-cutting
-  helpers instead of calling `find-codesystem` + `protos/cs-resource`
-  separately."
+  "Return the `cs-resource` map for `system` (a URL or OID/URN alias,
+  optionally with `|version`), or nil if no provider serves this key.
+  Resolves the serving provider plus the canonical URL and asks the
+  provider with the canonical (never the alias). Use this in
+  cross-cutting helpers instead of calling `find-codesystem` +
+  `protos/cs-resource` separately."
   [svc system]
-  (when-let [cs (find-codesystem svc system)]
-    (let [[url version] (canonical/parse-versioned-uri system)]
-      (protos/cs-resource cs (cond-> {:url url :system url}
+  (let [[base version] (canonical/parse-versioned-uri system)]
+    (when-let [[cs canonical] (resolve-cs svc base version)]
+      (protos/cs-resource cs (cond-> {:url canonical :system canonical}
                                version (assoc :version version))))))
 
 (defn vs-meta
-  "Return the `vs-resource` map for `url` (optionally with `|version`),
-  or nil if no provider serves it. Asks the serving provider directly."
+  "Return the `vs-resource` map for `url` (a URL or OID/URN alias,
+  optionally with `|version`), or nil if no provider serves it. Asks the
+  serving provider with the canonical URL."
   [svc url]
-  (when-let [vs (find-valueset svc url)]
-    (let [[u version] (canonical/parse-versioned-uri url)]
-      (protos/vs-resource vs (cond-> {:url u}
+  (let [[base version] (canonical/parse-versioned-uri url)]
+    (when-let [[vs canonical] (resolve-vs svc base version)]
+      (protos/vs-resource vs (cond-> {:url canonical}
                                version (assoc :version version))))))
 
 (defn add-cs-status-warnings
@@ -333,7 +366,7 @@
 (defrecord TerminologyService
   [codesystems valuesets conceptmaps
    cs-providers vs-providers
-   owned-providers]
+   owned-providers naming-resolvers]
 
   java.io.Closeable
   (close [_] (run! close-provider! (reverse owned-providers)))
@@ -342,25 +375,25 @@
   (cs-metadata [_ opts]
     (eduction (mapcat #(protos/cs-metadata % opts)) cs-providers))
 
+  ;; Each cs-* method resolves the system (URL or OID/URN alias) to a
+  ;; provider + canonical URL via `resolve-cs`, then passes the *canonical*
+  ;; system down so providers never see an alias.
   (cs-resource [this {:keys [system version] :as params}]
-    (let [lookup-key (canonical/versioned-uri system version)]
-      (when-let [cs (find-codesystem this lookup-key)]
-        (protos/cs-resource cs params))))
+    (when-let [[cs canonical] (resolve-cs this system version)]
+      (protos/cs-resource cs (assoc params :system canonical))))
 
   (cs-lookup [this {:keys [system code version] :as params}]
-    (let [lookup-key (canonical/versioned-uri system version)]
-      (if-let [cs (find-codesystem this lookup-key)]
-        (protos/cs-lookup cs params)
-        (issues/unknown-system-lookup system code))))
+    (if-let [[cs canonical] (resolve-cs this system version)]
+      (protos/cs-lookup cs (assoc params :system canonical))
+      (issues/unknown-system-lookup system code)))
 
   (cs-validate-code [this {:keys [system code version] :as params}]
-    (let [lookup-key (canonical/versioned-uri system version)]
-      (if-let [cs (find-codesystem this lookup-key)]
-        (-> (protos/cs-validate-code cs params)
-            (issues/add-inactive-warning))
-        (issues/unknown-system-validate system code))))
+    (if-let [[cs canonical] (resolve-cs this system version)]
+      (-> (protos/cs-validate-code cs (assoc params :system canonical))
+          (issues/add-inactive-warning))
+      (issues/unknown-system-validate system code)))
 
-  (cs-subsumes [this {:keys [systemA systemB] :as params}]
+  (cs-subsumes [this {:keys [systemA systemB version] :as params}]
     (cond
       (not= systemA systemB)
       {:issues [{:severity "error" :type "invalid"
@@ -369,43 +402,43 @@
                  :expression ["systemA" "systemB"]}]}
 
       :else
-      (if-let [cs (find-codesystem this systemA)]
-        (protos/cs-subsumes cs params)
+      (if-let [[cs canonical] (resolve-cs this systemA version)]
+        (protos/cs-subsumes cs (assoc params :systemA canonical :systemB canonical))
         (issues/unknown-system-subsumes systemA))))
 
   (cs-expand* [this {:keys [system version] :as query}]
-    (let [lookup-key (canonical/versioned-uri system version)]
-      (when-let [cs (find-codesystem this lookup-key)]
-        (protos/cs-expand* cs query))))
+    (when-let [[cs canonical] (resolve-cs this system version)]
+      (protos/cs-expand* cs (assoc query :system canonical))))
 
   protos/ValueSet
   (vs-metadata [_ opts]
     (eduction (mapcat #(protos/vs-metadata % opts)) vs-providers))
 
+  ;; Like cs-*, each vs-* method resolves url-or-alias to a provider +
+  ;; canonical URL via `resolve-vs` and passes the canonical url down.
   (vs-resource [this {:keys [url] :as params}]
-    (when-let [vs (find-valueset this url)]
-      (protos/vs-resource vs params)))
+    (when-let [[vs canonical] (resolve-vs this url nil)]
+      (protos/vs-resource vs (assoc params :url canonical))))
 
   (vs-expand [this svc {:keys [url valueSetVersion] :as params}]
-    (let [lookup-key (canonical/versioned-uri url valueSetVersion)]
-      (when-let [vs (find-valueset this lookup-key)]
-        (protos/vs-expand vs (or svc this) params))))
+    (when-let [[vs canonical] (resolve-vs this url valueSetVersion)]
+      (protos/vs-expand vs (or svc this) (assoc params :url canonical))))
 
   (vs-validate-code [this svc {:keys [url system code valueSetVersion] :as params}]
     (when (str/blank? url)
       (throw (ex-info "ValueSet $validate-code requires a url or valueSet parameter"
                       {:type :invalid :details-code "invalid"})))
-    (let [vs-lookup (canonical/versioned-uri url valueSetVersion)]
-      (if-let [vs (find-valueset this vs-lookup)]
-        (protos/vs-validate-code vs (or svc this) params)
-        (let [msg (str "A definition for the value Set '" vs-lookup "' could not be found")]
-          {:result    false
-           :not-found true
-           :code      (when code (keyword code))
-           :system    system
-           :message   msg
-           :issues    [{:severity "error" :type "not-found"
-                        :details-code "not-found" :text msg}]}))))
+    (if-let [[vs canonical] (resolve-vs this url valueSetVersion)]
+      (protos/vs-validate-code vs (or svc this) (assoc params :url canonical))
+      (let [msg (str "A definition for the value Set '"
+                     (canonical/versioned-uri url valueSetVersion) "' could not be found")]
+        {:result    false
+         :not-found true
+         :code      (when code (keyword code))
+         :system    system
+         :message   msg
+         :issues    [{:severity "error" :type "not-found"
+                      :details-code "not-found" :text msg}]})))
 
   protos/ConceptMap
   (cm-metadata [_ {url-q :url ver-q :version}]
@@ -420,8 +453,18 @@
     (when-let [cm (first (candidate-cm-impls conceptmaps params))]
       (protos/cm-resource cm params)))
 
-  (cm-translate [_ {:keys [url system target] :as params}]
-    (let [hits (candidate-cm-entries conceptmaps {:url url :system system :target target})]
+  (cm-translate [this {:keys [url system target] :as params}]
+    (let [hits (candidate-cm-entries conceptmaps {:url url :system system :target target})
+          ;; On a url miss, resolve an OID/URN alias to its canonical
+          ;; ConceptMap url and retry — lazy, like cs-*/vs-*.
+          [params hits]
+          (if (and (empty? hits) url)
+            (let [{u :url kind :kind} (resolve-alias (:naming-resolvers this) url)]
+              (if (= :conceptmap kind)
+                [(assoc params :url u)
+                 (candidate-cm-entries conceptmaps {:url u :system system :target target})]
+                [params hits]))
+            [params hits])]
       (cond
         (empty? hits) (translate-not-found params)
 
@@ -669,17 +712,13 @@
 
 (defn- collect-cs-entries
   "Walk every CodeSystem provider's cs-metadata and produce one entry
-  per URL it serves. A CodeSystem with `:identifiers` (OIDs, URNs,
-  legacy URIs) emits one entry per identifier in addition to its
-  canonical URL — all pointing to the same provider — so the URL
-  index resolves any of them in one lookup. Providers accept any URL
-  they registered and substitute internally."
+  per `(url, version)` it serves. OID/URN aliases are resolved separately
+  via `NamingService`, not indexed here."
   [providers]
   (for [p providers
         :when (satisfies? protos/CodeSystem p)
-        m (protos/cs-metadata p {})
-        url (cons (:url m) (:identifiers m))]
-    {:provider p :url url :version (:version m)
+        m (protos/cs-metadata p {})]
+    {:provider p :url (:url m) :version (:version m)
      :content (:content m) :supplements (:supplements m)}))
 
 (defn- collect-vs-entries [providers]
@@ -935,14 +974,18 @@
                       :valuesets (:valuesets resolved)))
              base)
            cs-providers (distinct (vals (:codesystems with-supps)))
-           vs-providers (distinct (vals (:valuesets with-supps)))]
+           vs-providers (distinct (vals (:valuesets with-supps)))
+           naming-resolvers (into [] (keep #(when (satisfies? protos/NamingService %)
+                                              (protos/naming-resolver %)))
+                                  providers)]
        (->TerminologyService
          (:codesystems with-supps)
          (:valuesets with-supps)
          (:conceptmaps with-supps)
          cs-providers
          vs-providers
-         (distinct providers))))))
+         (distinct providers)
+         naming-resolvers)))))
 
 (defn with-overlays
   "Return a derived TerminologyService layering `providers` on top of
@@ -966,4 +1009,7 @@
       ;; A derived view owns no providers: the base owns its own and the
       ;; request-scoped overlay providers are released by GC. Closing the
       ;; view must not close the base.
-      nil)))
+      nil
+      ;; Alias resolution must see both layers — overlay first so an
+      ;; overlaid identifier shadows the base.
+      (into (vec (:naming-resolvers overlay)) (:naming-resolvers base)))))

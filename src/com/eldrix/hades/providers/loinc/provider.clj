@@ -27,6 +27,12 @@
   rejected as `unknown-system`."
   #{loinc-url loinc-oid (str "urn:oid:" loinc-oid)})
 
+(def ^:private loinc-naming-resolver
+  "Fixed `NamingService` resolver for LOINC's OID aliases. LOINC's
+  identity is immutable, so this is a constant map (the resolver IFn)."
+  (let [target {:url loinc-url :kind :codesystem}]
+    {loinc-oid target (str "urn:oid:" loinc-oid) target}))
+
 (defn- loinc-system? [system]
   (contains? loinc-systems system))
 
@@ -1238,6 +1244,9 @@
   Closeable
   (close [_] (store/close! ds))
 
+  protos/NamingService
+  (naming-resolver [_] loinc-naming-resolver)
+
   protos/CodeSystem
   (cs-metadata [this {:keys [url version] :as opts}]
     (when (and (or (nil? url) (loinc-system? url))
@@ -1250,8 +1259,7 @@
                 :title "Logical Observation Identifiers Names and Codes"
                 :status "active"
                 :content "complete"
-                :case-sensitive false
-                :identifiers #{loinc-oid (str "urn:oid:" loinc-oid)}}
+                :case-sensitive false}
          (:version this) (assoc :version (:version this)))]))
 
   (cs-resource [this params]

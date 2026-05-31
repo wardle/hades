@@ -550,6 +550,12 @@
                 (doseq [r (conceptmap-element-rows fd)]
                   (add-row! conn ps-cme b-cme r)))
 
+              ;; OID/URN aliases — written directly (not batched): few
+              ;; per import, and the upsert needs ON CONFLICT semantics.
+              ;; Committed by the import's final `.commit conn`.
+              :naming-system-id
+              (db/upsert-naming-system-id! conn fd)
+
               ;; default — `:skipped` from FHIR JSON loader, etc.
               nil))
           (recur)))

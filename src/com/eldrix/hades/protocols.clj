@@ -207,3 +207,18 @@
     parameters), `:system`, `:code`, and optionally `:target` and
     `:version`. Impls must return a complete `::result/translate` —
     no downstream patching."))
+
+(defprotocol NamingService
+  "A provider that resolves identifier aliases (OIDs, URNs, legacy URIs)
+  to the canonical URLs they denote — FHIR NamingSystem's role."
+  :extend-via-metadata true
+  (naming-resolver [this]
+    "Return a resolver: an IFn from an identifier string to a
+    `::result/naming` map `{:url canonical-url :kind …}`, or nil when the
+    identifier is unknown to this provider. The resolver may be a map (an
+    in-memory index) or a function (e.g. one querying a database) — both
+    are callable, so the composite invokes them uniformly. Called once at
+    construction; the composite caches the resolver and calls it per
+    request on a dispatch miss. Version-blind: an identifier names a
+    resource's identity, never a particular version."))
+

@@ -197,19 +197,20 @@
       (is (nil? (composite/find-valueset svc "http://x/vs/missing")))
       (is (= 1 @calls)))))
 
-(deftest cs-meta-honours-cs-identifier-aliases-test
-  ;; A CodeSystem's `:identifiers` (OIDs, URNs) ride on its cs-metadata
-  ;; entry; the composite indexes them alongside the canonical URL, so a
-  ;; lookup against any identifier resolves the same resource as the
-  ;; canonical.
-  (let [canonical   "http://example.com/r/cs"
-        identifiers  #{"urn:oid:1.2.3"}
-        provider (reify protos/CodeSystem
-                   (cs-metadata [_ _]
-                     [{:url canonical :version "1.0" :identifiers identifiers}])
+(deftest cs-meta-honours-naming-service-aliases-test
+  ;; A provider's `NamingService` resolver maps an OID/URN to the canonical
+  ;; URL; the composite consults it on a dispatch miss, so a lookup against
+  ;; any identifier resolves the same resource as the canonical.
+  (let [canonical "http://example.com/r/cs"
+        provider (reify
+                   protos/CodeSystem
+                   (cs-metadata [_ _] [{:url canonical :version "1.0"}])
                    (cs-resource [_ {:keys [url]}]
-                     (when (or (= canonical url) (identifiers url))
-                       {:url canonical :version "1.0" :status "active"})))
+                     (when (= canonical url)
+                       {:url canonical :version "1.0" :status "active"}))
+                   protos/NamingService
+                   (naming-resolver [_]
+                     {"urn:oid:1.2.3" {:url canonical :kind :codesystem}}))
         svc (composite/from-providers [provider])]
     (testing "alias routes to the canonical resource"
       (is (= "1.0" (:version (composite/cs-meta svc "urn:oid:1.2.3")))))

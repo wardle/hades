@@ -746,18 +746,18 @@
 ;; Public constructor
 ;; ---------------------------------------------------------------------------
 
-(deftype FtrmProvider [^Closeable ds cs-cache cm-cache identifiers-by-url aliases-by-id]
+(deftype FtrmProvider [^Closeable ds cs-cache cm-cache]
   Closeable
   (close [_] (.close ds))
+
+  protos/NamingService
+  (naming-resolver [_] (fn [id] (db/resolve-identifier ds id)))
 
   protos/CodeSystem
   (cs-metadata [_ {:keys [url version] :as opts}]
     ;; Cache is keyed by `[url version]`, so we filter the raw key
     ;; before allocating a tuple map. URL hot-path: walks the cs-cache
     ;; doing key compares, allocates a tuple only for the survivor.
-    ;; `:identifiers` carries the OID/URN aliases this CodeSystem ships
-    ;; (when any), so the composite can build its alias index in one
-    ;; pass over cs-metadata.
     (eduction
      (filter (fn [[[k-url k-ver] entry]]
                (and (or (nil? url)     (= url k-url))
@@ -769,16 +769,15 @@
               (not (str/blank? k-ver))        (assoc :version k-ver)
               (:content entry)                (assoc :content (:content entry))
               (some? (:case-sensitive entry)) (assoc :case-sensitive (:case-sensitive entry))
-              (:supplements entry)            (assoc :supplements (:supplements entry))
-              (get identifiers-by-url k-url)  (assoc :identifiers (get identifiers-by-url k-url)))))
+              (:supplements entry)            (assoc :supplements (:supplements entry)))))
      cs-cache))
 
   (cs-resource [_ params]
-    (let [meta (lookup-entry cs-cache (get aliases-by-id (:url params)) (params-version params))]
+    (let [meta (lookup-entry cs-cache (:url params) (params-version params))]
       (cs-resource-from-meta meta)))
 
   (cs-lookup [_ {:keys [system code displayLanguage properties] :as params}]
-    (let [meta (lookup-entry cs-cache (get aliases-by-id system) (params-version params))
+    (let [meta (lookup-entry cs-cache system (params-version params))
           {:keys [url version name case-sensitive]} meta]
       (if-not meta
         (issues/unknown-system-lookup system code)
@@ -842,7 +841,7 @@
             (issues/unknown-code-lookup url code))))))
 
   (cs-validate-code [_ {:keys [system code display displayLanguage] :as params}]
-    (let [meta (lookup-entry cs-cache (get aliases-by-id system) (params-version params))
+    (let [meta (lookup-entry cs-cache system (params-version params))
           {:keys [url version case-sensitive]} meta]
       (if (nil? meta)
         (issues/unknown-system-validate system code)
@@ -910,7 +909,7 @@
     ;; already verified they're equal). Older callers may pass a single
     ;; `:system`; accept either spelling.
     (let [system'    (or systemA system)
-          meta       (lookup-entry cs-cache (get aliases-by-id system') (params-version params))
+          meta       (lookup-entry cs-cache system' (params-version params))
           {:keys [url version case-sensitive]} meta]
       (if (nil? meta)
         (issues/unknown-system-subsumes system')
@@ -940,7 +939,7 @@
 
   (cs-expand* [_ {:keys [system version filters text active-only max-hits displayLanguage]
                          :as query}]
-    (let [meta (lookup-entry cs-cache (get aliases-by-id (or system (:url query))) (or version (params-version query)))]
+    (let [meta (lookup-entry cs-cache (or system (:url query)) (or version (params-version query)))]
       (if (nil? meta)
         {:concepts []}
         (let [url (:url meta)
@@ -1111,32 +1110,19 @@
   CodeSystem + ValueSet + ConceptMap; resource-type methods return
   empty results when the container holds no rows of that type.
 
-  OID/URN/alias resolution rides on the provider's own `cs-metadata`:
-  each CodeSystem entry carries its aliases on `:identifiers`, and
-  the composite indexes those alongside the canonical URL so a
-  request against any alias routes here.
+  OID/URN/alias resolution is served by `NamingService`: the provider
+  resolves an identifier to its canonical URL against `naming_system_id`
+  on demand, and the composite re-dispatches by that URL.
 
   Logs a per-resource-type tally at boot."
   [path]
-  (let [ds                 (db/open path)
-        cs-cache           (load-codesystem-cache ds)
-        cm-cache           (load-conceptmap-cache ds)
-        identifiers-by-url (db/identifiers-by-codesystem ds)
-        ;; Substitution table for "any URL the provider answers to ⇒
-        ;; canonical." Seeded with every canonical in `cs-cache` as an
-        ;; identity entry, then alias entries layered on top. A hit
-        ;; means "this is one of mine"; nil means "unknown system."
-        aliases-by-id      (let [canonicals (into #{} (map first) (keys cs-cache))]
-                             (reduce-kv
-                               (fn [acc canonical identifiers]
-                                 (reduce #(assoc %1 %2 canonical) acc identifiers))
-                               (zipmap canonicals canonicals)
-                               identifiers-by-url))
-        by-type            (group-by :resource-type (db/list-resources ds))]
+  (let [ds       (db/open path)
+        cs-cache (load-codesystem-cache ds)
+        cm-cache (load-conceptmap-cache ds)
+        by-type  (group-by :resource-type (db/list-resources ds))]
     (log/info "opened FTRM container"
               {:source path
                :codesystems (count (get by-type "CodeSystem" []))
                :valuesets   (count (get by-type "ValueSet" []))
-               :conceptmaps (count (get by-type "ConceptMap" []))
-               :identifiers (reduce + (map count (vals identifiers-by-url)))})
-    (->FtrmProvider ds cs-cache cm-cache identifiers-by-url aliases-by-id)))
+               :conceptmaps (count (get by-type "ConceptMap" []))})
+    (->FtrmProvider ds cs-cache cm-cache)))

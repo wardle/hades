@@ -63,37 +63,38 @@
   (let [path (temp-db-path)]
     (try
       (let [ds (db/create! path)]
-        (db/add-naming-system! ds {:url "http://loinc.org"
+        (db/upsert-naming-system-id! ds {:url "http://loinc.org"
                                     :name "LOINC"
                                     :status "active"
                                     :kind "codesystem"
                                     :id-type "oid"
                                     :value "2.16.840.1.113883.6.1"
                                     :preferred true})
-        (testing "resolve-system returns canonical for known OID"
-          (is (= "http://loinc.org"
-                 (db/resolve-system ds "2.16.840.1.113883.6.1"))))
-        (testing "resolve-system returns nil for unknown alias"
-          (is (nil? (db/resolve-system ds "1.2.3.4.99"))))
-        (testing "resolve-system strips urn:oid: prefix"
-          (is (= "http://loinc.org"
-                 (db/resolve-system ds "urn:oid:2.16.840.1.113883.6.1"))))
-        (testing "resolve-system strips urn:uuid: prefix"
-          (db/add-naming-system! ds {:url "http://example.org/cs"
+        (testing "resolve-identifier returns {:url :kind} for known OID"
+          (is (= {:url "http://loinc.org" :kind :codesystem}
+                 (db/resolve-identifier ds "2.16.840.1.113883.6.1"))))
+        (testing "resolve-identifier returns nil for unknown alias"
+          (is (nil? (db/resolve-identifier ds "1.2.3.4.99"))))
+        (testing "resolve-identifier strips urn:oid: prefix"
+          (is (= {:url "http://loinc.org" :kind :codesystem}
+                 (db/resolve-identifier ds "urn:oid:2.16.840.1.113883.6.1"))))
+        (testing "resolve-identifier strips urn:uuid: prefix"
+          (db/upsert-naming-system-id! ds {:url "http://example.org/cs"
+                                      :kind "valueset"
                                       :id-type "uuid"
                                       :value "12345678-1234-1234-1234-123456789012"})
-          (is (= "http://example.org/cs"
-                 (db/resolve-system ds "urn:uuid:12345678-1234-1234-1234-123456789012"))))
-        (testing "resolve-system on blank/nil is nil"
-          (is (nil? (db/resolve-system ds nil)))
-          (is (nil? (db/resolve-system ds ""))))
-        (testing "add-naming-system! is idempotent"
-          (db/add-naming-system! ds {:url "http://loinc.org"
+          (is (= {:url "http://example.org/cs" :kind :valueset}
+                 (db/resolve-identifier ds "urn:uuid:12345678-1234-1234-1234-123456789012"))))
+        (testing "resolve-identifier on blank/nil is nil"
+          (is (nil? (db/resolve-identifier ds nil)))
+          (is (nil? (db/resolve-identifier ds ""))))
+        (testing "upsert-naming-system-id! is idempotent"
+          (db/upsert-naming-system-id! ds {:url "http://loinc.org"
                                       :id-type "oid"
                                       :value "2.16.840.1.113883.6.1"
                                       :preferred true})
-          (is (= "http://loinc.org"
-                 (db/resolve-system ds "2.16.840.1.113883.6.1")))))
+          (is (= {:url "http://loinc.org" :kind :codesystem}
+                 (db/resolve-identifier ds "2.16.840.1.113883.6.1")))))
       (finally (delete-quietly path)))))
 
 (deftest open-an-existing-fhir-tx-file-roundtrips

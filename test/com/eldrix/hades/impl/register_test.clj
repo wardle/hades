@@ -322,19 +322,18 @@
       (is (nil? (composite/find-valueset svc "http://example.com/cs-only"))))))
 
 (deftest cs-identifiers-route-to-canonical-provider
-  ;; Aliases (OIDs/URNs) ride on each CodeSystem's `:identifiers`
-  ;; metadata. The composite indexes them alongside the canonical URL
-  ;; so a lookup against any identifier finds the same provider —
-  ;; routing only, no separate alias registration.
-  (let [alias-provider (reify protos/CodeSystem
+  ;; A provider's `NamingService` resolver maps an OID/URN to the canonical
+  ;; URL; the composite consults it on a dispatch miss so a lookup against
+  ;; any identifier finds the same provider — no alias keys in the catalogue.
+  (let [canonical "http://example.com/r/cs"
+        alias-provider (reify
+                         protos/CodeSystem
                          (cs-metadata [_ {:keys [url]}]
-                           (let [canonical "http://example.com/r/cs"
-                                 identifiers ["urn:oid:1.2.3"]]
-                             (when (or (nil? url)
-                                       (= url canonical)
-                                       (some #{url} identifiers))
-                               [{:url canonical :version "1.0"
-                                 :identifiers identifiers}]))))
+                           (when (or (nil? url) (= url canonical))
+                             [{:url canonical :version "1.0"}]))
+                         protos/NamingService
+                         (naming-resolver [_]
+                           {"urn:oid:1.2.3" {:url canonical :kind :codesystem}}))
         svc (composite/from-providers [alias-provider])]
     (testing "alias resolves to the provider"
       (is (some? (composite/find-codesystem svc "urn:oid:1.2.3"))))

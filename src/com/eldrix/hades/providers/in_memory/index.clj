@@ -26,6 +26,7 @@
   `supplement/SupplementSource`. The composite detects and wires
   supplements onto their bases at registration."
   (:require [clojure.string :as str]
+            [com.eldrix.hades.providers.common.canonical :as canonical]
             [com.eldrix.hades.providers.common.fhir-extract :as fhir-extract]
             [com.eldrix.hades.providers.in-memory.provider :as in-memory]))
 
@@ -199,6 +200,19 @@
                      {} collapsed-metas)]
     {:cs-overlay cs-overlay}))
 
+(defn- index-naming-systems
+  "Build an `{identifier → {:url :kind}}` map from `:naming-system-id`
+  fhir-data, expanding each entry to its bare + URN address forms. The
+  map is the resolver a `MemoryNamingSystem` hands the composite."
+  [fhir-data]
+  (reduce
+    (fn [m {:keys [url kind id-type value]}]
+      (let [target {:url url :kind (keyword kind)}]
+        (reduce #(assoc %1 %2 target) m
+                (canonical/identifier-aliases id-type value))))
+    {}
+    (filter #(= :naming-system-id (:type %)) fhir-data)))
+
 (defn- index-valuesets
   [fhir-data]
   (let [vses (filterv #(= :valueset (:type %)) fhir-data)]
@@ -229,13 +243,16 @@
   "Build providers and diagnostics from the accumulated fhir-data.
 
   Returns:
-    {:providers   {:codesystems {...} :valuesets {...} :conceptmaps [...]}
+    {:providers   {:codesystems {...} :valuesets {...} :conceptmaps [...]
+                   :naming-system provider-or-nil}
      :diagnostics {:skipped [...]}}
 
   CodeSystem-backed providers are registered under both :codesystems and
   :valuesets so a CodeSystem can answer the implicit-ValueSet form of
   `vs-validate-code` / `vs-expand`. ValueSet-only providers are merged
   on top, so a ValueSet declared at the same URL as a CodeSystem wins.
+  `:naming-system` is a single `MemoryNamingSystem` (or nil) resolving
+  every OID/URN alias across the loaded resources.
 
   `opts` is reserved for future use (strict mode etc.) and currently
   ignored."
@@ -243,8 +260,11 @@
   ([{:keys [fhir-data]} _opts]
    (let [{:keys [cs-overlay]} (index-codesystems fhir-data)
          vs-overlay (index-valuesets fhir-data)
-         cm-providers (index-conceptmaps fhir-data)]
+         cm-providers (index-conceptmaps fhir-data)
+         naming-index (index-naming-systems fhir-data)]
      {:providers {:codesystems cs-overlay
                   :valuesets   (merge cs-overlay vs-overlay)
-                  :conceptmaps cm-providers}
+                  :conceptmaps cm-providers
+                  :naming-system (when (seq naming-index)
+                                   (in-memory/memory-naming-system naming-index))}
       :diagnostics {:skipped [] :duplicates []}})))

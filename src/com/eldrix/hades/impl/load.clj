@@ -86,7 +86,9 @@
                                       (impl-for vs-overlay %))
                                    fhir-data))
         cm-impls (map :impl (:conceptmaps providers))
-        distinct-impls (distinct (concat ordered-cs ordered-vs cm-impls))]
+        naming (:naming-system providers)
+        distinct-impls (distinct (concat ordered-cs ordered-vs cm-impls
+                                         (when naming [naming])))]
     {:providers   distinct-impls
      :skipped     skipped
      :totals     {:codesystems (count (filter #(= :codesystem-meta (:type %)) fhir-data))

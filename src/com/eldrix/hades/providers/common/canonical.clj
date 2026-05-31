@@ -94,3 +94,15 @@
   "Return the URI with the query component stripped."
   [s]
   (str (assoc (uri/uri s) :query nil)))
+
+(defn identifier-aliases
+  "Expand a `naming_system_id` `(identifier-type, value)` pair into the
+  set of address forms a client may use to reach the owning resource.
+  OID/UUID values yield both the bare value and its `urn:oid:`/
+  `urn:uuid:` URN form; every other type yields the value as-is. A
+  `NamingService` resolver maps each form to the resource's canonical URL."
+  [identifier-type value]
+  (case identifier-type
+    "oid"  #{value (str "urn:oid:" value)}
+    "uuid" #{value (str "urn:uuid:" value)}
+    #{value}))

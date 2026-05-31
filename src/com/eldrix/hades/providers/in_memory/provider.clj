@@ -736,3 +736,18 @@
   entry. Pre-computes forward and reverse translation indices."
   [cm-data]
   (->MemoryConceptMap cm-data (forward-index (:groups cm-data)) (reverse-index (:groups cm-data))))
+
+;; ---------------------------------------------------------------------------
+;; MemoryNamingSystem — resolves OID/URN aliases to canonical URLs
+;; ---------------------------------------------------------------------------
+
+(deftype MemoryNamingSystem [index]
+  protos/NamingService
+  ;; The index map IS the resolver: `{id → {:url :kind}}`, callable directly.
+  (naming-resolver [_] index))
+
+(defn memory-naming-system
+  "Construct a `MemoryNamingSystem` from an `{identifier → {:url :kind}}`
+  index map."
+  [index]
+  (->MemoryNamingSystem index))
