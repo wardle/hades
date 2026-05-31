@@ -283,18 +283,13 @@ jobs:
           restore-keys: deps-
           fail-on-cache-miss: true
 
-      # Cache key encodes the canonical package set declared in
-      # `test/com/eldrix/hades/fixtures.clj` (`fhir-packages`). Keep
-      # both in sync — adding/removing a `--dist` line below requires
-      # an edit to fixtures + a key bump, otherwise the parity test
-      # silently runs against stale cached content.
       - uses: actions/cache/restore@v5
         id: cache
         with:
           path: |
             .hades/fhir-cache
             .hades/fhir-tx.db
-          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v2
+          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
 
       - name: Provision FHIR packages — combined FTRM container + tarball cache
         id: provision
@@ -317,7 +312,7 @@ jobs:
           path: |
             .hades/fhir-cache
             .hades/fhir-tx.db
-          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v2
+          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
 
   # ---------------------------------------------------------------------------
   # Test + conformance: each restores only the caches it actually consumes.
@@ -379,7 +374,7 @@ jobs:
           path: |
             .hades/fhir-cache
             .hades/fhir-tx.db
-          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v2
+          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
           fail-on-cache-miss: true
 
       - name: Compile check
@@ -401,7 +396,7 @@ jobs:
         run: clojure -M:test
 
   conformance:
-    needs: [provision-snomed-intl, provision-loinc]
+    needs: [provision-snomed-intl, provision-loinc, provision-fhir]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -436,6 +431,14 @@ jobs:
         with:
           path: .hades/loinc-2.82.db
           key: loinc-2.82-native-v1
+          fail-on-cache-miss: true
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            .hades/fhir-cache
+            .hades/fhir-tx.db
+          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
           fail-on-cache-miss: true
 
       # Cache the tx-ecosystem clone keyed on the pinned commit. Bump
@@ -514,7 +517,7 @@ jobs:
           path: |
             .hades/fhir-cache
             .hades/fhir-tx.db
-          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v2
+          key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
           fail-on-cache-miss: true
 
       - id: pin
