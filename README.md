@@ -65,13 +65,13 @@ concurrency. Server-class hardware with more cores scales higher.
 
 | What it does                                       | FHIR endpoint              | Latency | Throughput   |
 |----------------------------------------------------|----------------------------|--------:|-------------:|
-| Single concept lookup (SNOMED)                     | `CodeSystem/$lookup`       |  347 µs | 21,900 req/s |
-| Single concept lookup (LOINC)                      | `CodeSystem/$lookup`       |  950 µs |  9,800 req/s |
-| Free-text search, 10 results                       | `ValueSet/$expand`         |  772 µs | 10,900 req/s |
-| Subsumption test (two SNOMED codes)                | `CodeSystem/$subsumes`     |  222 µs | 37,500 req/s |
-| Code validation against a value set                | `ValueSet/$validate-code`  |  575 µs | 13,900 req/s |
-| Value set expansion (ECL refinement, 10 results)   | `ValueSet/$expand`         |  1.1 ms |  7,700 req/s |
-| Concept translation (SNOMED → ICD-10)              | `ConceptMap/$translate`    |  162 µs | 51,100 req/s |
+| Single concept lookup (SNOMED)                     | `CodeSystem/$lookup`       |  316 µs | 25,800 req/s |
+| Single concept lookup (LOINC)                      | `CodeSystem/$lookup`       |  527 µs | 17,000 req/s |
+| Free-text search, 10 results                       | `ValueSet/$expand`         |  757 µs | 11,500 req/s |
+| Subsumption test (two SNOMED codes)                | `CodeSystem/$subsumes`     |  221 µs | 38,900 req/s |
+| Code validation against a value set                | `ValueSet/$validate-code`  |  241 µs | 34,900 req/s |
+| Value set expansion (ECL refinement, 10 results)   | `ValueSet/$expand`         |  1.16 ms |  7,500 req/s |
+| Concept translation (SNOMED → ICD-10)              | `ConceptMap/$translate`    |  336 µs | 25,100 req/s |
 
 See [Performance](doc/performance.md) for the methodology, tail
 latencies and the full per-operation breakdown.
