@@ -444,7 +444,6 @@
   (let [base-url (str "http://hl7.org/fhir/" type "/")]
     (cond-> {"resourceType" "Bundle"
              "type"         "searchset"
-             "total"        (int total)
              "entry"        (mapv (fn [r]
                                     (let [m (resource->map r)
                                           full-url (str base-url
@@ -453,6 +452,9 @@
                                                "search"  {"mode" "match"}}
                                         (seq full-url) (assoc "fullUrl" full-url))))
                                   resources)}
+      ;; `total` is omitted under pagination — FHIR allows a searchset with
+      ;; no total (the count isn't known without a full deduped enumeration).
+      total     (assoc "total" (int total))
       self-link (assoc "link" [{"relation" "self" "url" self-link}]))))
 
 (defn expansion->valueset

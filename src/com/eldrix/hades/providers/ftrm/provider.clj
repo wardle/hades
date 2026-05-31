@@ -24,7 +24,6 @@
             [clojure.string :as str]
             [clojure.tools.logging.readable :as log]
             [com.eldrix.hades.providers.common.canonical :as canonical]
-            [com.eldrix.hades.providers.common.search-filter :as search-filter]
             [com.eldrix.hades.providers.common.compose :as compose]
             [com.eldrix.hades.providers.common.display :as display]
             [com.eldrix.hades.providers.common.issues :as issues]
@@ -635,13 +634,20 @@
            :member-id-hi   (:valueset/member_id_hi row)})))))
 
 (defn- load-vs-entry
-  "Point-read a ValueSet's full entry (metadata / compose JSON parsed) for
-  an already-resolved concrete `version`."
-  [ds url version]
-  (some-> (jdbc/execute-one! ds
-            ["SELECT url, version, metadata, compose FROM valueset_resource WHERE url = ? AND version = ?"
-             url version])
-          valueset-row->entry))
+  "Point-read a ValueSet's entry for an already-resolved concrete
+  `version`. `summary?` skips the `compose` column entirely — a `_summary`
+  listing only needs the metadata, and `compose` blobs run to megabytes,
+  so reading and JSON-parsing one just to drop it is the dominant cost of
+  a summary page."
+  ([ds url version] (load-vs-entry ds url version false))
+  ([ds url version summary?]
+   (some-> (jdbc/execute-one! ds
+             (if summary?
+               ["SELECT url, version, metadata FROM valueset_resource WHERE url = ? AND version = ?"
+                url version]
+               ["SELECT url, version, metadata, compose FROM valueset_resource WHERE url = ? AND version = ?"
+                url version]))
+           valueset-row->entry)))
 
 (defn- limit-offset-sql [cnt offset]
   (cond
@@ -750,6 +756,39 @@
     [(str "lower(json_extract(r.metadata,'$." json-key "')) LIKE ? ESCAPE '\\'")
      (like-pattern f)]))
 
+;; ---------------------------------------------------------------------------
+;; Catalogue listing — `cs-metadata`/`vs-metadata` honour `:_count` by
+;; pushing `ORDER BY url,version LIMIT` into SQL. Both tables are
+;; `WITHOUT ROWID`, clustered on `(url, version)` = the listing sort order,
+;; so a page reads only `:_count` rows with no sort or full scan.
+;; ---------------------------------------------------------------------------
+
+(defn- col-filter-sql
+  "WHERE fragment + bind matching a direct catalogue column against a
+  `::input/string-filter`. `:exact` is case-sensitive equality; the
+  others a case-insensitive `LIKE`."
+  [col {:keys [modifier] :as f}]
+  (if (= :exact modifier)
+    [(str col " = ?") (:value f)]
+    [(str "lower(" col ") LIKE ? ESCAPE '\\'") (like-pattern f)]))
+
+(defn- catalogue-where
+  "Build `[where-sql binds]` for a catalogue listing over a clustered
+  table whose columns are url/version/status/name/title/description.
+  `where-sql` is nil when unfiltered."
+  [{:keys [url version status name title description]}]
+  (let [clauses (cond-> []
+                  url                        (conj ["url = ?" url])
+                  (not (str/blank? version)) (conj ["version = ?" version])
+                  status                     (conj ["status = ?" status])
+                  name                       (conj (col-filter-sql "name" name))
+                  title                      (conj (col-filter-sql "title" title))
+                  description                (conj (col-filter-sql "description" description)))]
+    [(when (seq clauses) (str " WHERE " (str/join " AND " (map first clauses))))
+     (mapcat rest clauses)]))
+
+(defn- limit-clause [_count]
+  (when _count (str " LIMIT " (long _count))))
 
 ;; ---------------------------------------------------------------------------
 ;; ConceptMap catalogue
@@ -768,23 +807,22 @@
   (naming-resolver [_] (fn [id] (db/resolve-identifier ds id)))
 
   protos/CodeSystem
-  (cs-metadata [_ {:keys [url version] :as opts}]
-    ;; Cache is keyed by `[url version]`, so we filter the raw key
-    ;; before allocating a tuple map. URL hot-path: walks the cs-cache
-    ;; doing key compares, allocates a tuple only for the survivor.
-    (eduction
-     (filter (fn [[[k-url k-ver] entry]]
-               (and (or (nil? url)     (= url k-url))
-                    (or (nil? version) (= version k-ver))
-                    (search-filter/matches-resource-filters?
-                     (select-keys entry [:status :name :title :description]) opts))))
-     (map (fn [[[k-url k-ver] entry]]
-            (cond-> {:url k-url}
-              (not (str/blank? k-ver))        (assoc :version k-ver)
-              (:content entry)                (assoc :content (:content entry))
-              (some? (:case-sensitive entry)) (assoc :case-sensitive (:case-sensitive entry))
-              (:supplements entry)            (assoc :supplements (:supplements entry)))))
-     cs-cache))
+  (cs-metadata [_ {:keys [_count] :as opts}]
+    ;; Page `codesystem_meta` directly (clustered on (url,version)) so a
+    ;; `:_count` listing reads only its page; routing/index callers pass
+    ;; no `:_count` and stream the lot, still in (url,version) order.
+    (let [[where binds] (catalogue-where opts)
+          sql (str "SELECT url, version, content, case_sensitive, supplements"
+                   " FROM codesystem_meta" where
+                   " ORDER BY url, version" (limit-clause _count))]
+      (into []
+            (map (fn [{:keys [url version content case_sensitive supplements]}]
+                   (cond-> {:url url}
+                     (seq version)          (assoc :version version)
+                     content                (assoc :content content)
+                     (some? case_sensitive) (assoc :case-sensitive (= 1 case_sensitive))
+                     supplements            (assoc :supplements supplements))))
+            (jdbc/plan ds (into [sql] binds)))))
 
   (cs-resource [_ params]
     (let [meta (lookup-entry cs-cache (:url params) (params-version params))]
@@ -1006,7 +1044,7 @@
                 (seq issues) (assoc :issues issues))))))))
 
   protos/ValueSet
-  (vs-metadata [_ {:keys [url version status name title description]}]
+  (vs-metadata [_ {:keys [url version status name title description _count]}]
     (let [string-clauses (cond-> []
                            name        (conj (string-filter-sql "name" name))
                            title       (conj (string-filter-sql "title" title))
@@ -1021,7 +1059,12 @@
                    (when meta-filter?
                      " JOIN valueset_resource r ON r.url = v.url AND r.version = v.version")
                    (when (seq clauses)
-                     (str " WHERE " (str/join " AND " (map first clauses)))))]
+                     (str " WHERE " (str/join " AND " (map first clauses))))
+                   ;; `valueset` is WITHOUT ROWID, clustered on (url,version),
+                   ;; so this ORDER BY is the natural scan order — a `:_count`
+                   ;; listing reads only its page.
+                   " ORDER BY v.url, v.version"
+                   (limit-clause _count))]
       ;; `plan` streams the result-set cursor straight into one vector via
       ;; the xform — no second collection (unlike `execute!`, which builds
       ;; its own vector first).
@@ -1031,10 +1074,10 @@
                      (not (str/blank? version)) (assoc :version version))))
             (jdbc/plan ds (into [sql] (mapcat rest) clauses)))))
 
-  (vs-resource [_ params]
-    (when-let [{:keys [version]} (resolve-vs ds (:url params)
+  (vs-resource [_ {:keys [url summary?] :as params}]
+    (when-let [{:keys [version]} (resolve-vs ds url
                                              (or (:valueSetVersion params) (params-version params)))]
-      (some-> (load-vs-entry ds (:url params) version) vs-resource-from-entry)))
+      (some-> (load-vs-entry ds url version summary?) vs-resource-from-entry)))
 
   (vs-expand [_ svc params]
     (let [url (:url params)

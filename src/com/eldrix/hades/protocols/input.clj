@@ -128,10 +128,16 @@
 ;;   :status             — exact-match status token
 ;;   :name :title        — `::string-filter` (match per `:modifier`),
 ;;   :description          same semantics as `::search-params`
+;;   :_count             — listing limit: a provider with a large catalogue
+;;                          returns at most this many of its sorted-by-
+;;                          `(url, version)` tuples (the composite passes
+;;                          `offset + count` and applies the global offset
+;;                          itself after merging). Absent for routing/index
+;;                          callers, who want every match.
 ;; ---------------------------------------------------------------------------
 
 (s/def ::include-implicit? boolean?)
 
 (s/def ::metadata-opts
   (s/keys :opt-un [::url ::version ::include-implicit?
-                   ::status ::name ::title ::description]))
+                   ::status ::name ::title ::description ::_count]))

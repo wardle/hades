@@ -201,8 +201,11 @@
 ;; ---------------------------------------------------------------------------
 
 (s/def ::resources (s/coll-of ::resource-meta))
+;; `:total` is omitted under pagination — see `composite/search*`. When
+;; present it is the exact deduplicated match count.
 (s/def ::search-result
-  (s/keys :req-un [::total ::resources]))
+  (s/keys :req-un [::resources]
+          :opt-un [::total]))
 
 ;; ---------------------------------------------------------------------------
 ;; Provider self-description — registry-key tuples each provider

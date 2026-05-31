@@ -493,31 +493,27 @@
 ;; ---------------------------------------------------------------------------
 ;; Search — FHIR REST search for CodeSystem / ValueSet
 ;;
-;; Composes existing per-provider primitives (`*-metadata` +
-;; `*-resource`). The metadata walk gives a cheap `(url, version)`
-;; projection; we pre-filter on those keys so the URL hot path
-;; (1400/1800 FS01 requests) collapses each provider to ≤1 surviving
-;; tuple before any `*-resource` materialisation.
+;; A provider with a large catalogue returns only its sorted, `:_count`-
+;; limited slice (FTRM pushes `ORDER BY url,version LIMIT` into SQL); small
+;; providers ignore `:_count` and return their full set. The composite
+;; concatenates the slices, dedups by `[url version]` (first registration
+;; wins), sorts, applies the global `:_offset`, and materialises only the
+;; page via `*-resource` (`:_summary=true` drops `:compose`). `?url=`
+;; collapses each provider to ≤1 tuple.
 ;;
-;; Routing-only entries — Hermes' "all of SNOMED" implicit ValueSet
-;; and the wildcard CodeSystem version — are flagged `:implicit?` on
-;; their metadata tuples and filtered out at tuple level so catalogue
-;; listings never need a `*-resource` round-trip to know they don't
-;; produce a published resource.
+;; `Bundle.total` is reported only when the merged result is COMPLETE — no
+;; provider returned a full `:_count` page, so the deduped merged set holds
+;; every match and its count is exact. Once any provider fills its page
+;; there is more than one page across providers: an exact deduplicated
+;; total would cost a full key enumeration, and summing per-provider counts
+;; would double-count any `[url version]` served by two providers — so the
+;; total is omitted (FHIR permits a searchset with no total).
 ;; ---------------------------------------------------------------------------
 
-(defn- key->params
-  "Map a metadata tuple to the `*-resource` params map. Multi-resource
-  providers dispatch on `:url`/`:system`; single-resource impls ignore
-  the keys and return their bound resource."
-  [{:keys [url version]}]
-  (cond-> {:url url :system url}
-    version (assoc :version version)))
-
 (defn- compare-by-url-version
-  "Sort comparator: alphabetic on URL, then `semver-compare` on version.
-  The URL compare short-circuits, so versions are only parsed for the
-  rare same-URL ties."
+  "Catalogue sort order: alphabetic on URL, then `semver-compare` on
+  version. The URL compare short-circuits, so versions are only parsed for
+  same-URL ties."
   [a b]
   (let [c (compare (:url a) (:url b))]
     (if (zero? c)
@@ -525,66 +521,79 @@
       c)))
 
 (defn- compare-pair-by-url-version
-  "Sort comparator over `[provider tuple]` pairs."
+  "`compare-by-url-version` lifted over `[provider tuple]` pairs."
   [[_ a] [_ b]]
   (compare-by-url-version a b))
 
-(defn- summarise-resource
-  "Apply `_summary` projection. `_summary=true` drops `:compose` from
-  ValueSet resources (the only large field `vs-resource` impls
-  return). Other values pass through."
-  [{:keys [_summary]} m]
-  (if (= "true" _summary)
-    (dissoc m :compose)
-    m))
+(defn- key->params
+  "Map a metadata tuple to the `*-resource` params map. Multi-resource
+  providers dispatch on `:url`/`:system`; single-resource impls ignore the
+  keys."
+  [{:keys [url version]}]
+  (cond-> {:url url :system url}
+    version (assoc :version version)))
 
-(defn- pair-seq
-  "Lazy seq of `[provider tuple]` pairs. Filters (`:url :version :status
-  :name :title :description`) and implicit-suppression are pushed into
-  `metadata-fn` via the metadata-opts DSL; providers honour them, so each
-  emitted tuple is a match."
-  [providers metadata-fn opts]
-  (eduction
-   (mapcat (fn [p] (eduction (map #(vector p %)) (metadata-fn p opts))))
-   (distinct providers)))
+(defn- summarise
+  "Project a resource to its `_summary` form by dropping the heavy
+  `:compose` field; other summary elements pass through."
+  [resource]
+  (dissoc resource :compose))
 
-(defn- page-of
-  "Lazy page slice: drop `offset`, then take `_count` if specified."
-  [_count offset xs]
-  (cond->> (drop offset xs)
-    _count (take _count)))
+(defn- merge-pages
+  "Flatten the per-provider `[provider slice]` pairs into deduplicated,
+  sorted `[provider tuple]` pairs: dedup by `[url version]` (first
+  registration wins), ordered by `(url, version)`."
+  [provider+slices]
+  (->> provider+slices
+       (mapcat (fn [[provider slice]] (map (fn [tuple] [provider tuple]) slice)))
+       (reduce (fn [acc [_ {:keys [url version]} :as pair]]
+                 (let [k [url version]]
+                   (cond-> acc (not (contains? acc k)) (assoc k pair))))
+               {})
+       vals
+       (sort compare-pair-by-url-version)))
 
 (defn- search*
-  "Search `providers` for the resources matching `params`. The full
-  filter set (`:url :version :status :name :title :description`) is
-  pushed to each provider via the metadata-opts DSL, and implicit
-  routing-only entries are suppressed (`:include-implicit? false`), so
-  each emitted tuple is a real, listable match. Tuples are deduplicated
-  by `[url version]` (a resource served by two providers counts once,
-  first registration wins), sorted, and only the requested page is
-  materialised via `resource-fn` — the total is counted from the cheap
-  metadata tuples, never by materialising the whole catalogue.
-
-  `:_summary=count` returns `total` only; `:_count`/`:_offset`
-  paginate. Defaults and caps for `:_count` are applied at the HTTP
-  boundary."
+  "Search `providers` for the resources matching `params`, a
+  `::input/search-params`. Filters and `:include-implicit? false` are
+  pushed to each provider's `metadata-fn`, with a `:_count` of
+  `offset + count` so a large provider returns only enough of its sorted
+  slice to satisfy the global offset (small providers ignore it and the
+  merge sorts). The slices are merged + deduped (`merge-pages`), the global
+  `:_offset` applied, and only the page materialised via `resource-fn`
+  (`:_summary=true` drops `:compose`). `Bundle.total` is included only when
+  the merged set is complete — no provider filled its `:_count` page;
+  `:_summary=count` pulls everything and returns it with no resources."
   [providers metadata-fn resource-fn {:keys [_count _offset _summary] :as params}]
-  (let [filters (dissoc params :_count :_offset :_summary)
-        opts    (into {:include-implicit? false} filters)
-        deduped (->> (pair-seq providers metadata-fn opts)
-                     (reduce (fn [m [_ t :as pair]]
-                               (let [k [(:url t) (:version t)]]
-                                 (cond-> m (not (contains? m k)) (assoc k pair))))
-                             {})
-                     vals)
-        ;; `_summary=count` needs only the total, so skip the sort entirely.
-        resources (when-not (= "count" _summary)
-                    (into [] (comp (keep (fn [[p t]] (resource-fn p (key->params t))))
-                                   (map #(summarise-resource params %)))
-                          (page-of _count (or _offset 0)
-                                   (sort compare-pair-by-url-version deduped))))]
+  ;; `_summary=count` and `_count=0` are both count-only: pull everything,
+  ;; report the total, return no resources.
+  (let [count?     (or (= "count" _summary) (and _count (zero? _count)))
+        summary?   (= "true" _summary)
+        offset     (or _offset 0)
+        fetch      (when (and _count (not count?)) (+ offset _count))
+        opts       (cond-> (assoc (dissoc params :_offset :_count :_summary)
+                                  :include-implicit? false)
+                     fetch (assoc :_count fetch))
+        slices     (mapv (fn [provider] [provider (into [] (metadata-fn provider opts))])
+                         (distinct providers))
+        ;; A provider that filled its `:_count` page may have more, so the
+        ;; merged set is not known to be complete and the total is omitted.
+        truncated? (boolean (and fetch (some (fn [[_ slice]] (>= (count slice) fetch)) slices)))
+        merged     (merge-pages slices)
+        page       (when-not count?
+                     (cond->> (drop offset merged) _count (take _count)))
+        resources  (mapv (fn [[provider tuple]]
+                           ;; `:summary?` lets a provider skip materialising
+                           ;; heavy fields (FTRM's `compose` blob); `summarise`
+                           ;; still drops `:compose` for providers that ignore it.
+                           (let [params (cond-> (key->params tuple)
+                                          summary? (assoc :summary? true))]
+                             (cond-> (resource-fn provider params)
+                               summary? summarise)))
+                         page)]
     (s/assert ::result/search-result
-              {:total (count deduped) :resources (or resources [])})))
+              (cond-> {:resources resources}
+                (not truncated?) (assoc :total (count merged))))))
 
 (defn search-code-systems
   "Search registered CodeSystem resources. `params` is a
@@ -596,9 +605,8 @@
   "Search registered ValueSet resources. `params` is a
   `::input/search-params`; returns a `::result/search-result`.
 
-  Implicit ValueSets — those advertised in `vs-metadata` for routing
-  only — are dropped at the provider via `:include-implicit? false` in
-  the metadata-opts the composite hands down."
+  Implicit ValueSets — those advertised for routing only — are suppressed
+  at the provider via `:include-implicit? false`."
   [{:keys [vs-providers]} params]
   (search* vs-providers protos/vs-metadata protos/vs-resource params))
 
@@ -618,8 +626,7 @@
                      (sort compare-by-url-version))
         page (if (= "count" _summary)
                []
-               (into [] (map #(summarise-resource params %))
-                     (page-of _count (or _offset 0) matched)))]
+               (vec (cond->> (drop (or _offset 0) matched) _count (take _count))))]
     (s/assert ::result/search-result {:total (count matched) :resources page})))
 
 ;; ---------------------------------------------------------------------------
