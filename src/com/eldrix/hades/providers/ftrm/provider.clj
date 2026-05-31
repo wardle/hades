@@ -97,6 +97,18 @@
    :target-version (:conceptmap/target_version row)
    :metadata       (parse-json (:conceptmap/metadata row))})
 
+(defn- latest-by-url
+  "Index a `{[url version] → entry}` cache as a plain `{url → entry}` map
+  keeping each URL's SemVer-greatest version — the bare-URL fallback for
+  `lookup-entry`, so an unversioned reference resolves with one `get`
+  instead of scanning the cache."
+  [cache]
+  (reduce-kv (fn [m [url version] entry]
+               (cond-> m
+                 (pos? (canonical/semver-compare version (:version (get m url))))
+                 (assoc url entry)))
+             {} cache))
+
 (defn- load-codesystem-cache [ds]
   (into {}
         (map (fn [row]
@@ -254,24 +266,16 @@
 ;; entry. Version may be implicit; we tolerate either form.
 ;; ---------------------------------------------------------------------------
 
-(defn- lookup-entry [cache url version]
+(defn- lookup-entry
+  "Resolve the entry for `url`+`version`: an exact `[url version]` hit in
+  `cache`, else the unversioned (`\"\"`) entry, else — for a bare URL — the
+  SemVer-latest version via the precomputed `latest` index (`latest-by-url`).
+  Ranking the latest explicitly is a healthcare-safety requirement (never
+  rely on hash-map iteration order); the index keeps it O(1) on the hot path."
+  [cache latest url version]
   (or (when (not (str/blank? version)) (get cache (key-for url version)))
       (get cache (key-for url ""))
-      ;; If the registered key was bare-URL but the cache only has
-      ;; versioned forms, pick the SemVer-latest entry for this URL.
-      ;; Healthcare safety: hash-map iteration order is unspecified, so
-      ;; we must explicitly rank by version (per FHIR tx-ecosystem and
-      ;; the composite's `pick-latest-semver` policy).
-      (->> cache
-           (reduce-kv (fn [best [k-url k-ver] entry]
-                        (if (= url k-url)
-                          (if (or (nil? best)
-                                  (pos? (canonical/semver-compare k-ver (first best))))
-                            [k-ver entry]
-                            best)
-                          best))
-                      nil)
-           second)))
+      (get latest url)))
 
 (defn- params-version [params]
   (or (:version params) (:system-version params)))
@@ -799,7 +803,7 @@
 ;; Public constructor
 ;; ---------------------------------------------------------------------------
 
-(deftype FtrmProvider [^Closeable ds cs-cache cm-cache]
+(deftype FtrmProvider [^Closeable ds cs-cache cs-latest cm-cache cm-latest]
   Closeable
   (close [_] (.close ds))
 
@@ -825,11 +829,11 @@
             (jdbc/plan ds (into [sql] binds)))))
 
   (cs-resource [_ params]
-    (let [meta (lookup-entry cs-cache (:url params) (params-version params))]
+    (let [meta (lookup-entry cs-cache cs-latest (:url params) (params-version params))]
       (cs-resource-from-meta meta)))
 
   (cs-lookup [_ {:keys [system code displayLanguage properties] :as params}]
-    (let [meta (lookup-entry cs-cache system (params-version params))
+    (let [meta (lookup-entry cs-cache cs-latest system (params-version params))
           {:keys [url version name case-sensitive]} meta]
       (if-not meta
         (issues/unknown-system-lookup system code)
@@ -893,7 +897,7 @@
             (issues/unknown-code-lookup url code))))))
 
   (cs-validate-code [_ {:keys [system code display displayLanguage] :as params}]
-    (let [meta (lookup-entry cs-cache system (params-version params))
+    (let [meta (lookup-entry cs-cache cs-latest system (params-version params))
           {:keys [url version case-sensitive]} meta]
       (if (nil? meta)
         (issues/unknown-system-validate system code)
@@ -961,7 +965,7 @@
     ;; already verified they're equal). Older callers may pass a single
     ;; `:system`; accept either spelling.
     (let [system'    (or systemA system)
-          meta       (lookup-entry cs-cache system' (params-version params))
+          meta       (lookup-entry cs-cache cs-latest system' (params-version params))
           {:keys [url version case-sensitive]} meta]
       (if (nil? meta)
         (issues/unknown-system-subsumes system')
@@ -991,7 +995,7 @@
 
   (cs-expand* [_ {:keys [system version filters text active-only max-hits displayLanguage]
                          :as query}]
-    (let [meta (lookup-entry cs-cache (or system (:url query)) (or version (params-version query)))]
+    (let [meta (lookup-entry cs-cache cs-latest (or system (:url query)) (or version (params-version query)))]
       (if (nil? meta)
         {:concepts []}
         (let [url (:url meta)
@@ -1118,7 +1122,7 @@
 
   (cm-resource [_ params]
     (let [{:keys [url version name title status source-uri target-uri metadata]}
-          (lookup-entry cm-cache (:url params) (params-version params))
+          (lookup-entry cm-cache cm-latest (:url params) (params-version params))
           description (get metadata "description")]
       (cond-> {:url url}
         version     (assoc :version version)
@@ -1130,7 +1134,7 @@
         target-uri  (assoc :target-uri target-uri))))
 
   (cm-translate [_ {:keys [code system target] :as params}]
-    (let [entry (lookup-entry cm-cache (:url params) (params-version params))
+    (let [entry (lookup-entry cm-cache cm-latest (:url params) (params-version params))
           {:keys [url version]} entry
           target-system (when (not= target (:target-uri entry)) target)
           rows (when entry
@@ -1182,4 +1186,4 @@
                :codesystems (count (get by-type "CodeSystem" []))
                :valuesets   (count (get by-type "ValueSet" []))
                :conceptmaps (count (get by-type "ConceptMap" []))})
-    (->FtrmProvider ds cs-cache cm-cache)))
+    (->FtrmProvider ds cs-cache (latest-by-url cs-cache) cm-cache (latest-by-url cm-cache))))
