@@ -17,15 +17,28 @@ For ad-hoc spot-checking of a single test, run `k6` directly (see
 [Spot-check one test](#spot-check-one-test) below) — that's one
 command, no flavor needed.
 
+## Setup
+
+The recipes below run from two checkouts and refer to them through shell
+variables. Set these once per shell, pointing at wherever you cloned each
+repo:
+
+```bash
+export HADES=/path/to/hades            # this repository
+export TXBENCH=/path/to/tx-benchmark   # the benchmark fork, cloned below
+git clone https://github.com/wardle/tx-benchmark "$TXBENCH"
+```
+
+`k6` must be on your `PATH`; the `full` sweep additionally needs `bun`
+and `docker`.
+
 ## Ground rules
 
 Follow these to get a comparable, honest answer:
 
 - **Use only the recipes below.** They are the tracked, supported way to
-  run the benchmark. Ignore anything *untracked* under
-  `~/Dev/tx-benchmark/scripts/` (e.g. `bench-hades-native.sh`,
-  `run-native.ts`, `report-native.ts`) — that's stale local scaffolding
-  from a prior session, not part of the benchmark.
+  run the benchmark. Anything untracked in the checkout is local
+  scaffolding, not part of the benchmark.
 - **Serve the single combined FTRM container `.hades/fhir-tx.db`.** It
   already holds every FHIR package, including VSAC, so one file is the
   whole canonical FHIR fixture. (Point `serve` at this file, not at the
@@ -67,7 +80,7 @@ line — better startup, lower JVM noise. (`clj -T:build uber`.)
 
 ```bash
 set -e
-cd ~/Dev/hades
+cd "$HADES"
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -M:run serve \
   .hades/snomed-uk-monolith.db \
@@ -79,7 +92,7 @@ trap 'kill $HADES_PID 2>/dev/null' EXIT
 
 until curl -fsS http://localhost:8080/fhir/metadata >/dev/null 2>&1; do sleep 1; done
 
-cd ~/Dev/tx-benchmark
+cd "$TXBENCH"
 mkdir -p "results/$RUN_ID/hades" && \
 k6 run \
   --env BASE_URL=http://localhost:8080/fhir \
@@ -102,7 +115,7 @@ regression sweep across the entire benchmark surface.
 
 ```bash
 set -e
-cd ~/Dev/hades
+cd "$HADES"
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -M:run serve \
   .hades/snomed-uk-monolith.db \
@@ -114,7 +127,7 @@ trap 'kill $HADES_PID 2>/dev/null' EXIT
 
 until curl -fsS http://localhost:8080/fhir/metadata >/dev/null 2>&1; do sleep 1; done
 
-cd ~/Dev/tx-benchmark
+cd "$TXBENCH"
 mkdir -p "results/$RUN_ID/hades/benchmark"
 
 # 1. Preflight (records which tests pass, gates the bench loop below)
@@ -156,7 +169,7 @@ preserving each one would just litter `results/`. Pick a memorable tag
 the dated runs.
 
 ```bash
-cd ~/Dev/tx-benchmark
+cd "$TXBENCH"
 RUN_ID=probe                         # or any short scratch label
 mkdir -p "results/$RUN_ID/hades/benchmark"
 k6 run --vus 10 --duration 10s \
@@ -175,7 +188,7 @@ and visible in Grafana. Prerequisites: `bun`, `docker`, `k6`.
 
 ```bash
 set -e
-cd ~/Dev/hades
+cd "$HADES"
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -T:build uber
 java -Xmx6g -jar target/hades.jar serve \
@@ -188,7 +201,7 @@ trap 'kill $HADES_PID 2>/dev/null' EXIT
 
 until curl -fsS http://localhost:8080/fhir/metadata >/dev/null 2>&1; do sleep 1; done
 
-cd ~/Dev/tx-benchmark
+cd "$TXBENCH"
 ( cd observability && docker compose up -d )
 bun scripts/run.ts hades http://localhost:8080/fhir "$RUN_ID"
 ```
@@ -210,7 +223,7 @@ as `full`; the only thing missing is the Prometheus/Grafana stream.
 
 ```bash
 set -e
-cd ~/Dev/hades
+cd "$HADES"
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -M:run serve \
   .hades/snomed-uk-monolith.db \
@@ -222,7 +235,7 @@ trap 'kill $HADES_PID 2>/dev/null' EXIT
 
 until curl -fsS http://localhost:8080/fhir/metadata >/dev/null 2>&1; do sleep 1; done
 
-cd ~/Dev/tx-benchmark
+cd "$TXBENCH"
 mkdir -p "results/$RUN_ID/hades/benchmark"
 k6 run --env BASE_URL=http://localhost:8080/fhir --env SERVER_NAME=hades \
   --env RUN_ID="$RUN_ID" preflight/run.js
@@ -249,7 +262,7 @@ them from the live site:
 round (`runs.json`) — there is no newer one to accidentally skip.
 
 That site is built from a machine-readable mirror vendored at
-`~/Dev/tx-benchmark/site/src/data/round-0.json`, which carries the same
+`$TXBENCH/site/src/data/round-0.json`, which carries the same
 numbers at full precision. Prefer the local JSON for precise values, but
 confirm its `date` still matches the site before trusting it (last
 matched `2026-05-19`). Per-server schema:
@@ -286,7 +299,7 @@ Map local k6 output onto that schema:
 
 CI and local dev both track the head of [`wardle/tx-benchmark`](https://github.com/wardle/tx-benchmark)
 (our fork) — there is no pinned commit. To pick up upstream test or
-pool-data changes, just `git -C ~/Dev/tx-benchmark pull` and re-run
+pool-data changes, just `git -C "$TXBENCH" pull` and re-run
 `preflight`; fix any newly-failing ops in hades.
 
 If you need to change tx-benchmark itself (a new hades-specific test, a
