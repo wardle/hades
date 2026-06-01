@@ -338,10 +338,6 @@ they mean one of three pre-defined recipes documented in
 If the user doesn't name a flavor, ask which one — don't invent a new
 shape. Each flavor in the doc is a single self-contained shell block
 that boots hades, waits, runs, and tears down — execute it as written.
-Don't read or run scripts under `~/Dev/tx-benchmark/scripts/` that
-aren't tracked in the repo (untracked local additions like
-`run-native.ts`, `bench-hades-native.sh` are stale scaffolding from
-prior sessions).
 
 ### Conformance testing
 
