@@ -117,7 +117,9 @@
        "encouraged to use the correct case anyway"))
 
 (defn format-display-mismatch
-  "Format the `:message` text for an invalid-display issue.
+  "Build the `:text` and validator `:message-id` for an invalid-display issue.
+  Returns `{:text :message-id}`; `:message-id` is nil for the
+  no-display-in-language branch, which has no mapped validator key yet.
 
   Inputs are taken from the matched concept the validator already has:
     given-display    — the display the caller passed
@@ -146,22 +148,33 @@
         lang-filtered  (if display-language
                          (filter #(= (:lang %) display-language) all-choices)
                          all-choices)
-        unique-choices (distinct lang-filtered)]
+        unique-choices (distinct lang-filtered)
+        collapse-ws    (fn [s] (some-> s (str/replace #"\s+" " ") str/trim))
+        ws-only-diff?  (some (fn [{:keys [display]}]
+                               (and (not= given-display display)
+                                    (= (collapse-ws given-display) (collapse-ws display))))
+                             unique-choices)
+        wrong-display  (if ws-only-diff?
+                         "Display_Name_WS_for__should_be_one_of__instead_of"
+                         "Display_Name_for__should_be_one_of__instead_of")]
     (cond
       (and display-language (empty? unique-choices) has-lang-info?)
-      (str prefix "There are no valid display names found for language(s) '" lang
-           "'. Default display is '" primary-display "'")
+      {:text (str prefix "There are no valid display names found for language(s) '" lang
+                  "'. Default display is '" primary-display "'")}
 
       (> (count unique-choices) 1)
       (let [formatted (map (fn [{:keys [display lang]}]
                              (if lang (str "'" display "' (" lang ")") (str "'" display "'")))
                            unique-choices)]
-        (str prefix "Valid display is one of " (count unique-choices) " choices: "
-             (str/join " or " formatted) " (for the language(s) '" lang "')"))
+        {:text       (str prefix "Valid display is one of " (count unique-choices) " choices: "
+                          (str/join " or " formatted) " (for the language(s) '" lang "')")
+         :message-id wrong-display})
 
       (and (= 1 (count unique-choices)) (:lang (first unique-choices)))
       (let [{display :display, choice-lang :lang} (first unique-choices)]
-        (str prefix "Valid display is '" display "' (" choice-lang ") (for the language(s) '" lang "')"))
+        {:text       (str prefix "Valid display is '" display "' (" choice-lang ") (for the language(s) '" lang "')")
+         :message-id wrong-display})
 
       :else
-      (str prefix "Valid display is '" primary-display "' (for the language(s) '" lang "')"))))
+      {:text       (str prefix "Valid display is '" primary-display "' (for the language(s) '" lang "')")
+       :message-id wrong-display})))

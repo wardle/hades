@@ -289,15 +289,16 @@
                  (let [lenient?  (get params :lenient-display-validation true)
                        cs-m      (when system (composite/cs-meta svc system))
                        cs-lang   (when cs-m (or (:language cs-m) (get cs-m "language")))
-                       msg       (issues/format-display-mismatch display system code
-                                   (:display match) (:designations match) (:displayLanguage params) cs-lang)
-                       display-issue {:severity     (if lenient? "warning" "error")
-                                      :type         "invalid"
-                                      :details-code "invalid-display"
-                                      :text         msg
-                                      :expression   ["Coding.display"]}]
+                       {:keys [text message-id]} (issues/format-display-mismatch display system code
+                                                   (:display match) (:designations match) (:displayLanguage params) cs-lang)
+                       display-issue (cond-> {:severity     (if lenient? "warning" "error")
+                                              :type         "invalid"
+                                              :details-code "invalid-display"
+                                              :text         text
+                                              :expression   ["Coding.display"]}
+                                       message-id (assoc :message-id message-id))]
                    (assoc result :result (boolean lenient?)
-                                 :message msg
+                                 :message text
                                  :issues (filterv some? [case-issue display-issue])))
                  (cond-> result case-issue (assoc :issues [case-issue])))]
     (apply-cross-cutting result svc system url caller-version match-ver override-pattern include-ver force? params)))
@@ -333,6 +334,7 @@
       (let [base-issues [{:severity     "error"
                           :type         "code-invalid"
                           :details-code "not-in-vs"
+                          :message-id   "None_of_the_provided_codes_are_in_the_value_set_one"
                           :text         not-in-vs-msg
                           :expression   ["Coding.code"]}]
             all-issues  (if cs-issue (conj base-issues cs-issue) base-issues)

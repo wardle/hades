@@ -320,14 +320,15 @@
                                            code actual-code url version)
                             :expression   ["Coding.code"]})
               display-issue (when (and display (not (display/display-matches? concept display display-langs)))
-                              (let [msg (issues/format-display-mismatch display url code
-                                          (:display concept) (:designations concept) displayLanguage
-                                          (meta-language meta))]
-                                {:severity     "error"
-                                 :type         "invalid"
-                                 :details-code "invalid-display"
-                                 :text         msg
-                                 :expression   ["Coding.display"]}))
+                              (let [{:keys [text message-id]} (issues/format-display-mismatch display url code
+                                                                (:display concept) (:designations concept) displayLanguage
+                                                                (meta-language meta))]
+                                (cond-> {:severity     "error"
+                                         :type         "invalid"
+                                         :details-code "invalid-display"
+                                         :text         text
+                                         :expression   ["Coding.display"]}
+                                  message-id (assoc :message-id message-id))))
               issues (filterv some? [case-issue display-issue])]
           (cond-> result
             display-issue (assoc :result false :message (:text display-issue))
@@ -341,11 +342,12 @@
                    :code    (keyword code)
                    :system  url
                    :version version
-                   :issues  [{:severity     (if fragment? "warning" "error")
-                              :type         "code-invalid"
-                              :details-code "invalid-code"
-                              :text         msg
-                              :expression   ["Coding.code"]}]}
+                   :issues  [(cond-> {:severity     (if fragment? "warning" "error")
+                                      :type         "code-invalid"
+                                      :details-code "invalid-code"
+                                      :text         msg
+                                      :expression   ["Coding.code"]}
+                               (and (not fragment?) version) (assoc :message-id "Unknown_Code_in_Version"))]}
             (not fragment?) (assoc :message msg))))))
 
   (cs-subsumes [_ {:keys [codeA codeB]}]
@@ -494,16 +496,17 @@
                          inactive? (assoc :inactive true
                                           :inactive-status (concept-inactive-status concept)))]
             (if (and display (not (display/display-matches? concept display display-langs)))
-              (let [msg (issues/format-display-mismatch display url code
-                          (:display concept) (:designations concept) displayLanguage
-                          (meta-language meta))]
+              (let [{:keys [text message-id]} (issues/format-display-mismatch display url code
+                                                (:display concept) (:designations concept) displayLanguage
+                                                (meta-language meta))]
                 (assoc result :result (boolean lenient-display-validation)
-                              :message msg
-                              :issues [{:severity     (if lenient-display-validation "warning" "error")
-                                        :type         "invalid"
-                                        :details-code "invalid-display"
-                                        :text         msg
-                                        :expression   ["display"]}]))
+                              :message text
+                              :issues [(cond-> {:severity     (if lenient-display-validation "warning" "error")
+                                                :type         "invalid"
+                                                :details-code "invalid-display"
+                                                :text         text
+                                                :expression   ["display"]}
+                                         message-id (assoc :message-id message-id))]))
               result))
           (let [fragment? (= "fragment" (:content meta))
                 msg (if fragment?
@@ -514,11 +517,12 @@
                      :code    (keyword code)
                      :system  url
                      :version version
-                     :issues  [{:severity     (if fragment? "warning" "error")
-                                :type         "code-invalid"
-                                :details-code "invalid-code"
-                                :text         msg
-                                :expression   ["Coding.code"]}]}
+                     :issues  [(cond-> {:severity     (if fragment? "warning" "error")
+                                        :type         "code-invalid"
+                                        :details-code "invalid-code"
+                                        :text         msg
+                                        :expression   ["Coding.code"]}
+                                 (and (not fragment?) version) (assoc :message-id "Unknown_Code_in_Version"))]}
               (not fragment?) (assoc :message msg)))))))
 
   supplement/SupplementSource

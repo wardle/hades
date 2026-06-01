@@ -10,8 +10,8 @@
   (str "Wrong Display Name '" given "' for " system "#" code ". "))
 
 (defn- mismatch [designations display-language cs-language]
-  (issues/format-display-mismatch given system code primary
-                                  designations display-language cs-language))
+  (:text (issues/format-display-mismatch given system code primary
+                                         designations display-language cs-language)))
 
 (deftest format-display-mismatch-trailing-language-test
   (testing "single choice with a known designation language: the trailing `(for the language(s) '<lang>')` reflects the *requested* language, not the designation's"

@@ -519,13 +519,15 @@
   (let [display-langs (display/parse-display-language displayLanguage)]
     (when (and display
                (not (display/display-matches? concept display display-langs)))
-      {:severity "error"
-       :type "invalid"
-       :details-code "invalid-display"
-       :text (issues/format-display-mismatch
-              display system code (:display concept) (:designations concept)
-              displayLanguage nil)
-       :expression ["Coding.display"]})))
+      (let [{:keys [text message-id]} (issues/format-display-mismatch
+                                       display system code (:display concept) (:designations concept)
+                                       displayLanguage nil)]
+        (cond-> {:severity "error"
+                 :type "invalid"
+                 :details-code "invalid-display"
+                 :text text
+                 :expression ["Coding.display"]}
+          message-id (assoc :message-id message-id))))))
 
 
 (defn- answer-list-meta-row [ds id]

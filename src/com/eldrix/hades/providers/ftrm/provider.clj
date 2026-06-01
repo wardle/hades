@@ -947,14 +947,16 @@
                                                  code actual-code url version)
                                   :expression   ["Coding.code"]})
                     display-issue (when (and display (not (display/display-matches? concept display display-langs)))
-                                    {:severity     "error"
-                                     :type         "invalid"
-                                     :details-code "invalid-display"
-                                     :text         (issues/format-display-mismatch
-                                                    display url code primary-display designations
-                                                    displayLanguage
-                                                    (get-in meta [:metadata "language"]))
-                                     :expression   ["Coding.display"]})
+                                    (let [{:keys [text message-id]} (issues/format-display-mismatch
+                                                                     display url code primary-display designations
+                                                                     displayLanguage
+                                                                     (get-in meta [:metadata "language"]))]
+                                      (cond-> {:severity     "error"
+                                               :type         "invalid"
+                                               :details-code "invalid-display"
+                                               :text         text
+                                               :expression   ["Coding.display"]}
+                                        message-id (assoc :message-id message-id))))
                     issues (filterv some? [case-issue display-issue])]
                 (cond-> base
                   display-issue (assoc :result false :message (:text display-issue))
