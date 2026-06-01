@@ -38,7 +38,8 @@
            {:jvm-opts ["-Dclojure.server.repl={:port,50505,:accept,clojure.core.server/repl}"]}
 
            :nrepl
-           {:extra-deps  {nrepl/nrepl {:mvn/version "1.7.0"}}
+           {:extra-deps  {nrepl/nrepl                {:mvn/version "1.7.0"}
+                          org.clojure/tools.namespace {:mvn/version "1.5.0"}}
             :extra-paths ["test" "test/resources"]
             :main-opts   ["-m" "nrepl.cmdline"]}
 

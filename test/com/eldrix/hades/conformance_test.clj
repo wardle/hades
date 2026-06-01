@@ -132,29 +132,21 @@
     (println "Server stopped.")))
 
 (defn restart!
-  "Stop, reload Hades namespaces, and restart the server."
+  "Stop the server, reload changed `src` namespaces in dependency order via
+  tools.namespace, and restart on the same port. Reloading the whole
+  dependency graph (rather than a hand-maintained list) keeps protocols and
+  the deftypes that extend them in lockstep. Scoped to `src` so the reload
+  skips the criterium-only bench namespaces under `test` and leaves this
+  driver namespace (and its server `state`) intact."
   []
   (let [port (some-> @state :srv :port)]
     (when-not port
       (throw (ex-info "No server to restart. Call (start!) first." {})))
     (stop!)
-    (doseq [ns-sym '[com.eldrix.hades.protocols
-                     com.eldrix.hades.providers.common.canonical
-                     com.eldrix.hades.impl.wire
-                     com.eldrix.hades.impl.metadata
-                     com.eldrix.hades.providers.snomed.provider
-                     com.eldrix.hades.providers.common.compose
-                     com.eldrix.hades.providers.common.fhir-extract
-                     com.eldrix.hades.providers.common.fhir-loader
-                     com.eldrix.hades.providers.in-memory.provider
-                     com.eldrix.hades.providers.in-memory.index
-                     com.eldrix.hades.providers.ftrm.db
-                     com.eldrix.hades.providers.ftrm.provider
-                     com.eldrix.hades.composite
-                     com.eldrix.hades.impl.http
-                     com.eldrix.hades.core
-                     com.eldrix.hades.fixtures]]
-      (require ns-sym :reload))
+    ((requiring-resolve 'clojure.tools.namespace.repl/set-refresh-dirs) "src")
+    (let [result ((requiring-resolve 'clojure.tools.namespace.repl/refresh))]
+      (when (instance? Throwable result)
+        (throw result)))
     (start! :port port)))
 
 (defn server-url
