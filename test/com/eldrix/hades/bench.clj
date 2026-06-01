@@ -404,7 +404,7 @@
    ;; --- $expand on VSAC extensional ValueSets (EX04) ---------------------
    ;;
    ;; Provider: FTRM (SQLite) — the fixture opens the combined
-   ;; `.hades/fhir-tx.db`, which holds VSAC alongside every other FHIR
+   ;; `data/fhir-tx.db`, which holds VSAC alongside every other FHIR
    ;; package. The in-memory provider over the unpacked package dir serves
    ;; the same 9,071 ValueSets (guarded by fhir_packages_live_test) but
    ;; differs in latency, so don't cross-compare with an in-memory run.

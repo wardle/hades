@@ -34,28 +34,34 @@ and `docker`.
 
 ## Ground rules
 
-Follow these to get a comparable, honest answer:
+The recipes assume you have already built the benchmark's fixture
+databases — the same set [Development](development.md) describes — and
+that they live under `data/` in the hades checkout. Adjust the paths
+if yours live elsewhere.
 
-- **Use only the recipes below.** They are the tracked, supported way to
-  run the benchmark. Anything untracked in the checkout is local
-  scaffolding, not part of the benchmark.
-- **Serve the single combined FTRM container `.hades/fhir-tx.db`.** It
-  already holds every FHIR package, including VSAC, so one file is the
-  whole canonical FHIR fixture. (Point `serve` at this file, not at the
-  unpacked `.hades/fhir-cache/` directory and not at a separate VSAC
-  database.)
-- **VSAC is served by FTRM here, like everything else.** `fhir-tx.db` is
-  the **FTRM (SQLite)** provider — the same path CI preflight and the
-  criterium bench (`clj -M:bench`) exercise, so EX04 latency is
-  comparable across all three. (The in-memory provider over the unpacked
-  cache serves the same resources but at different latency/footprint; the
-  parity tests use it, the benchmark does not.)
-- **Keep hades on port `8080`.** The recipes pass the URL explicitly to
-  k6, so the default port just works. (`tx-benchmark/servers.json` is for
-  the Docker pipeline only — leave it alone.)
-- **Wait for startup with a Bash `until` poll on `/fhir/metadata`** (the
-  recipes below do this). Startup is one-shot, so `Monitor` is the wrong
-  tool for it.
+| Fixture                  | What it is                                                                                   |
+|--------------------------|----------------------------------------------------------------------------------------------|
+| `snomed-uk-monolith.db`  | SNOMED CT UK monolith edition (Hermes)                                                        |
+| `loinc-2.82.db`          | LOINC release 2.82 (native provider)                                                          |
+| `fhir-tx.db`             | every FHIR package — R4 core, HL7 terminology, US Core, IPS, VSAC, PHIN-VADS — in one FTRM (SQLite) container |
+
+A few things to keep consistent, so numbers stay comparable from one run
+to the next:
+
+- **Serve `fhir-tx.db`, not the unpacked package cache.** That one
+  container holds the whole FHIR corpus, VSAC included. It is the FTRM
+  (SQLite) provider that CI preflight and the criterium bench
+  (`clj -M:bench`) also exercise, so `$expand` latency is comparable
+  across all three. The in-memory provider over an unpacked
+  `fhir-cache/` directory serves the same resources at different latency,
+  so its numbers aren't comparable — the parity tests use it, the
+  benchmark does not.
+- **Keep hades on port `8080`.** The recipes pass the URL to k6
+  explicitly, so the default port just works.
+- **Wait for startup by polling `/fhir/metadata`** — the recipes do this
+  with a Bash `until` loop. Startup is one-shot.
+- **Use only the recipes below.** Anything untracked in the tx-benchmark
+  checkout is local scaffolding, not part of the benchmark.
 
 ## Run a flavor
 
@@ -83,9 +89,9 @@ set -e
 cd "$HADES"
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -M:run serve \
-  .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.82.db \
-  .hades/fhir-tx.db \
+  data/snomed-uk-monolith.db \
+  data/loinc-2.82.db \
+  data/fhir-tx.db \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!
 trap 'kill $HADES_PID 2>/dev/null' EXIT
@@ -118,9 +124,9 @@ set -e
 cd "$HADES"
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -M:run serve \
-  .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.82.db \
-  .hades/fhir-tx.db \
+  data/snomed-uk-monolith.db \
+  data/loinc-2.82.db \
+  data/fhir-tx.db \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!
 trap 'kill $HADES_PID 2>/dev/null' EXIT
@@ -192,9 +198,9 @@ cd "$HADES"
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -T:build uber
 java -Xmx6g -jar target/hades.jar serve \
-  .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.82.db \
-  .hades/fhir-tx.db \
+  data/snomed-uk-monolith.db \
+  data/loinc-2.82.db \
+  data/fhir-tx.db \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!
 trap 'kill $HADES_PID 2>/dev/null' EXIT
@@ -226,9 +232,9 @@ set -e
 cd "$HADES"
 RUN_ID="$(date -u +%Y-%m-%dT%H%M)-2.0.$(git rev-list --count HEAD)-$(git rev-parse --short HEAD)$(git diff-index --quiet HEAD -- src test deps.edn build.clj || echo -dirty)"
 clj -M:run serve \
-  .hades/snomed-uk-monolith.db \
-  .hades/loinc-2.82.db \
-  .hades/fhir-tx.db \
+  data/snomed-uk-monolith.db \
+  data/loinc-2.82.db \
+  data/fhir-tx.db \
   --port 8080 > /tmp/hades.log 2>&1 &
 HADES_PID=$!
 trap 'kill $HADES_PID 2>/dev/null' EXIT

@@ -69,7 +69,7 @@ process serves all terminologies.
 ### Reproducing these figures
 
 Start Hades serving the data above (e.g.
-`clj -M:run serve .hades/snomed-intl-20250201.db .hades/loinc-2.82.db .hades/fhir-tx.db --port 8080`),
+`clj -M:run serve snomed-intl-20250201.db loinc-2.82.db fhir-tx.db --port 8080`),
 then run the self-contained script below — it needs `wrk` and `jq`,
 builds the request pools from the running server, writes the rotate
 script to a temp dir, and prints median / p99 latency and requests/sec

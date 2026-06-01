@@ -66,8 +66,7 @@
   Each path may point at a Hermes SNOMED DB, a FHIR terminology SQLite
   container, or a file/tree of FHIR JSON resources:
 
-    (hades/open [\".hades/snomed-intl-20250201.db\"
-                 \".hades/loinc-2.82.db\"])
+    (hades/open [\"snomed.db\" \"loinc.db\"])
 
   RF2 and LOINC release sources must be imported first. Provider-level
   construction lives in `impl` namespaces.

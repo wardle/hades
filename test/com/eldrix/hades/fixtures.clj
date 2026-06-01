@@ -16,15 +16,15 @@
 ;; ---------------------------------------------------------------------------
 
 (def snomed-version    "20250201")
-(def snomed-db-path    (str ".hades/snomed-intl-" snomed-version ".db"))
-(def snomed-uk-db-path ".hades/snomed-uk-monolith.db")
+(def snomed-db-path    (str "data/snomed-intl-" snomed-version ".db"))
+(def snomed-uk-db-path "data/snomed-uk-monolith.db")
 
 (def loinc-version     "2.82")
-(def loinc-db-path     (str ".hades/loinc-" loinc-version ".db"))
+(def loinc-db-path     (str "data/loinc-" loinc-version ".db"))
 
-(def fhir-cache-dir    ".hades/fhir-cache")  ; download cache of FHIR package .tgz tarballs
-(def fhir-tx-db-path   ".hades/fhir-tx.db")  ; single combined FTRM container (all FHIR packages incl VSAC)
-(def tx-ecosystem-dir  ".hades/tx-ecosystem")
+(def fhir-cache-dir    "data/fhir-cache")  ; download cache of FHIR package .tgz tarballs
+(def fhir-tx-db-path   "data/fhir-tx.db")  ; single combined FTRM container (all FHIR packages incl VSAC)
+(def tx-ecosystem-dir  "data/tx-ecosystem")
 
 (def fhir-packages
   "Canonical FHIR R4 package set, installed into both the combined FTRM

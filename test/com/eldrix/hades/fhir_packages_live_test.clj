@@ -15,9 +15,9 @@
   `(url, version)` count (9,071). `vs-metadata-parity` proves both engines
   collapse the duplicates to the same catalogue.
 
-  Tagged `^:live` — needs `.hades/snomed-intl-20250201.db`,
-  `.hades/loinc-2.82.db`, the cached package tarballs under
-  `.hades/fhir-cache`, and the combined FTRM container `.hades/fhir-tx.db`.
+  Tagged `^:live` — needs `data/snomed-intl-20250201.db`,
+  `data/loinc-2.82.db`, the cached package tarballs under
+  `data/fhir-cache`, and the combined FTRM container `data/fhir-tx.db`.
   All are provisioned by the recipe in `doc/development.md`; the `--dist`
   set must match `fixtures/fhir-packages`."
   (:require [clojure.set :as set]

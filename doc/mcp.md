@@ -16,21 +16,21 @@ Build them once with the steps in [Installation](installation.md) —
 SNOMED CT (international or UK editions), LOINC, and any HL7 FHIR
 package — then point the MCP server at the resulting paths.
 
-For the worked examples below, use this pinned fixture set. It matches
-the live test configuration and keeps examples reproducible:
+The worked examples below assume these specific releases — install the
+same versions to reproduce their results:
 
 ```shell
 # install SNOMED CT International, via MLDS credentials.
-clojure -M:run install compact .hades/snomed-intl-20250201.db \
+clojure -M:run install compact snomed-intl-20250201.db \
   --dist ihtsdo.mlds/167@2025-02-01 \
-  --username "$MLDS_USERNAME" \
-  --password .hades/mlds-password.txt
+  --username 'you@example.com' \
+  --password ./mlds-password.txt
 
 # install LOINC 2.82, from the unzipped LOINC Table File CSV archive.
-clojure -M:run import .hades/loinc-2.82.db /path/to/Loinc_2.82/
+clojure -M:run import loinc-2.82.db /path/to/Loinc_2.82/
 
-# install a number of FHIR R4 terminology packages into .hades/fhir-tx.db:
-clojure -M:run install compact .hades/fhir-tx.db \
+# install a number of FHIR R4 terminology packages into fhir-tx.db:
+clojure -M:run install compact fhir-tx.db \
   --dist hl7.fhir.r4.core@4.0.1 \
   --dist hl7.terminology.r4@7.0.1 \
   --dist hl7.fhir.us.core@6.1.0 \
@@ -38,17 +38,16 @@ clojure -M:run install compact .hades/fhir-tx.db \
   --dist hl7.fhir.uv.ips@1.1.0 \
   --dist fhir.tx.support.r4@0.34.0 \
   --dist us.cdc.phinvads@0.12.0 \
-  --dist us.nlm.vsac@0.24.0 \
-  --cache-dir .hades/fhir-cache
+  --dist us.nlm.vsac@0.24.0
 ```
 
 Then run MCP against those three stores:
 
 ```shell
 clojure -M:run mcp \
-  .hades/snomed-intl-20250201.db \
-  .hades/loinc-2.82.db \
-  .hades/fhir-tx.db
+  snomed-intl-20250201.db \
+  loinc-2.82.db \
+  fhir-tx.db
 ```
 
 Obviously *you* don't manually start the MCP server, but tell your LLM (e.g. Claude, ChatGPT/Codex) how to start it.
@@ -69,9 +68,9 @@ independent:
 ```shell
 claude mcp add hades -- \
   java -jar /path/to/hades.jar mcp \
-    /path/to/.hades/snomed-intl-20250201.db \
-    /path/to/.hades/loinc-2.82.db \
-    /path/to/.hades/fhir-tx.db
+    /path/to/snomed-intl-20250201.db \
+    /path/to/loinc-2.82.db \
+    /path/to/fhir-tx.db
 ```
 
 **From a source checkout** — picks up code changes on restart; good for
@@ -79,7 +78,7 @@ development. `clojure -M:run` must run in the hades source directory
 (where `deps.edn` lives), so wrap it to `cd` there first:
 
 ```shell
-claude mcp add hades -- bash -c 'cd /path/to/hades-source && exec clojure -M:run mcp /path/to/.hades/snomed-intl-20250201.db /path/to/.hades/loinc-2.82.db /path/to/.hades/fhir-tx.db'
+claude mcp add hades -- bash -c 'cd /path/to/hades-source && exec clojure -M:run mcp /path/to/snomed-intl-20250201.db /path/to/loinc-2.82.db /path/to/fhir-tx.db'
 ```
 
 Each positional path after `mcp` is a terminology source (auto-detected):

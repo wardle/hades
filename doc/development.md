@@ -7,14 +7,14 @@ conformance, and benchmark workloads CI runs.
 
 - Java 21+
 - Clojure CLI (`clj` / `clojure`)
-- ~15 GB free disk for `.hades/` fixtures
+- ~15 GB free disk for `data/` fixtures
 - For SNOMED CT fixtures: an MLDS Affiliate account and/or a TRUD API key
 - For LOINC: a free account at [loinc.org](https://loinc.org/downloads/)
   to download the release archive
 
 ## Test fixtures
 
-All tests, conformance and benchmark runs read fixtures from `.hades/`
+All tests, conformance and benchmark runs read fixtures from `data/`
 (gitignored). The same fixtures CI builds in
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) are expected to
 exist locally. Fixture paths are declared in
@@ -22,12 +22,12 @@ exist locally. Fixture paths are declared in
 
 | Fixture                          | Path                              | Provider exercised        | Pinned to                                | Source                                   |
 |----------------------------------|-----------------------------------|---------------------------|------------------------------------------|------------------------------------------|
-| SNOMED CT International          | `.hades/snomed-intl-20250201.db`  | Hermes (LMDB + Lucene)    | `ihtsdo.mlds/167@2025-02-01`             | MLDS                                     |
-| SNOMED CT UK monolith            | `.hades/snomed-uk-monolith.db`    | Hermes (LMDB + Lucene)    | `uk.nhs/sct-monolith` (latest)           | TRUD                                     |
-| LOINC                            | `.hades/loinc-2.82.db`            | native LOINC              | LOINC release `2.82`                     | loinc.org (free account)                 |
-| FHIR packages (combined container) | `.hades/fhir-tx.db`             | FTRM (SQLite)             | `hl7.fhir.r4.core@4.0.1` + 7 others (incl. `us.cdc.phinvads@0.12.0`, `us.nlm.vsac@0.24.0`) | packages.fhir.org / packages2.fhir.org |
-| FHIR packages (tarball cache)    | `.hades/fhir-cache/`           | in-memory (fhir-json)     | same package set as above                | packages.fhir.org / packages2.fhir.org   |
-| tx-ecosystem (conformance)       | `.hades/tx-ecosystem/`            | — (test data)             | rev pinned in `conformance_test.clj`     | `HL7/fhir-tx-ecosystem-ig` (auto-cloned) |
+| SNOMED CT International          | `data/snomed-intl-20250201.db`  | Hermes (LMDB + Lucene)    | `ihtsdo.mlds/167@2025-02-01`             | MLDS                                     |
+| SNOMED CT UK monolith            | `data/snomed-uk-monolith.db`    | Hermes (LMDB + Lucene)    | `uk.nhs/sct-monolith` (latest)           | TRUD                                     |
+| LOINC                            | `data/loinc-2.82.db`            | native LOINC              | LOINC release `2.82`                     | loinc.org (free account)                 |
+| FHIR packages (combined container) | `data/fhir-tx.db`             | FTRM (SQLite)             | `hl7.fhir.r4.core@4.0.1` + 7 others (incl. `us.cdc.phinvads@0.12.0`, `us.nlm.vsac@0.24.0`) | packages.fhir.org / packages2.fhir.org |
+| FHIR packages (tarball cache)    | `data/fhir-cache/`           | in-memory (fhir-json)     | same package set as above                | packages.fhir.org / packages2.fhir.org   |
+| tx-ecosystem (conformance)       | `data/tx-ecosystem/`            | — (test data)             | rev pinned in `conformance_test.clj`     | `HL7/fhir-tx-ecosystem-ig` (auto-cloned) |
 
 > **Same data, two providers.** The full FHIR package set (including
 > VSAC's 9,071 ValueSets and phinvads' 1,967) loads as a single FTRM
@@ -46,13 +46,13 @@ all run against this single pinned release — pinning matters because the
 IG's tx-ecosystem fixtures were authored against this exact edition.
 
 ```bash
-printf '%s' "$MLDS_PASSWORD" > .hades/mlds-password.txt
-chmod 600 .hades/mlds-password.txt
-clj -M:run install compact .hades/snomed-intl-20250201.db \
+printf '%s' "$MLDS_PASSWORD" > data/mlds-password.txt
+chmod 600 data/mlds-password.txt
+clj -M:run install compact data/snomed-intl-20250201.db \
   --dist ihtsdo.mlds/167@2025-02-01 \
   --username "$MLDS_USERNAME" \
-  --password .hades/mlds-password.txt
-rm -f .hades/mlds-password.txt
+  --password data/mlds-password.txt
+rm -f data/mlds-password.txt
 ```
 
 Build takes ~2 minutes; the resulting DB is ~2.7 GB.
@@ -63,12 +63,12 @@ Used by the matrix tests, tx-benchmark and ad-hoc work that exercises UK
 content. The TRUD distribution is rolling — CI rebuilds monthly.
 
 ```bash
-printf '%s' "$TRUD_API_KEY" > .hades/trud-api-key.txt
-chmod 600 .hades/trud-api-key.txt
-clj -M:run install compact .hades/snomed-uk-monolith.db \
+printf '%s' "$TRUD_API_KEY" > data/trud-api-key.txt
+chmod 600 data/trud-api-key.txt
+clj -M:run install compact data/snomed-uk-monolith.db \
   --dist uk.nhs/sct-monolith \
-  --api-key .hades/trud-api-key.txt
-rm -f .hades/trud-api-key.txt
+  --api-key data/trud-api-key.txt
+rm -f data/trud-api-key.txt
 ```
 
 ### LOINC
@@ -93,7 +93,7 @@ container, `fhir-tx.db`. One `install compact` chain builds it (install,
 index, VACUUM):
 
 ```bash
-clj -M:run install compact .hades/fhir-tx.db \
+clj -M:run install compact data/fhir-tx.db \
   --dist hl7.fhir.r4.core@4.0.1 \
   --dist hl7.terminology.r4@7.0.1 \
   --dist hl7.fhir.us.core@6.1.0 \
@@ -102,7 +102,7 @@ clj -M:run install compact .hades/fhir-tx.db \
   --dist fhir.tx.support.r4@0.34.0 \
   --dist us.cdc.phinvads@0.12.0 \
   --dist us.nlm.vsac@0.24.0 \
-  --cache-dir .hades/fhir-cache
+  --cache-dir data/fhir-cache
 ```
 
 The `--dist` set must match `fhir-packages` in

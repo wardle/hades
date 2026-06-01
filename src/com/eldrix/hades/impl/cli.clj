@@ -143,7 +143,7 @@
              ""
              "Examples:"
              "  hades list /path/to/snomed-rf2/"
-             "  hades list .hades/snomed-intl-20250201.db"])
+             "  hades list /path/to/fhir-packages/"])
     :opts [(option :help)]}
    {:cmd  "import" :usage "import <dest-db> <sources...>"
     :args {:min 2 :hint "<dest-db> <sources...>"}
@@ -168,7 +168,7 @@
              "  hades import snomed.db /path/to/snomed-rf2/"
              "  hades import loinc.db /path/to/Loinc_2.81/"
              "  hades import fhir.db  packages/hl7.fhir.r4.core-4.0.1/package"
-             "  hades import fhir.db  .hades/fhir-cache/hl7.fhir.r4.core-4.0.1.tgz"
+             "  hades import fhir.db  packages/hl7.fhir.r4.core-4.0.1.tgz"
              "  hades import --no-index snomed.db /path/to/intl-rf2/"])
     :opts [(option :no-index) (option :help)]}
    {:cmd  "available" :usage "available [--dist <id>...]"
@@ -282,7 +282,7 @@
              "  hades serve snomed.db --port 8080"
              "  hades serve intl.db uk.db --default http://snomed.info/sct=http://snomed.info/sct/900000000000207008/version/20250201"
              "  hades serve snomed.db loinc.db packages/hl7.fhir.r4.core/package"
-             "  hades serve snomed.db .hades/fhir-cache/hl7.fhir.r4.core-4.0.1.tgz"])
+             "  hades serve snomed.db packages/hl7.fhir.r4.core-4.0.1.tgz"])
     :opts [(option :port) (option :bind-address) (option :locale)
            (option :default) (option :help)]}
    {:cmd  "mcp" :usage "mcp <paths...>"

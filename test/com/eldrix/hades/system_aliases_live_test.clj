@@ -1,6 +1,6 @@
 (ns com.eldrix.hades.system-aliases-live-test
   "Live integration tests for system-alias resolution (OID/URN → canonical)
-  against the combined FTRM container `.hades/fhir-tx.db`.
+  against the combined FTRM container `data/fhir-tx.db`.
 
   Every resource addressed here is present in the loaded FHIR packages and
   resolves by its canonical URL (the `*-canonical` control cases). Each also

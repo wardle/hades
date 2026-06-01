@@ -95,7 +95,7 @@ jobs:
       - uses: actions/cache/restore@v5
         id: cache
         with:
-          path: .hades/snomed-intl-20250201.db
+          path: data/snomed-intl-20250201.db
           key: snomed-intl-20250201-v1
 
       - name: Provision pinned SNOMED Intl DB
@@ -109,19 +109,19 @@ jobs:
             echo "::error::MLDS_USERNAME / MLDS_PASSWORD secrets are not set."
             exit 1
           fi
-          mkdir -p .hades
+          mkdir -p data
           umask 077
-          printf '%s' "$MLDS_PASSWORD" > .hades/mlds-password.txt
-          clojure -M:run install compact .hades/snomed-intl-20250201.db \
+          printf '%s' "$MLDS_PASSWORD" > data/mlds-password.txt
+          clojure -M:run install compact data/snomed-intl-20250201.db \
             --dist ihtsdo.mlds/167@2025-02-01 \
             --username "$MLDS_USERNAME" \
-            --password .hades/mlds-password.txt
-          rm -f .hades/mlds-password.txt
+            --password data/mlds-password.txt
+          rm -f data/mlds-password.txt
 
       - uses: actions/cache/save@v5
         if: always() && steps.provision.outcome == 'success'
         with:
-          path: .hades/snomed-intl-20250201.db
+          path: data/snomed-intl-20250201.db
           key: snomed-intl-20250201-v1
 
   provision-snomed-uk:
@@ -157,7 +157,7 @@ jobs:
       - uses: actions/cache/restore@v5
         id: cache
         with:
-          path: .hades/snomed-uk-monolith.db
+          path: data/snomed-uk-monolith.db
           key: snomed-uk-monolith-${{ steps.month.outputs.month }}-v1
 
       - name: Provision UK SNOMED Monolith DB
@@ -170,18 +170,18 @@ jobs:
             echo "::error::TRUD_API_KEY secret is not set."
             exit 1
           fi
-          mkdir -p .hades
+          mkdir -p data
           umask 077
-          printf '%s' "$TRUD_API_KEY" > .hades/trud-api-key.txt
-          clojure -M:run install compact .hades/snomed-uk-monolith.db \
+          printf '%s' "$TRUD_API_KEY" > data/trud-api-key.txt
+          clojure -M:run install compact data/snomed-uk-monolith.db \
             --dist uk.nhs/sct-monolith \
-            --api-key .hades/trud-api-key.txt
-          rm -f .hades/trud-api-key.txt
+            --api-key data/trud-api-key.txt
+          rm -f data/trud-api-key.txt
 
       - uses: actions/cache/save@v5
         if: always() && steps.provision.outcome == 'success'
         with:
-          path: .hades/snomed-uk-monolith.db
+          path: data/snomed-uk-monolith.db
           key: snomed-uk-monolith-${{ steps.month.outputs.month }}-v1
 
   provision-loinc:
@@ -213,7 +213,7 @@ jobs:
       - uses: actions/cache/restore@v5
         id: cache
         with:
-          path: .hades/loinc-2.82.db
+          path: data/loinc-2.82.db
           key: loinc-2.82-native-v1
 
       - name: Provision pinned LOINC DB
@@ -226,7 +226,7 @@ jobs:
             echo "::error::LOINC_ARCHIVE_TOKEN secret is not set. Mint a fine-grained PAT with Contents: read on wardle/loinc-releases."
             exit 1
           fi
-          mkdir -p .hades
+          mkdir -p data
           extract_dir=$(mktemp -d)
           gh release download 2.82 \
             --repo wardle/loinc-releases \
@@ -242,13 +242,13 @@ jobs:
             echo "::error::Could not locate LoincTable/Loinc.csv inside the LOINC zip."
             exit 1
           fi
-          clojure -M:run import compact .hades/loinc-2.82.db "$release_dir"
+          clojure -M:run import compact data/loinc-2.82.db "$release_dir"
           rm -rf "$extract_dir"
 
       - uses: actions/cache/save@v5
         if: always() && steps.provision.outcome == 'success'
         with:
-          path: .hades/loinc-2.82.db
+          path: data/loinc-2.82.db
           key: loinc-2.82-native-v1
 
   # The install CLI downloads + imports in one shot:
@@ -287,15 +287,15 @@ jobs:
         id: cache
         with:
           path: |
-            .hades/fhir-cache
-            .hades/fhir-tx.db
+            data/fhir-cache
+            data/fhir-tx.db
           key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
 
       - name: Provision FHIR packages — combined FTRM container + tarball cache
         id: provision
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          clojure -M:run install compact .hades/fhir-tx.db \
+          clojure -M:run install compact data/fhir-tx.db \
             --dist hl7.fhir.r4.core@4.0.1 \
             --dist hl7.terminology.r4@7.0.1 \
             --dist hl7.fhir.us.core@6.1.0 \
@@ -304,14 +304,14 @@ jobs:
             --dist fhir.tx.support.r4@0.34.0 \
             --dist us.cdc.phinvads@0.12.0 \
             --dist us.nlm.vsac@0.24.0 \
-            --cache-dir .hades/fhir-cache
+            --cache-dir data/fhir-cache
 
       - uses: actions/cache/save@v5
         if: always() && steps.provision.outcome == 'success'
         with:
           path: |
-            .hades/fhir-cache
-            .hades/fhir-tx.db
+            data/fhir-cache
+            data/fhir-tx.db
           key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
 
   # ---------------------------------------------------------------------------
@@ -346,7 +346,7 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/snomed-intl-20250201.db
+          path: data/snomed-intl-20250201.db
           key: snomed-intl-20250201-v1
           fail-on-cache-miss: true
 
@@ -356,13 +356,13 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/snomed-uk-monolith.db
+          path: data/snomed-uk-monolith.db
           key: snomed-uk-monolith-${{ steps.month.outputs.month }}-v1
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/loinc-2.82.db
+          path: data/loinc-2.82.db
           key: loinc-2.82-native-v1
           fail-on-cache-miss: true
 
@@ -372,8 +372,8 @@ jobs:
       - uses: actions/cache/restore@v5
         with:
           path: |
-            .hades/fhir-cache
-            .hades/fhir-tx.db
+            data/fhir-cache
+            data/fhir-tx.db
           key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
           fail-on-cache-miss: true
 
@@ -423,21 +423,21 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/snomed-intl-20250201.db
+          path: data/snomed-intl-20250201.db
           key: snomed-intl-20250201-v1
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/loinc-2.82.db
+          path: data/loinc-2.82.db
           key: loinc-2.82-native-v1
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
         with:
           path: |
-            .hades/fhir-cache
-            .hades/fhir-tx.db
+            data/fhir-cache
+            data/fhir-tx.db
           key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
           fail-on-cache-miss: true
 
@@ -447,7 +447,7 @@ jobs:
       # checkout` on a stale hit (defensive — keys should not collide).
       - uses: actions/cache@v5
         with:
-          path: .hades/tx-ecosystem
+          path: data/tx-ecosystem
           key: tx-ecosystem-fb9078f6-v1
 
       - name: Run conformance suite
@@ -502,21 +502,21 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/snomed-intl-20250201.db
+          path: data/snomed-intl-20250201.db
           key: snomed-intl-20250201-v1
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
         with:
-          path: .hades/loinc-2.82.db
+          path: data/loinc-2.82.db
           key: loinc-2.82-native-v1
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
         with:
           path: |
-            .hades/fhir-cache
-            .hades/fhir-tx.db
+            data/fhir-cache
+            data/fhir-tx.db
           key: fhir-tx-r4core4.0.1-terminology7.0.1-uscore6.1.0-ips2.0.0-ips1.1.0-txsupport0.34.0-phinvads0.12.0-vsac0.24.0-v3
           fail-on-cache-miss: true
 
@@ -535,9 +535,9 @@ jobs:
       - name: Start hades
         run: |
           clojure -M:run serve \
-            .hades/snomed-intl-20250201.db \
-            .hades/loinc-2.82.db \
-            .hades/fhir-tx.db \
+            data/snomed-intl-20250201.db \
+            data/loinc-2.82.db \
+            data/fhir-tx.db \
             --port 8080 &
           echo $! > hades.pid
           for _ in $(seq 1 60); do

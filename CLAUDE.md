@@ -55,17 +55,17 @@ MLDS Affiliate licence is required):
 
 ```bash
 # Download from MLDS, import, index, compact:
-clj -M:run install .hades/snomed-intl-20250201.db \
+clj -M:run install data/snomed-intl-20250201.db \
   --dist ihtsdo.mlds/167@2025-02-01 \
   --username 'you@example.com' --password /path/to/password-file
-clj -M:run index   .hades/snomed-intl-20250201.db
-clj -M:run compact .hades/snomed-intl-20250201.db
+clj -M:run index   data/snomed-intl-20250201.db
+clj -M:run compact data/snomed-intl-20250201.db
 
 # Or, if you already have the release zip on disk:
 unzip /path/to/snomed-int-20250201.zip -d /tmp/snomed-rf2
-clj -M:run import .hades/snomed-intl-20250201.db /tmp/snomed-rf2
-clj -M:run index   .hades/snomed-intl-20250201.db
-clj -M:run compact .hades/snomed-intl-20250201.db
+clj -M:run import data/snomed-intl-20250201.db /tmp/snomed-rf2
+clj -M:run index   data/snomed-intl-20250201.db
+clj -M:run compact data/snomed-intl-20250201.db
 ```
 
 Build takes ~2 minutes and produces a ~2.2 GB Hermes DB. CI caches the
