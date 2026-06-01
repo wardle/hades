@@ -12,7 +12,7 @@ This log documents significant changes for each release.
 * `$validate-code` against a SNOMED CT ValueSet whose `compose` uses a filter include with `expressions = true` now validates post-coordinated expressions: membership is decided by structural expression subsumption (`hermes/subsumes`) against the include's `concept` filters, with `expressions = false`/absent rejecting expressions. The rendered expression is returned as the display.
 * `$validate-code` against an implicit SNOMED ValueSet (`?fhir_vs=isa/X`, `?fhir_vs`) now correctly accepts post-coordinated expressions by structural expression subsumption. Arbitrary `?fhir_vs=ecl/…` with an expression is declined as `not-supported`; plain-concept membership in arbitrary ECL is unchanged (handled via `intersect-ecl`).
 * `?fhir_vs=isa/X` is now reflexive — includes X itself — for both `$validate-code` and `$expand`, matching the FHIR SNOMED CT specification.
-* Hades passes 495 / 600 (82.5%) non-skipped tests in the pinned HL7 FHIR Terminology Conformance suite.
+* Hades passes 500 / 600 (83.3%) tests in the pinned HL7 FHIR Terminology Conformance suite.
 
 ## [v2.0.198] - 2026-05-09
 
@@ -27,7 +27,7 @@ Headline: Hades is now a **multi-terminology** FHIR server. SNOMED CT,
 LOINC, and arbitrary FHIR NPM packages run side-by-side in one process,
 dispatched by canonical URL. v1.x served SNOMED only.
 
-Hades passes **493 / 600 (82.2%)** non-skipped tests in the HL7 FHIR
+Hades passes **493 / 600 (82.2%)** tests in the HL7 FHIR
 Terminology Ecosystem IG conformance suite against the pinned
 tx-ecosystem rev (`fb9078f6`).
 
@@ -125,7 +125,7 @@ v1.x command lines need to be reworked.
 
 ## [v1.4.135] - 2026-04-23
 
-Headline: Hades passes 477 / 600 (79.5%) non-skipped tests in the HL7
+Headline: Hades passes 477 / 600 (79.5%) tests in the HL7
 FHIR Terminology Ecosystem IG conformance suite, up from 473 / 600.
 
 * Dependency refresh: Clojure 1.12.4, logback 1.5.32, nREPL 1.7.0,
@@ -159,7 +159,7 @@ FHIR Terminology Ecosystem IG conformance suite, up from 473 / 600.
 
 ## [v1.4.109] - 2026-04-22
 
-Headline: Hades passes 473 / 600 (78.8%) non-skipped tests in the HL7
+Headline: Hades passes 473 / 600 (78.8%) tests in the HL7
 FHIR Terminology Ecosystem IG conformance suite, up from ~50 at the
 v1.4.69 baseline.
 
