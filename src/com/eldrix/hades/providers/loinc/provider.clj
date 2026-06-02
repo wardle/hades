@@ -515,21 +515,6 @@
            :designations []}
     (= "Deprecated" status) (assoc :inactive true :inactive-status "inactive")))
 
-(defn- display-issue [system code concept {:keys [display displayLanguage]}]
-  (let [display-langs (display/parse-display-language displayLanguage)]
-    (when (and display
-               (not (display/display-matches? concept display display-langs)))
-      (let [{:keys [text message-id]} (issues/format-display-mismatch
-                                       display system code (:display concept) (:designations concept)
-                                       displayLanguage nil)]
-        (cond-> {:severity "error"
-                 :type "invalid"
-                 :details-code "invalid-display"
-                 :text text
-                 :expression ["Coding.display"]}
-          message-id (assoc :message-id message-id))))))
-
-
 (defn- answer-list-meta-row [ds id]
   (jdbc/execute-one! ds
                      ["SELECT answer_list_id, answer_list_name, answer_list_oid
@@ -678,7 +663,7 @@
                              (row-builder)))))
 
 (defn- hierarchy-concepts [conn part {:keys [offset count displayLanguage activeOnly]}]
-  (let [display-langs (display/parse-display-language displayLanguage)
+  (let [display-langs (display/parse-display-language* displayLanguage)
         offset (or offset 0)
         limit (or count -1)]
     (mapv #(concept-from-row conn display-langs %)
@@ -730,15 +715,25 @@
       (part-code-count ds active-only?)
       (group-code-count ds active-only?))))
 
-(defn- validation-result [system code concept version params]
-  (let [issue (display-issue system code concept params)]
-    (cond-> {:result (nil? issue)
-             :system system
-             :code code
+(defn- validation-result [system code concept version
+                          {:keys [display displayLanguage lenient-display-validation]}]
+  (let [disp (display/validate-display
+              {:display         display
+               :primary-display (:display concept)
+               :designations    (:designations concept)
+               :display-langs   (display/parse-display-language* displayLanguage)
+               :displayLanguage displayLanguage
+               :system          system
+               :code            code
+               :cs-language     nil
+               :lenient?        lenient-display-validation})]
+    (cond-> {:result  (if disp (:result disp) true)
+             :system  system
+             :code    code
              :display (:display concept)
              :version version}
-      issue (assoc :message (:text issue)
-                   :issues [issue]))))
+      disp (assoc :message (:text (:issue disp))
+                  :issues  [(:issue disp)]))))
 
 (defn- loinc-code-validation [provider {:keys [system code] :as params}]
   (if (not (loinc-system? system))
@@ -803,7 +798,7 @@
                    (concat [q q] (:params locale))))))
 
 (defn- filtered-implicit-loinc-count [ds {:keys [filter displayLanguage activeOnly]}]
-  (let [display-langs (display/parse-display-language displayLanguage)]
+  (let [display-langs (display/parse-display-language* displayLanguage)]
     (+ (filtered-loinc-count ds filter display-langs activeOnly)
        (non-loinc-code-count ds filter "answer_list"
                              ["answer_string_id" "display_text" "local_answer_code"]
@@ -949,7 +944,7 @@
                    (row-builder))))
 
 (defn- unfiltered-implicit-loinc-concepts [conn {:keys [offset count displayLanguage activeOnly]}]
-  (let [display-langs (display/parse-display-language displayLanguage)]
+  (let [display-langs (display/parse-display-language* displayLanguage)]
     (mapv #(implicit-concept-from-row conn display-langs %)
           (implicit-loinc-page-rows conn {:offset offset
                                           :count count
@@ -967,7 +962,7 @@
 (defn- implicit-loinc-concepts [conn {:keys [filter offset count displayLanguage activeOnly] :as params}]
   (if (str/blank? filter)
     (unfiltered-implicit-loinc-concepts conn params)
-    (let [display-langs (display/parse-display-language displayLanguage)
+    (let [display-langs (display/parse-display-language* displayLanguage)
           lnc-limit (+ (or count 50) (or offset 0))
           {:keys [sql post-filters]
            sql-params :params} (search-sql filter display-langs nil activeOnly lnc-limit)
@@ -1272,7 +1267,7 @@
       (let [code' (canonical-code code)]
         (if-let [row (code-row conn code')]
             (let [{:keys [want?] :as property-filter} (property-filter/parse properties)
-                  display-langs (display/parse-display-language displayLanguage)
+                  display-langs (display/parse-display-language* displayLanguage)
                   variant-rows (when (or (want? "designation")
                                          (seq display-langs))
                                  (fetch-variant-rows conn (:loinc_num row)
@@ -1323,7 +1318,7 @@
                   (group-lookup-result row version)
                   (issues/unknown-code-lookup loinc-url code))))))))
 
-  (cs-validate-code [this {:keys [system code display displayLanguage]}]
+  (cs-validate-code [this {:keys [system code display displayLanguage lenient-display-validation]}]
     (if-let [r (protos/cs-lookup this {:system system :code code :displayLanguage displayLanguage
                                        :properties (when display ["designation"])})]
       (if (:not-found r)
@@ -1334,18 +1329,25 @@
            :code code
            :message (:message r)
            :issues (:issues r)})
-        (let [display-issue (display-issue loinc-url code r
-                                           {:display display
-                                            :displayLanguage displayLanguage})]
-          (cond-> {:result (nil? display-issue)
-                   :system loinc-url
-                   :code (:code r)
+        (let [disp (display/validate-display
+                    {:display         display
+                     :primary-display (:display r)
+                     :designations    (:designations r)
+                     :display-langs   (display/parse-display-language* displayLanguage)
+                     :displayLanguage displayLanguage
+                     :system          loinc-url
+                     :code            (:code r)
+                     :cs-language     nil
+                     :lenient?        lenient-display-validation})]
+          (cond-> {:result  (if disp (:result disp) true)
+                   :system  loinc-url
+                   :code    (:code r)
                    :display (:display r)
                    :version version}
             (:inactive r) (assoc :inactive true)
             (:inactive-status r) (assoc :inactive-status (:inactive-status r))
-            display-issue (assoc :message (:text display-issue)
-                                 :issues [display-issue]))))
+            disp (assoc :message (:text (:issue disp))
+                        :issues  [(:issue disp)]))))
       {:result false :system system :code code}))
 
   (cs-subsumes [_ {:keys [codeA codeB]}]
@@ -1369,7 +1371,7 @@
                   requested-version :version}]
     (if (and requested-version (not= version requested-version))
       {:concepts []}
-      (let [display-langs (display/parse-display-language displayLanguage)
+      (let [display-langs (display/parse-display-language* displayLanguage)
             {:keys [sql params post-filters issues]} (search-sql text display-langs filters active-only max-hits)]
         (with-open [conn (jdbc/get-connection ds)]
           (let [rows (cond->> (jdbc/execute! conn (into [sql] params) (row-builder))

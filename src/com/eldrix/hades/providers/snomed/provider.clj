@@ -699,7 +699,7 @@
             (lookup-expression-code svc code params)))
         (issues/unknown-code-lookup (or system snomed-system-uri) code)))
 
-  (cs-validate-code [_ {:keys [code display version displayLanguage]}]
+  (cs-validate-code [_ {:keys [code display version displayLanguage lenient-display-validation]}]
     (let [ver (or version (version-uri svc))]
       (when-not (str/blank? code)
         (if-let [code' (parse-long code)]
@@ -728,17 +728,17 @@
                                               :details-code "display-comment"
                                               :message-id   "INACTIVE_DISPLAY_FOUND"
                                               :text         msg
-                                              :expression   ["display"]}]))
+                                              :expression   ["Coding.display"]}]))
                     (let [msg (str "Wrong Display Name '" display "' for " snomed-system-uri "#" code
                                    " - should be '" preferred "'"
                                    " (for the language(s) '" lang "')")]
-                      (assoc result :result false
+                      (assoc result :result (boolean lenient-display-validation)
                              :message msg
-                             :issues [{:severity     "error"
+                             :issues [{:severity     (if lenient-display-validation "warning" "error")
                                        :type         "invalid"
                                        :details-code "invalid-display"
                                        :text         msg
-                                       :expression   ["display"]}]))))
+                                       :expression   ["Coding.display"]}]))))
                 result))
             (let [msg (str "Unknown code '" code "' in the CodeSystem '" snomed-system-uri "' version '" ver "'")]
               {:result  false
@@ -938,7 +938,7 @@
                    :compose-pins     []}
             total        (assoc :total total)
             (seq issues) (assoc :issues issues))))))
-  (vs-validate-code [_ _svc {:keys [url code system display displayLanguage]}]
+  (vs-validate-code [_ _svc {:keys [url code system display displayLanguage lenient-display-validation]}]
     (when (and (= system snomed-system-uri) (not (str/blank? code)))
       (let [code' (parse-long code)
             ver (version-uri svc)
@@ -1012,12 +1012,13 @@
                               msg (str "Wrong Display Name '" display "' for " system "#" code
                                        " - should be '" display-val "'"
                                        " (for the language(s) '" lang "')")]
-                          (assoc result :message msg
-                                 :issues [{:severity     "warning"
+                          (assoc result :result (boolean lenient-display-validation)
+                                 :message msg
+                                 :issues [{:severity     (if lenient-display-validation "warning" "error")
                                            :type         "invalid"
                                            :details-code "invalid-display"
                                            :text         msg
-                                           :expression   ["display"]}]))
+                                           :expression   ["Coding.display"]}]))
                         result))
 
                     :else

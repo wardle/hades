@@ -411,8 +411,14 @@
       (let [result (protos/vs-validate-code vs *svc* {:code "Z" :system "http://example.com/cs"})]
         (is (false? (:result result)))))
 
-    (testing "display mismatch"
+    (testing "display mismatch is strict by default"
       (let [result (protos/vs-validate-code vs *svc* {:code "X" :system "http://example.com/cs" :display "Wrong"})]
+        (is (false? (:result result)))
+        (is (some? (:message result)))))
+
+    (testing "display mismatch is lenient when requested"
+      (let [result (protos/vs-validate-code vs *svc* {:code "X" :system "http://example.com/cs" :display "Wrong"
+                                                      :lenient-display-validation true})]
         (is (true? (:result result)))
         (is (some? (:message result)))))))
 

@@ -21,7 +21,21 @@
 (s/def ::offset (s/nilable nat-int?))
 (s/def ::count (s/nilable nat-int?))
 (s/def ::expanding (s/nilable set?))
-(s/def ::expand-params (s/keys :opt-un [::filter ::activeOnly ::offset ::count ::expanding]))
+(s/def ::displayLanguage (s/nilable string?))
+(s/def ::properties (s/nilable coll?))
+(s/def ::max-hits (s/nilable nat-int?))
+(s/def ::purpose #{:validate :expand})
+;; Per-system version overrides ({system -> version-or-pattern}), read flat
+;; by `resolve-effective-version`.
+(s/def ::force-system-version (s/nilable (s/map-of string? string?)))
+(s/def ::system-version (s/nilable (s/map-of string? string?)))
+(s/def ::check-system-version (s/nilable (s/map-of string? string?)))
+
+;; The input contract for `expand-compose`: every key the engine reads.
+(s/def ::expand-params
+  (s/keys :opt-un [::filter ::activeOnly ::offset ::count ::expanding
+                   ::displayLanguage ::properties ::max-hits ::purpose
+                   ::force-system-version ::system-version ::check-system-version]))
 
 (defn- distinct-by
   "Lazily drop elements whose `(f x)` key has already been seen, keeping
@@ -218,7 +232,7 @@
   cliff."
   [compose {:keys [offset displayLanguage] :as params}]
   (when (stored-extensional-answerable? compose params)
-    (let [display-langs (display/parse-display-language displayLanguage)
+    (let [display-langs (display/parse-display-language* displayLanguage)
           offset' (or offset 0)
           limit   (:count params)
           match?  (text-matcher (:filter params))
@@ -265,14 +279,14 @@
   "Expand a concept-driven include (`include.concept[]`) into the
   expansion. Each candidate is looked up via `cs-lookup` to enrich
   display / designations / inactive / abstract, then gated by
-  `:activeOnly` and (when present) the `$expand` `:text` filter. The
+  `:activeOnly` and (when present) the `$expand` `:filter` text. The
   filter matches against the looked-up display AND every designation
   value — the same surface a match-driven `cs-expand*` would consider —
   so concept-driven includes honour `filter` without compose having to
   post-filter the merged expansion."
-  [svc system version concepts {:keys [activeOnly displayLanguage text properties max-hits]}]
-  (let [match?        (text-matcher text)
-        display-langs (display/parse-display-language displayLanguage)]
+  [svc system version concepts {:keys [activeOnly displayLanguage properties max-hits] text-filter :filter}]
+  (let [match?        (text-matcher text-filter)
+        display-langs (display/parse-display-language* displayLanguage)]
    (cond->>
    (keep (fn [{:strs [code] provided-display "display"}]
           (let [raw       (when system
@@ -320,7 +334,7 @@
     (:displayLanguage params)  (assoc :displayLanguage (:displayLanguage params))
     (seq (:properties params)) (assoc :properties (:properties params))
     (:max-hits params)         (assoc :max-hits (:max-hits params))
-    (:text params)             (assoc :text (:text params))
+    (:filter params)           (assoc :text (:filter params))
     (:activeOnly params)       (assoc :active-only (:activeOnly params))))
 
 (defn- expand-valueset-refs
@@ -463,8 +477,6 @@
         params (if (and compose-lang (not (:displayLanguage params)))
                  (assoc params :displayLanguage compose-lang)
                  params)
-        params (cond-> params
-                 (:filter params) (assoc :text (:filter params)))
         includes (get compose "include")
         excludes (get compose "exclude")
         inactive-allowed (get compose "inactive" true)

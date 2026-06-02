@@ -12,7 +12,8 @@ This log documents significant changes for each release.
 * `$validate-code` against a SNOMED CT ValueSet whose `compose` uses a filter include with `expressions = true` now validates post-coordinated expressions: membership is decided by structural expression subsumption (`hermes/subsumes`) against the include's `concept` filters, with `expressions = false`/absent rejecting expressions. The rendered expression is returned as the display.
 * `$validate-code` against an implicit SNOMED ValueSet (`?fhir_vs=isa/X`, `?fhir_vs`) now correctly accepts post-coordinated expressions by structural expression subsumption. Arbitrary `?fhir_vs=ecl/…` with an expression is declined as `not-supported`; plain-concept membership in arbitrary ECL is unchanged (handled via `intersect-ecl`).
 * `?fhir_vs=isa/X` is now reflexive — includes X itself — for both `$validate-code` and `$expand`, matching the FHIR SNOMED CT specification.
-* Hades passes 500 / 600 (83.3%) tests in the pinned HL7 FHIR Terminology Conformance suite.
+* Display validation is now consistent across every provider: a `$validate-code` display mismatch is strict (`error`, `result=false`) by default and lenient (`warning`, `result=true`) only when `lenient-display-validation` is set, reported on `Coding.display`. A malformed `displayLanguage` operation parameter is now rejected as `invalid-display`.
+* Hades passes 503 / 600 (83.8%) tests in the pinned HL7 FHIR Terminology Conformance suite.
 
 ## [v2.0.198] - 2026-05-09
 

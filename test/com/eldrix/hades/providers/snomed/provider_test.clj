@@ -324,5 +324,33 @@
         (is (false? (:result r)))
         (is (= "not-supported" (:type (first (:issues r)))))))))
 
+(deftest ^:live validate-code-display-validation-contract
+  ;; Display validation must observe the same contract as every other provider
+  ;; (cf. provider-parity-test, display-test): a wrong display is strict by
+  ;; default (result=false, error) and lenient on request (result=true,
+  ;; warning), with the issue reported on `Coding.display`. SNOMED matches
+  ;; displays via Hermes language reference sets rather than FHIR designations,
+  ;; but the observable result shape must not diverge.
+  (let [provider (snomed/->HermesService *svc*)
+        wrong    "definitely not the right display"
+        cs (fn [extra] (protos/cs-validate-code provider
+                         (merge {:system "http://snomed.info/sct" :code "73211009" :display wrong} extra)))
+        vs (fn [extra] (protos/vs-validate-code provider *svc*
+                         (merge {:url "http://snomed.info/sct?fhir_vs=isa/73211009"
+                                 :system "http://snomed.info/sct" :code "73211009" :display wrong} extra)))]
+    (doseq [[label validate] [["cs-validate-code" cs] ["vs-validate-code" vs]]]
+      (testing (str label " — wrong display is strict by default")
+        (let [r (validate nil) issue (first (:issues r))]
+          (is (false? (:result r)) label)
+          (is (= "error" (:severity issue)) label)
+          (is (= "invalid-display" (:details-code issue)) label)
+          (is (= ["Coding.display"] (:expression issue)) label)))
+      (testing (str label " — wrong display is lenient when requested")
+        (let [r (validate {:lenient-display-validation true}) issue (first (:issues r))]
+          (is (true? (:result r)) label)
+          (is (= "warning" (:severity issue)) label)
+          (is (= "invalid-display" (:details-code issue)) label)
+          (is (= ["Coding.display"] (:expression issue)) label))))))
+
 (comment
   (#'snomed/parse-snomed-uri "http://snomed.info/sct"))

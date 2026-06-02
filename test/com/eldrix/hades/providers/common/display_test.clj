@@ -23,6 +23,23 @@
   [s]
   (display/parse-display-language s))
 
+(deftest parse-display-language-strict-throws
+  (testing "malformed input throws an invalid-display ex-info"
+    (let [e (is (thrown? clojure.lang.ExceptionInfo
+                         (display/parse-display-language* "-")))]
+      (is (= {:type :processing :details-code "invalid-display"} (ex-data e)))
+      (is (= "Invalid displayLanguage: '-'" (ex-message e)))))
+  (testing "blank/nil yields nil without throwing"
+    (is (nil? (display/parse-display-language* nil)))
+    (is (nil? (display/parse-display-language* ""))))
+  (testing "well-formed input parses; the wildcard is valid and yields no languages"
+    (is (= [{:lang "en" :q 1.0}] (display/parse-display-language* "en")))
+    (is (= () (display/parse-display-language* "*")))))
+
+(deftest parse-display-language-lenient-swallows-malformed
+  (testing "the lenient parser swallows malformed input for the Accept-Language header path"
+    (is (= () (display/parse-display-language "-")))))
+
 (deftest no-use-designation-is-eligible
   (testing "writer didn't classify ⇒ treated as a display"
     (is (= "Hallo"

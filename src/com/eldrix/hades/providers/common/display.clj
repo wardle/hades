@@ -2,24 +2,40 @@
   "Shared display + language helpers for FHIR terminology operations.
   Used by CodeSystem and ValueSet implementations for language-aware
   display validation and selection."
-  (:require [clojure.string :as str])
+  (:require [clojure.string :as str]
+            [com.eldrix.hades.providers.common.issues :as issues])
   (:import (java.util Locale$LanguageRange)))
 
 (set! *warn-on-reflection* true)
+
+(defn- ranges->langs
+  "Turn parsed `Locale$LanguageRange`s into `{:lang :q}` maps sorted by quality
+  descending, dropping the `*` wildcard. nil ranges yield ()."
+  [ranges]
+  (->> ranges
+       (keep (fn [^Locale$LanguageRange r]
+               (let [range (.getRange r)]
+                 (when (not= range "*")
+                   {:lang range :q (.getWeight r)}))))
+       (sort-by :q #(compare %2 %1))))
 
 (defn parse-display-language
   "Parse a displayLanguage (RFC 4647 / Accept-Language) string into a seq of
   `{:lang :q}` maps sorted by quality descending. The wildcard `*` is dropped.
   Returns nil for nil/blank input and for inputs the JDK rejects as malformed."
   [s]
-  (when (and s (not (str/blank? s)))
-    (let [ranges (try (Locale$LanguageRange/parse ^String s) (catch Exception _ nil))]
-      (->> ranges
-           (keep (fn [^Locale$LanguageRange r]
-                   (let [range (.getRange r)]
-                     (when (not= range "*")
-                       {:lang range :q (.getWeight r)}))))
-           (sort-by :q #(compare %2 %1))))))
+  (when-not (str/blank? s)
+    (ranges->langs (try (Locale$LanguageRange/parse ^String s) (catch Exception _ nil)))))
+
+(defn parse-display-language*
+  "Like `parse-display-language`, but throws on malformed input."
+  [s]
+  (when-not (str/blank? s)
+    (ranges->langs
+     (try (Locale$LanguageRange/parse ^String s)
+          (catch Exception _
+            (throw (ex-info (str "Invalid displayLanguage: '" s "'")
+                            {:type :processing :details-code "invalid-display"})))))))
 
 (defn language-matches?
   "Check if a designation language matches a requested language using prefix matching."
@@ -81,3 +97,42 @@
                     (:value d)))
                 designations))
         display-languages))
+
+(defn validate-display
+  "Validate a caller-supplied `display` against the matched concept and the
+  requested `displayLanguage`, returning `{:result :issue}` for the finding (a
+  mismatch, or no display in the requested language) or nil when it is acceptable."
+  [{:keys [display primary-display designations display-langs displayLanguage
+           system code cs-language lenient?]}]
+  (when (and (not (str/blank? display)) primary-display)
+    (cond
+      (not (display-matches? {:display primary-display :designations designations}
+                             display display-langs))
+      (let [{:keys [text message-id]} (issues/format-display-mismatch
+                                       display system code primary-display
+                                       designations displayLanguage cs-language)]
+        {:result (boolean lenient?)
+         :issue  (cond-> {:severity     (if lenient? "warning" "error")
+                          :type         "invalid"
+                          :details-code "invalid-display"
+                          :text         text
+                          :expression   ["Coding.display"]}
+                   message-id (assoc :message-id message-id))})
+
+      ;; The requested language has no display: no eligible designation in it,
+      ;; and it isn't the code system's own language (whose display is the
+      ;; primary). Only remark when the code system actually carries language
+      ;; info — a code system with none has no "default language" to fall back to.
+      (and displayLanguage
+           (nil? (find-display-for-language designations display-langs))
+           (not (some #(language-matches? cs-language (:lang %)) display-langs))
+           (or cs-language (some :language designations)))
+      (let [{:keys [text message-id]} (issues/format-no-display-in-language
+                                       display system code displayLanguage)]
+        {:result true
+         :issue  (cond-> {:severity     "information"
+                          :type         "invalid"
+                          :details-code "invalid-display"
+                          :text         text
+                          :expression   ["Coding.display"]}
+                   message-id (assoc :message-id message-id))}))))

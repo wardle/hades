@@ -1,45 +1,85 @@
 (ns com.eldrix.hades.providers.common.vs-validate
-  "Pure compose-driven `vs-validate-code` implementation, shared by every
-  ValueSet provider that's backed by a parsed compose definition.
+  "Shared `vs-validate-code` for any ValueSet provider backed by a parsed
+  compose definition.
 
-  `validate-code` runs the compose engine to expand the ValueSet, finds
-  the caller's code+system within the expansion, applies version
-  matching / display validation / inactive-status / fragment-CS /
-  status-warning logic, and returns a `::result/validate`.
+  `validate-code` is the single public entry. It expands the ValueSet
+  through the compose engine, looks for the caller's code+system in the
+  expansion, applies version matching, display validation, inactive
+  status, fragment-CodeSystem and status-warning logic, and returns a
+  `::result/validate`.
 
-  Provider impls (`MemoryValueSet`, `FtrmProvider`, `LoincProvider`, …)
-  call this with their own `vs-data` `{:url :version :compose :metadata}`
-  map. Behaviour is identical across backends because the function only
-  depends on the svc and the compose def."
-  (:require [clojure.string :as str]
+  It depends only on `svc` (the composite, for cross-CodeSystem protocol
+  callbacks) and the provider's `{:url :version :compose}` map, so every
+  backend (`MemoryValueSet`, `FtrmProvider`, `LoincProvider`, …) gets
+  identical behaviour by delegating here."
+  (:require [clojure.spec.alpha :as s]
+            [clojure.string :as str]
             [com.eldrix.hades.providers.common.canonical :as canonical]
             [com.eldrix.hades.providers.common.compose :as compose]
             [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.providers.common.display :as display]
             [com.eldrix.hades.providers.common.issues :as issues]
-            [com.eldrix.hades.protocols :as protos]))
+            [com.eldrix.hades.protocols :as protos]
+            [com.eldrix.hades.protocols.result :as result]))
 
 (set! *warn-on-reflection* true)
 
+;; Input contracts: the ValueSet (`vs-data`) and the operation `params`.
+
+;; vs-data — the ValueSet identity each backend supplies.
+(s/def ::url string?)
+(s/def ::version (s/nilable string?))
+(s/def ::compose (s/nilable map?))
+
+;; params — the validate-code operation inputs. An open map; only the keys
+;; the engine reads are listed. `::version` here is the caller's *coding*
+;; version (reused spec, same type as the ValueSet's version in vs-data).
+(s/def ::code (s/nilable string?))
+(s/def ::system (s/nilable string?))
+(s/def ::display (s/nilable string?))
+(s/def ::displayLanguage (s/nilable string?))
+(s/def ::lenient-display-validation (s/nilable boolean?))
+(s/def ::expanding (s/nilable set?))
+(s/def ::force-system-version (s/nilable (s/map-of string? string?)))
+(s/def ::system-version (s/nilable (s/map-of string? string?)))
+(s/def ::check-system-version (s/nilable (s/map-of string? string?)))
+
+(s/def ::params
+  (s/keys :opt-un [::code ::system ::display ::version ::displayLanguage
+                   ::lenient-display-validation ::expanding
+                   ::force-system-version ::system-version ::check-system-version]))
+
+;; ---------------------------------------------------------------------------
+;; Compose-narrowing helpers — reduce the compose to a single-code lookup
+;; before expanding, so validation never materialises whole memberships.
+;; ---------------------------------------------------------------------------
+
 (defn- compose-version-for-system
+  "Return the version declared for `system` in the compose `include[]`,
+  preferring `preferred` when it appears among the declared versions."
   ([compose-def system] (compose-version-for-system compose-def system nil))
   ([compose-def system preferred]
-   (let [matches (keep (fn [inc]
-                         (when (= system (get inc "system"))
-                           (get inc "version")))
+   (let [matches (keep (fn [include]
+                         (when (= system (get include "system"))
+                           (get include "version")))
                        (get compose-def "include"))]
      (or (when preferred (some #{preferred} matches))
          (first matches)))))
 
-(defn- code-filter [code]
+(defn- code-filter
+  "Build a compose filter selecting a single `code` (`code = <code>`)."
+  [code]
   {"property" "code" "op" "=" "value" code})
 
 (defn- match-driven-system-include?
+  "True when `include` selects `system` by membership alone — same
+  `system` and no enumerated `concept[]`."
   [include system]
   (and (= system (get include "system"))
        (not (seq (get include "concept")))))
 
 (defn- add-code-filter
+  "Push an exact-`code` filter onto `include`'s `filter[]`."
   [include code]
   (update include "filter" (fnil conj []) (code-filter code)))
 
@@ -73,8 +113,17 @@
         (contains? compose-def "exclude") (update "exclude" #(mapv narrow %))))
     compose-def))
 
+;; ---------------------------------------------------------------------------
+;; Issue-attaching helpers — each folds one cross-cutting issue onto an
+;; in-progress `result`, reading the request facts it needs from `params`.
+;; ---------------------------------------------------------------------------
+
 (defn- add-version-mismatch
-  [result caller-version match-ver system override-pattern include-ver force? svc]
+  "When the caller's version differs from the matched/included version, add
+  a `vs-invalid` `Coding.version` issue (warning for a versionless include,
+  error otherwise) and, for errors, extend `:message`."
+  [result svc {:keys [system match-ver include-ver override-pattern force?]
+               caller-version :version}]
   (if (and caller-version match-ver (not= caller-version match-ver))
     (let [caller-version-exists? (nil? (composite/unknown-version-issue svc system caller-version))
           default-mismatch? (and (not caller-version-exists?)
@@ -104,8 +153,10 @@
     result))
 
 (defn- add-check-system-version-issue
-  [result svc system resolved-version params]
-  (if-let [issue (composite/check-system-version-issue svc system resolved-version params)]
+  "When the `:check-system-version` param names a version `system`'s resolved
+  CodeSystem can't satisfy, add the resulting issue and extend `:message`."
+  [result svc {:keys [system match-ver] :as params}]
+  (if-let [issue (composite/check-system-version-issue svc system match-ver params)]
     (let [cur-msg (:message result)]
       (assoc result
              :result false
@@ -114,7 +165,10 @@
     result))
 
 (defn- add-unknown-version-issue
-  [result svc system caller-version]
+  "When the caller's version names a version of `system` that isn't
+  registered, prepend an unknown-version issue (priority 0), prepend its
+  text to `:message`, and flag `:x-caused-by-unknown-system`."
+  [result svc {:keys [system] caller-version :version}]
   (if-let [issue (composite/unknown-version-issue svc system caller-version)]
     (let [cur-msg (:message result)]
       (assoc result
@@ -125,14 +179,15 @@
     result))
 
 ;; ---------------------------------------------------------------------------
-;; Branch helpers — each handles one exit shape for `validate-code`.
-;; All take pre-computed inputs: the public entry `validate-code` does the
-;; one-time work (compose expansion, parameter destructuring) and dispatches.
+;; Branch helpers — each builds one exit shape for `validate-code` from
+;; svc / vs-data / params. `validate-code` does the one-time work (compose
+;; expansion, match resolution), assoc'ing its results onto `params`, then
+;; dispatches to exactly one of these.
 ;; ---------------------------------------------------------------------------
 
 (defn- result-vs-invalid
   "Compose itself was invalid — surface the issue verbatim."
-  [vs-invalid-issue compose-issues code system]
+  [{:keys [vs-invalid-issue compose-issues code system]}]
   (cond-> {:result    false
            :not-found true
            :code      (when code (keyword code))
@@ -144,7 +199,8 @@
   "An included CodeSystem isn't registered. Build a `:result false` shape
   that surfaces the not-found cause and any version mismatch the caller
   introduced."
-  [svc compose not-found-issue compose-issues code system caller-version]
+  [svc {:keys [compose]} {:keys [not-found-issue compose-issues code system]
+                          caller-version :version}]
   (let [include-ver (compose-version-for-system compose system)
         include-ver-unknown? (and system include-ver
                                   (nil? (composite/find-codesystem svc
@@ -155,6 +211,7 @@
                         (and caller-version
                              (nil? (composite/unknown-version-issue svc system caller-version)))
                         (assoc :version caller-version))))
+        {cs-valid :result cs-disp :display cs-ver :version} cs-result
         vs-invalid-issue (when (and caller-version include-ver
                                     (not= caller-version include-ver))
                            {:severity     "error"
@@ -175,17 +232,18 @@
       system (assoc :system system)
       include-ver-unknown?
       (assoc :x-caused-by-unknown-system (canonical/versioned-uri system include-ver))
-      (and cs-result (:result cs-result) (:display cs-result))
-      (assoc :display (:display cs-result))
-      (and cs-result (:version cs-result))
-      (assoc :version (:version cs-result)))))
+      (and cs-result cs-valid cs-disp)
+      (assoc :display cs-disp)
+      (and cs-result cs-ver)
+      (assoc :version cs-ver))))
 
 (defn- find-best-match
   "Walk the expanded concept list and pick the best match for the caller.
   Returns nil when no concept matches by code+system. Sets `:case-differs`
   on the returned match when the only match is case-insensitive and the
   matched CodeSystem declares caseSensitive=false."
-  [svc expanded code system display caller-version multi-version-systems]
+  [svc {:keys [expanded code system display multi-version-systems]
+        caller-version :version}]
   (let [case-insensitive? (fn [c]
                             (false? (:case-sensitive
                                       (composite/cs-meta svc (or (:system c) system)))))
@@ -223,7 +281,7 @@
   "When the include version is a wildcard pattern that matches the caller's
   version, but the matched concept came from a different concrete version,
   re-fetch the concept at the caller's version so display reflects it."
-  [match svc compose system code caller-version]
+  [match svc {:keys [compose]} {:keys [system code] caller-version :version}]
   (if (nil? match)
     match
     (let [include-ver (compose-version-for-system compose system
@@ -241,91 +299,91 @@
         match))))
 
 (defn- apply-cross-cutting
-  "Apply the standard chain of cross-cutting concerns to a result map.
-  Order is significant: inactive warnings precede version mismatch
-  precede unknown-version precede check-system-version, then the
-  CS/VS status warnings sit on the outside. Used by both the match
-  and no-match exits."
-  [result svc system url caller-version match-ver override-pattern include-ver force? params]
+  "Apply the standard chain of cross-cutting concerns to a `result`. Order is
+  significant: inactive warnings precede version mismatch precede
+  unknown-version precede check-system-version, then the CS/VS status
+  warnings sit on the outside."
+  [result svc {:keys [url]} {:keys [system] :as params}]
   (-> result
       (issues/add-inactive-warning)
-      (add-version-mismatch caller-version match-ver system override-pattern include-ver force? svc)
-      (add-unknown-version-issue svc system caller-version)
-      (add-check-system-version-issue svc system match-ver params)
+      (add-version-mismatch svc params)
+      (add-unknown-version-issue svc params)
+      (add-check-system-version-issue svc params)
       (composite/add-cs-status-warnings svc system)
       (composite/add-vs-status-warnings svc url)))
 
 (defn- result-with-match
   "A concept was found in the expansion; return the validation success or
   the lenient/strict display-mismatch shape, with cross-cutting concerns
-  applied."
-  [match svc url params code display caller-version include-ver match-ver override-pattern force?]
-  (let [system (:system match)
-        case-differs? (:case-differs match)
-        actual-code  (:code match)
-        display-langs (display/parse-display-language (:displayLanguage params))
+  applied. Cross-cutting keys on the matched concept's system, which may
+  differ from the caller's (e.g. validation by code alone)."
+  [svc vs-data
+   {{system :system actual-code :code match-display :display match-version :version
+     case-differs? :case-differs
+     :keys [designations inactive inactive-status]} :match
+    :keys [code display displayLanguage lenient-display-validation]
+    :as params}]
+  (let [display-langs (display/parse-display-language* displayLanguage)
         lang-display  (when (seq display-langs)
-                        (display/find-display-for-language (:designations match) display-langs))
-        best-display  (or lang-display (:display match))
+                        (display/find-display-for-language designations display-langs))
+        best-display  (or lang-display match-display)
         result (cond-> {:result  true
                         :display best-display
                         :code    (keyword code)
                         :system  system}
-                 (:version match) (assoc :version (:version match))
-                 (:inactive match) (assoc :inactive true)
-                 (:inactive-status match) (assoc :inactive-status (:inactive-status match))
-                 case-differs? (assoc :normalized-code (keyword actual-code)))
+                 match-version   (assoc :version match-version)
+                 inactive        (assoc :inactive true)
+                 inactive-status (assoc :inactive-status inactive-status)
+                 case-differs?   (assoc :normalized-code (keyword actual-code)))
         case-issue (when case-differs?
                      {:severity     "information"
                       :type         "business-rule"
                       :details-code "code-rule"
                       :text         (issues/format-case-mismatch
-                                     code actual-code system (:version match))
+                                     code actual-code system match-version)
                       :expression   ["Coding.code"]})
-        display-mismatch? (and display (not (str/blank? display))
-                               (:display match)
-                               (not (display/display-matches? match display display-langs)))
-        result (if display-mismatch?
-                 (let [lenient?  (get params :lenient-display-validation true)
-                       cs-m      (when system (composite/cs-meta svc system))
-                       cs-lang   (when cs-m (or (:language cs-m) (get cs-m "language")))
-                       {:keys [text message-id]} (issues/format-display-mismatch display system code
-                                                   (:display match) (:designations match) (:displayLanguage params) cs-lang)
-                       display-issue (cond-> {:severity     (if lenient? "warning" "error")
-                                              :type         "invalid"
-                                              :details-code "invalid-display"
-                                              :text         text
-                                              :expression   ["Coding.display"]}
-                                       message-id (assoc :message-id message-id))]
-                   (assoc result :result (boolean lenient?)
-                                 :message text
-                                 :issues (filterv some? [case-issue display-issue])))
-                 (cond-> result case-issue (assoc :issues [case-issue])))]
-    (apply-cross-cutting result svc system url caller-version match-ver override-pattern include-ver force? params)))
+        cs-lang (when (and (not (str/blank? display)) system)
+                  (let [cs-m (composite/cs-meta svc system)]
+                    (when cs-m (or (:language cs-m) (get cs-m "language")))))
+        disp    (display/validate-display
+                 {:display         display
+                  :primary-display match-display
+                  :designations    designations
+                  :display-langs   display-langs
+                  :displayLanguage displayLanguage
+                  :system          system
+                  :code            code
+                  :cs-language     cs-lang
+                  :lenient?        lenient-display-validation})
+        issues  (filter some? [case-issue (:issue disp)])
+        result  (cond-> result
+                  disp         (assoc :result (:result disp) :message (:text (:issue disp)))
+                  (seq issues) (assoc :issues issues))]
+    (apply-cross-cutting result svc vs-data (assoc params :system system))))
 
 (defn- result-no-match
-  "No concept was found in the expansion. Build the not-in-vs failure
-  shape, layering cs-validate insight and (rarely) the fragment
-  CodeSystem semantics on top."
-  [svc compose url version params code system display caller-version override-pattern force?]
+  "No concept was found in the expansion. Build the not-in-vs failure shape,
+  layering cs-validate insight and (rarely) the fragment CodeSystem
+  semantics on top."
+  [svc {:keys [url version]} {:keys [code system display] caller-version :version :as params}]
   (let [code-ref (cond-> (str system "#" code)
                    display (str " ('" display "')"))
         vs-ref (if version (str url "|" version) url)
         not-in-vs-msg (str "The provided code '" code-ref "' was not found in the value set '" vs-ref "'")
         cs-result (when system (protos/cs-validate-code svc {:system system :code code}))
+        {cs-valid :result cs-disp :display cs-ver :version cs-issues :issues
+         cs-unknown :x-unknown-system} cs-result
         cs-m (when system (composite/cs-meta svc system))
-        cs-fragment? (and cs-result (:result cs-result) (= "fragment" (:content cs-m)))
-        cs-invalid? (and cs-result (not cs-fragment?) (false? (:result cs-result)))
+        cs-fragment? (and cs-result cs-valid (= "fragment" (:content cs-m)))
+        cs-invalid? (and cs-result (not cs-fragment?) (false? cs-valid))
         cs-issue (when cs-invalid?
-                   (let [i (first (:issues cs-result))]
+                   (let [i (first cs-issues)]
                      ;; When the caller pinned a version, the version-specific
                      ;; unknown-version issue (added below) supersedes the bare
                      ;; "system not found" issue from cs-result. Drop the latter
                      ;; to avoid duplicate not-found entries.
                      (when-not (and caller-version (= "not-found" (:details-code i)))
-                       i)))
-        include-ver (compose-version-for-system compose system caller-version)
-        match-ver include-ver]
+                       i)))]
     (if cs-fragment?
       (-> cs-result
           (assoc :code (keyword code))
@@ -339,79 +397,117 @@
                           :expression   ["Coding.code"]}]
             all-issues  (if cs-issue (conj base-issues cs-issue) base-issues)
             combined-msg (if cs-issue (str not-in-vs-msg "; " (:text cs-issue)) not-in-vs-msg)
-            cs-display  (when (and cs-result (:result cs-result)) (:display cs-result))
-            cs-version  (when cs-result (:version cs-result))
-            cs-unknown-sys (:x-unknown-system cs-result)
+            cs-display  (when (and cs-result cs-valid) cs-disp)
+            cs-version  (when cs-result cs-ver)
             result (cond-> {:result  false
                             :code    (keyword code)
                             :message combined-msg
                             :issues  all-issues}
                      system (assoc :system system)
-                     cs-unknown-sys (assoc :x-unknown-system cs-unknown-sys)
+                     cs-unknown (assoc :x-unknown-system cs-unknown)
                      cs-display (assoc :display cs-display)
                      cs-version (assoc :version cs-version))]
-        ;; result-no-match deliberately skips `add-inactive-warning` (no
-        ;; match means no `:inactive` flag to surface).
+        ;; No inactive warning here (unlike `apply-cross-cutting`, which leads
+        ;; with one): no match means there is no `:inactive` flag to surface.
         (-> result
-            (add-version-mismatch caller-version match-ver system override-pattern include-ver force? svc)
-            (add-unknown-version-issue svc system caller-version)
-            (add-check-system-version-issue svc system match-ver params)
+            (add-version-mismatch svc params)
+            (add-unknown-version-issue svc params)
+            (add-check-system-version-issue svc params)
             (composite/add-cs-status-warnings svc system)
             (composite/add-vs-status-warnings svc url))))))
 
+(s/fdef validate-code
+  :args (s/cat :svc some?
+               :vs-data (s/keys :req-un [::url] :opt-un [::version ::compose])
+               :params ::params))
+
 (defn validate-code
-  "Compose-driven `vs-validate-code` shared by every backend.
+  "Compose-driven `vs-validate-code` shared by every backend: is the
+  caller's coding a member of this ValueSet?
 
-  Args:
-    svc      — the TerminologyService (composite); compose calls its
-               protocol methods for cross-CodeSystem lookups.
-    vs-data  — `{:url :version :compose}` for the ValueSet.
-    params   — the operation params: `{:code :system :display :version
-               :displayLanguage :force-system-version :system-version
-               :check-system-version :lenient-display-validation
-               :expanding}`.
+  Parameters:
 
-  Returns a `::result/validate`. No backend-private state is
-  consulted: this is pure transformation over `compose/expand-compose`
-  and protocol callbacks on `svc`. Branches are split into
-  `result-vs-invalid`, `result-not-found`, `result-with-match` and
-  `result-no-match`."
-  [svc {:keys [url version compose]} params]
+    svc      The composite TerminologyService. Compose calls its protocol
+             methods for cross-CodeSystem lookups (display, version
+             resolution, status).
+
+    vs-data  The ValueSet to validate against:
+               :url      canonical URL (used in messages, and as the
+                         cycle-detection key while expanding)
+               :version  the ValueSet's version (optional)
+               :compose  the parsed FHIR `compose` (string-keyed JSON)
+
+    params   The operation inputs. An open map; the keys read here:
+               :code     the code to validate
+               :system   its CodeSystem URL
+               :display  display to check against the concept (optional)
+               :version  the caller's *coding* version — NOT the ValueSet's
+               :displayLanguage             requested display language(s)
+               :lenient-display-validation  warn rather than fail on a
+                                            display mismatch
+               :force-system-version /
+               :system-version /
+               :check-system-version  {system-url -> version} maps that
+                         pin / default / assert a CodeSystem's version
+                         during expansion
+
+  `:expanding` is not a caller parameter: it's an internal cycle guard — the
+  set of ValueSet URLs already being expanded in this request — threaded
+  through nested `valueSet[]` imports to break circular references. It seeds
+  to #{url} and grows as imports recurse.
+
+  Returns a `::result/validate`. Internally threads svc / vs-data / params,
+  assoc'ing each phase's findings onto params, and dispatches to one of
+  `result-vs-invalid`, `result-not-found`, `result-with-match` or
+  `result-no-match`.
+
+  Example — is SNOMED 73211009 in a ValueSet that includes all of SNOMED CT?
+
+      (validate-code svc
+        {:url     \"http://example.org/fhir/ValueSet/all-snomed\"
+         :compose {\"include\" [{\"system\" \"http://snomed.info/sct\"}]}}
+        {:code \"73211009\" :system \"http://snomed.info/sct\"})
+      ;; => {:result  true
+      ;;     :code    :73211009
+      ;;     :system  \"http://snomed.info/sct\"
+      ;;     :display \"Diabetes mellitus\"
+      ;;     :version \"http://snomed.info/sct/900000000000207008/version/20250201\"}"
+  [svc {:keys [url compose] :as vs-data}
+   {:keys [code system force-system-version system-version check-system-version]
+    caller-version :version
+    :as params}]
   (let [expanding (conj (or (:expanding params) #{}) url)
-        {:keys [code system display]} params
-        validation-compose (narrow-includes-to-code compose system code)
-        ;; Forward request flags (force-/system-/check-system-version) to
-        ;; compose so version overrides apply during the validation expand.
-        compose-params (-> (select-keys params [:force-system-version :system-version
-                                                :check-system-version :displayLanguage])
-                           (assoc :expanding expanding))
-        compose-result (compose/expand-compose svc validation-compose compose-params)
+        compose-result (compose/expand-compose svc
+                         (narrow-includes-to-code compose system code)
+                         (assoc params :expanding expanding))
         compose-issues (:issues compose-result)
-        expanded (:concepts compose-result)
-        multi-version-systems (or (:multi-version-systems compose-result) #{})
-        caller-version (:version params)
-        vs-invalid-issue (first (filter #(= "vs-invalid" (:details-code %)) compose-issues))
-        not-found-issue  (first (filter #(= "not-found"  (:details-code %)) compose-issues))]
-    (cond
-      vs-invalid-issue
-      (result-vs-invalid vs-invalid-issue compose-issues code system)
+        params (assoc params
+                      :expanded              (:concepts compose-result)
+                      :compose-issues        compose-issues
+                      :multi-version-systems (or (:multi-version-systems compose-result) #{})
+                      :vs-invalid-issue      (first (filter #(= "vs-invalid" (:details-code %)) compose-issues))
+                      :not-found-issue       (first (filter #(= "not-found"  (:details-code %)) compose-issues)))]
+    (s/assert ::result/validate
+      (cond
+        (:vs-invalid-issue params)
+        (result-vs-invalid params)
 
-      not-found-issue
-      (result-not-found svc compose not-found-issue compose-issues code system caller-version)
+        (:not-found-issue params)
+        (result-not-found svc vs-data params)
 
-      :else
-      (let [match (-> (find-best-match svc expanded code system display caller-version multi-version-systems)
-                      (align-match-to-wildcard-version svc compose system code caller-version))
-            include-ver (compose-version-for-system compose system
-                          (or (:version match) caller-version))
-            match-ver (or (:version match) include-ver)
-            {:keys [force-system-version system-version check-system-version]} params
-            force? (some? (get force-system-version system))
-            override-pattern (or (get force-system-version system)
-                                 (get system-version system)
-                                 (get check-system-version system))]
-        (if match
-          (result-with-match match svc url params code display caller-version
-                             include-ver match-ver override-pattern force?)
-          (result-no-match svc compose url version params code system display
-                           caller-version override-pattern force?))))))
+        :else
+        (let [match (-> (find-best-match svc params)
+                        (align-match-to-wildcard-version svc vs-data params))
+              include-ver (compose-version-for-system compose system
+                            (or (:version match) caller-version))
+              params (assoc params
+                            :match            match
+                            :include-ver      include-ver
+                            :match-ver        (or (:version match) include-ver)
+                            :force?           (some? (get force-system-version system))
+                            :override-pattern (or (get force-system-version system)
+                                                  (get system-version system)
+                                                  (get check-system-version system)))]
+          (if match
+            (result-with-match svc vs-data params)
+            (result-no-match svc vs-data params)))))))

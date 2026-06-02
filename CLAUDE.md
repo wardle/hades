@@ -87,6 +87,24 @@ clj -M:nrepl                    # without conformance deps
 clj -M:nrepl:conformance        # with conformance deps (for REPL-driven conformance testing)
 ```
 
+**Evaluating forms.** `clj-nrepl-eval` is a CLI tool that connects to the
+running nREPL, evaluates a form, and prints the result. The server writes
+its port to `.nrepl-port`; pass it explicitly:
+
+```bash
+clj-nrepl-eval --port "$(cat .nrepl-port)" "(+ 1 2)"                  # eval one form
+clj-nrepl-eval --port "$(cat .nrepl-port)" --timeout 180000 "<form>"  # long ops (see below)
+```
+
+- Pass `--port` explicitly from `.nrepl-port`; don't rely on
+  `--connected-ports` (it only lists connections the tool itself manages).
+- Evaluate **one form per invocation**. Chaining several top-level forms
+  in a single string is unreliable — `require` what you need in its own
+  call, then evaluate against it in the next.
+- Raise `--timeout` (milliseconds) for anything slow: opening a service,
+  reloading namespaces, or a full conformance run. The default cuts long
+  forms off.
+
 **Do not reach for batch workarounds.** `clj -M:<alias> -e <form>` does
 not work when the alias sets `:main-opts` (the form is swallowed as an arg
 to the alias's main). Do not respond by hand-assembling a classpath and

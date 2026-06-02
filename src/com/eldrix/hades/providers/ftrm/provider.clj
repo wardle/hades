@@ -689,7 +689,7 @@
   [ds
    {:keys [version member-count member-systems member-id-lo member-id-hi]}
    {:keys [url offset filter displayLanguage] cnt :count}]
-  (let [display-langs (display/parse-display-language displayLanguage)
+  (let [display-langs (display/parse-display-language* displayLanguage)
         lim   (limit-offset-sql cnt offset)
         fts-q (fts-query filter)
         ->concept #(member-row->concept display-langs %)
@@ -843,7 +843,7 @@
                   inactive? (int->bool (:concept/inactive row))
                   abstract? (int->bool (:concept/abstract row))
                   {:keys [want? want-typed?]} (property-filter/parse properties)
-                  display-langs (display/parse-display-language displayLanguage)
+                  display-langs (display/parse-display-language* displayLanguage)
                   ;; If the caller asks for designations explicitly we
                   ;; must return all of them. When designations are only
                   ;; needed to pick a display for the supplied
@@ -896,7 +896,7 @@
                :designations (if (want? "designation") (or designations []) [])})
             (issues/unknown-code-lookup url code))))))
 
-  (cs-validate-code [_ {:keys [system code display displayLanguage] :as params}]
+  (cs-validate-code [_ {:keys [system code display displayLanguage lenient-display-validation] :as params}]
     (let [meta (lookup-entry cs-cache cs-latest system (params-version params))
           {:keys [url version case-sensitive]} meta]
       (if (nil? meta)
@@ -912,7 +912,7 @@
                     status-row     (:concept/status row)
                     inactive-status (when (#{"retired" "inactive"} status-row) status-row)
                     inactive?      (or inactive-row? (some? inactive-status))
-                    display-langs (display/parse-display-language displayLanguage)
+                    display-langs (display/parse-display-language* displayLanguage)
                     ;; Designations are only needed to (a) verify the
                     ;; supplied display, or (b) pick a language-specific
                     ;; display. Skip the read entirely otherwise. The
@@ -927,7 +927,6 @@
                     designations (when need-designations?
                                    (fetch-designations conn url version actual-code
                                                        designation-langs))
-                    concept {:code actual-code :display primary-display :designations designations}
                     best-display (or (when (seq display-langs)
                                        (display/find-display-for-language designations display-langs))
                                      primary-display)
@@ -946,20 +945,19 @@
                                   :text         (issues/format-case-mismatch
                                                  code actual-code url version)
                                   :expression   ["Coding.code"]})
-                    display-issue (when (and display (not (display/display-matches? concept display display-langs)))
-                                    (let [{:keys [text message-id]} (issues/format-display-mismatch
-                                                                     display url code primary-display designations
-                                                                     displayLanguage
-                                                                     (get-in meta [:metadata "language"]))]
-                                      (cond-> {:severity     "error"
-                                               :type         "invalid"
-                                               :details-code "invalid-display"
-                                               :text         text
-                                               :expression   ["Coding.display"]}
-                                        message-id (assoc :message-id message-id))))
-                    issues (filterv some? [case-issue display-issue])]
+                    disp (display/validate-display
+                          {:display         display
+                           :primary-display primary-display
+                           :designations    designations
+                           :display-langs   display-langs
+                           :displayLanguage displayLanguage
+                           :system          url
+                           :code            code
+                           :cs-language     (get-in meta [:metadata "language"])
+                           :lenient?        lenient-display-validation})
+                    issues (filter some? [case-issue (:issue disp)])]
                 (cond-> base
-                  display-issue (assoc :result false :message (:text display-issue))
+                  disp         (assoc :result (:result disp) :message (:text (:issue disp)))
                   (seq issues) (assoc :issues issues)))))))))
 
   (cs-subsumes [_ {:keys [systemA system codeA codeB] :as params}]
@@ -1008,7 +1006,7 @@
                                          (and (= "regex" op)
                                               (nil? (direct-column property))))
                                        filters)
-              display-langs (display/parse-display-language displayLanguage)
+              display-langs (display/parse-display-language* displayLanguage)
               ;; Materialise each result-set row to a plain map so it
               ;; outlives the cursor step, then push post-filtering and
               ;; max-hits capping into the transducer so `plan` can stop

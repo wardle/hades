@@ -123,7 +123,7 @@
                (and (seq issues)
                     (every? #(= "invalid-display" (:details-code %)) issues)))
              (display-matches-supplement?
-               extras display (display/parse-display-language displayLanguage)))
+               extras display (display/parse-display-language* displayLanguage)))
         (-> base-result
             (assoc :result true :display display)
             (dissoc :issues :message))
@@ -159,7 +159,7 @@
                (and (seq issues)
                     (every? #(= "invalid-display" (:details-code %)) issues)))
              (display-matches-supplement?
-               extras display (display/parse-display-language displayLanguage)))
+               extras display (display/parse-display-language* displayLanguage)))
         (-> base-result
             (assoc :result true :display display)
             (dissoc :issues :message))

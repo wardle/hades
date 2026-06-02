@@ -233,7 +233,10 @@
                    [{:severity     "error"
                      :type         (if t (name t) "exception")
                      :details-code (:details-code data)
-                     :text         (or (ex-message ex) "Internal server error")}])]
+                     ;; Pedestal merges the domain `ex-data` onto its wrapper
+                     ;; but decorates the wrapper's message; the clean message
+                     ;; survives on the immediate cause.
+                     :text         (or (ex-message (or (ex-cause ex) ex)) "Internal server error")}])]
     {:status status
      :body   (wire/operation-outcome issues)}))
 
@@ -273,11 +276,9 @@
               ;; the cause's message.
               (do (log/warn "connection pool saturated:" (.getMessage cause))
                   (assoc context :response (saturation-response)))
-              (let [t     (:type (ex-data ex))
-                    cause (or (.getCause ^Throwable ex) ex)
-                    msg   (or (ex-message cause) (ex-message ex))]
+              (let [t (:type (ex-data ex))]
                 (if t
-                  (log/info "Handled" t msg)
+                  (log/info "Handled" t (ex-message (or (ex-cause ex) ex)))
                   (log/error ex "Unhandled exception"))
                 (assoc context :response (exception-response ex)))))})
 

@@ -255,7 +255,7 @@
             props (:properties concept)
             inactive? (concept-inactive? concept)
             abstract? (concept-abstract? property-uri-map concept)
-            display-langs (display/parse-display-language displayLanguage)
+            display-langs (display/parse-display-language* displayLanguage)
             best-display (or (when (seq display-langs)
                                (display/find-display-for-language
                                  (:designations concept) display-langs))
@@ -291,7 +291,7 @@
          :designations (when (want? "designation") (:designations concept))})
       (issues/unknown-code-lookup (or system (:url meta)) code)))
 
-  (cs-validate-code [_ {:keys [code display displayLanguage]}]
+  (cs-validate-code [_ {:keys [code display displayLanguage lenient-display-validation]}]
     (let [url     (:url meta)
           version (:version meta)
           [concept case-differs?] (if case-sensitive?
@@ -300,7 +300,7 @@
       (if concept
         (let [inactive? (concept-inactive? concept)
               actual-code (:code concept)
-              display-langs (display/parse-display-language displayLanguage)
+              display-langs (display/parse-display-language* displayLanguage)
               lang-display (when (seq display-langs)
                              (display/find-display-for-language (:designations concept) display-langs))
               best-display (or lang-display (:display concept))
@@ -319,19 +319,19 @@
                             :text         (issues/format-case-mismatch
                                            code actual-code url version)
                             :expression   ["Coding.code"]})
-              display-issue (when (and display (not (display/display-matches? concept display display-langs)))
-                              (let [{:keys [text message-id]} (issues/format-display-mismatch display url code
-                                                                (:display concept) (:designations concept) displayLanguage
-                                                                (meta-language meta))]
-                                (cond-> {:severity     "error"
-                                         :type         "invalid"
-                                         :details-code "invalid-display"
-                                         :text         text
-                                         :expression   ["Coding.display"]}
-                                  message-id (assoc :message-id message-id))))
-              issues (filterv some? [case-issue display-issue])]
+              disp (display/validate-display
+                    {:display         display
+                     :primary-display (:display concept)
+                     :designations    (:designations concept)
+                     :display-langs   display-langs
+                     :displayLanguage displayLanguage
+                     :system          url
+                     :code            code
+                     :cs-language     (meta-language meta)
+                     :lenient?        lenient-display-validation})
+              issues (filter some? [case-issue (:issue disp)])]
           (cond-> result
-            display-issue (assoc :result false :message (:text display-issue))
+            disp         (assoc :result (:result disp) :message (:text (:issue disp)))
             (seq issues) (assoc :issues issues)))
         (let [fragment? (= "fragment" (:content meta))
               msg (if fragment?
@@ -372,7 +372,7 @@
           all-concepts (vals code-index)
           children-map (:children hierarchy)
           parents-map (:parents hierarchy)
-          display-langs (display/parse-display-language displayLanguage)
+          display-langs (display/parse-display-language* displayLanguage)
           want-props (when (seq properties) (set properties))
           matching (if (seq filters)
                      (clojure.core/filter
@@ -452,7 +452,7 @@
                                          (str/includes? (str/lower-case v) f)))
                                      (:designations c))))
                          concepts)))
-          display-langs (display/parse-display-language displayLanguage)
+          display-langs (display/parse-display-language* displayLanguage)
           all-concepts (mapv (fn [c]
                                (let [display (or (when (seq display-langs)
                                                    (display/find-display-for-language (:designations c) display-langs))
@@ -477,14 +477,13 @@
                            :status (:status meta)}]
        :compose-pins     []}))
 
-  (vs-validate-code [_ _svc {:keys [code system display displayLanguage] :as params}]
+  (vs-validate-code [_ _svc {:keys [code system display displayLanguage lenient-display-validation]}]
     (let [url     (:url meta)
           version (:version meta)]
       (when (or (nil? system) (= system url))
         (if-let [concept (get code-index code)]
           (let [inactive? (concept-inactive? concept)
-                lenient-display-validation (get params :lenient-display-validation true)
-                display-langs (display/parse-display-language displayLanguage)
+                display-langs (display/parse-display-language* displayLanguage)
                 lang-display (when (seq display-langs)
                                (display/find-display-for-language (:designations concept) display-langs))
                 best-display (or lang-display (:display concept))
@@ -494,20 +493,21 @@
                                 :system  url
                                 :version version}
                          inactive? (assoc :inactive true
-                                          :inactive-status (concept-inactive-status concept)))]
-            (if (and display (not (display/display-matches? concept display display-langs)))
-              (let [{:keys [text message-id]} (issues/format-display-mismatch display url code
-                                                (:display concept) (:designations concept) displayLanguage
-                                                (meta-language meta))]
-                (assoc result :result (boolean lenient-display-validation)
-                              :message text
-                              :issues [(cond-> {:severity     (if lenient-display-validation "warning" "error")
-                                                :type         "invalid"
-                                                :details-code "invalid-display"
-                                                :text         text
-                                                :expression   ["display"]}
-                                         message-id (assoc :message-id message-id))]))
-              result))
+                                          :inactive-status (concept-inactive-status concept)))
+                disp (display/validate-display
+                      {:display         display
+                       :primary-display (:display concept)
+                       :designations    (:designations concept)
+                       :display-langs   display-langs
+                       :displayLanguage displayLanguage
+                       :system          url
+                       :code            code
+                       :cs-language     (meta-language meta)
+                       :lenient?        lenient-display-validation})]
+            (cond-> result
+              disp (assoc :result  (:result disp)
+                          :message (:text (:issue disp))
+                          :issues  [(:issue disp)])))
           (let [fragment? (= "fragment" (:content meta))
                 msg (if fragment?
                       (str "Unknown Code '" code "' in the CodeSystem '" url "' version '" version

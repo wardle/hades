@@ -178,3 +178,13 @@
       :else
       {:text       (str prefix "Valid display is '" primary-display "' (for the language(s) '" lang "')")
        :message-id wrong-display})))
+
+(defn format-no-display-in-language
+  "Build the `:text` and `:message-id` for the informational issue raised when a
+  `displayLanguage` was requested and the supplied display is the valid default,
+  but the code system carries no display in that language."
+  [given-display system code display-language]
+  {:text       (str "There are no valid display names found for the code " system "#" code
+                    " for language(s) '" display-language "'. The display is '" given-display
+                    "' which is the default language display")
+   :message-id "NO_VALID_DISPLAY_FOUND_NONE_FOR_LANG_OK"})
