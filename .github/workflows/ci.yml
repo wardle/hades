@@ -40,7 +40,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: DeLaGuardo/setup-clojure@13.6.0
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
@@ -78,7 +78,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: DeLaGuardo/setup-clojure@13.6.0
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
@@ -136,7 +136,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: DeLaGuardo/setup-clojure@13.6.0
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
@@ -196,7 +196,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: DeLaGuardo/setup-clojure@13.6.0
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
@@ -269,7 +269,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: DeLaGuardo/setup-clojure@13.6.0
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
@@ -330,7 +330,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: DeLaGuardo/setup-clojure@13.6.0
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
@@ -407,7 +407,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: DeLaGuardo/setup-clojure@13.6.0
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
@@ -486,7 +486,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: DeLaGuardo/setup-clojure@13.6.0
+      - uses: DeLaGuardo/setup-clojure@13.6.1
         with:
           cli: latest
 
