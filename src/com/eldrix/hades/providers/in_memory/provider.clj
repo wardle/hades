@@ -543,8 +543,8 @@
                :ci-index         (s/nilable (s/map-of string? string?))))
 
 (defn memory-codesystem
-  "Build a `MemoryCodeSystem` provider from indexed data. Used by the
-  indexer; clients normally go through `from-fhir`."
+  "Build a `MemoryCodeSystem` provider from indexed data. Clients
+  normally go through `from-fhir`."
   [meta code-index hierarchy property-uri-map case-sensitive? ci-index]
   (->MemoryCodeSystem meta code-index hierarchy property-uri-map case-sensitive? ci-index))
 

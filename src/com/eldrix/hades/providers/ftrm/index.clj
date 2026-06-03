@@ -844,8 +844,8 @@
 (defn index!
   "Rebuild derived structures for an existing terminology container:
   the ancestor closure (`concept_ancestor`) for every CodeSystem and
-  the external-content FTS tables. Called by the `index` CLI
-  subcommand after `build!` has streamed in the raw rows."
+  the external-content FTS tables. Run after `build!` has streamed in
+  the raw rows."
   [^String db-path]
   (let [ds (db/open db-path)]
     (try

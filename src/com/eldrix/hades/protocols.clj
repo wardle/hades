@@ -145,9 +145,8 @@
     MUST honour every opt they receive — callers trust the result is
     already filtered. `{}` (no opts) means \"everything\".
 
-    Called by the boot driver at registration time (with `{}`) and by
-    `search*` on the request hot path (with the request's URL/version
-    + `:include-implicit? false`).")
+    Invoked both with `{}` (registration-time enumeration) and with a
+    URL/version filter + `:include-implicit? false` (request hot path).")
   (cs-resource [this params]
     "Get description of codesystem and key properties as per
     https://hl7.org/fhir/codesystem.html")

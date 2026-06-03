@@ -251,8 +251,7 @@
 
 (defn list-resources
   "Return the seq of `{:resource-type :url :version :concept-count :imported-at}`
-  rows from `tx_resource`. Used by the SQLite provider to publish its
-  metadata at registration time."
+  rows from `tx_resource`."
   [ds]
   (into []
         (map (fn [{:tx_resource/keys [resource_type url version concept_count imported_at]}]
