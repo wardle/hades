@@ -2,7 +2,7 @@
 
 This log documents significant changes for each release.
 
-## Not yet released
+## [v2.0.270] - 2026-06-04
 
 * **New native LOINC provider.** LOINC is now served by a dedicated SQLite-backed provider with a close-to-source table structure, indexed and queried directly rather than forced through a generic FTRM container at load time. Provider namespaces were restructured for simpler multi-provider support.
 * **ConceptMap search/discovery** (`GET /ConceptMap`). A shared FHIR REST-search filter matcher (`providers/common/search_filter`) backs ConceptMap search at the composite and metadata-opts filtering inside providers, wired through `core`, HTTP and the MCP tools.
