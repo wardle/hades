@@ -22,7 +22,7 @@ exist locally. Fixture paths are declared in
 
 | Fixture                          | Path                              | Provider exercised        | Pinned to                                | Source                                   |
 |----------------------------------|-----------------------------------|---------------------------|------------------------------------------|------------------------------------------|
-| SNOMED CT International          | `data/snomed-intl-20250201.db`  | Hermes (LMDB + Lucene)    | `ihtsdo.mlds/167@2025-02-01`             | MLDS                                     |
+| SNOMED CT conformance (Intl base 20250201) | `data/snomed-uk-clinical-2025-06-11.db` | Hermes (LMDB + Lucene) | `uk.nhs/sct-clinical@2025-06-11`         | TRUD                                     |
 | SNOMED CT UK monolith            | `data/snomed-uk-monolith.db`    | Hermes (LMDB + Lucene)    | `uk.nhs/sct-monolith` (latest)           | TRUD                                     |
 | LOINC                            | `data/loinc-2.82.db`            | native LOINC              | LOINC release `2.82`                     | loinc.org (free account)                 |
 | FHIR packages (combined container) | `data/fhir-tx.db`             | FTRM (SQLite)             | `hl7.fhir.r4.core@4.0.1` + 7 others (incl. `us.cdc.phinvads@0.12.0`, `us.nlm.vsac@0.24.0`) | packages.fhir.org / packages2.fhir.org |
@@ -39,23 +39,27 @@ exist locally. Fixture paths are declared in
 > in latency/footprint, so a benchmark number is only comparable to
 > another run **using the same provider**.
 
-### SNOMED CT International (conformance pin)
+### SNOMED CT conformance fixture (Intl base 20250201)
 
 The conformance suite, the `^:live` test tag and the criterium benchmarks
-all run against this single pinned release — pinning matters because the
-IG's tx-ecosystem fixtures were authored against this exact edition.
+all run against this pinned release — pinning matters because the IG's
+tx-ecosystem fixtures were authored against this exact International base.
+The pinned International 20250201 release is no longer available from MLDS, so
+it's sourced from the TRUD UK clinical edition dated 2025-06-11 (TRUD retains
+dated historical releases), which bundles International 20250201. Tests open it
+with `{:default-locale "en-US"}` so its GB-English default doesn't shadow the
+International preferred terms.
 
 ```bash
-printf '%s' "$MLDS_PASSWORD" > data/mlds-password.txt
-chmod 600 data/mlds-password.txt
-clj -M:run install compact data/snomed-intl-20250201.db \
-  --dist ihtsdo.mlds/167@2025-02-01 \
-  --username "$MLDS_USERNAME" \
-  --password data/mlds-password.txt
-rm -f data/mlds-password.txt
+printf '%s' "$TRUD_API_KEY" > data/trud-api-key.txt
+chmod 600 data/trud-api-key.txt
+clj -M:run install compact data/snomed-uk-clinical-2025-06-11.db \
+  --dist uk.nhs/sct-clinical@2025-06-11 \
+  --api-key data/trud-api-key.txt
+rm -f data/trud-api-key.txt
 ```
 
-Build takes ~2 minutes; the resulting DB is ~2.7 GB.
+Build takes ~2 minutes.
 
 ### SNOMED CT UK monolith (UK clinical + drug extensions)
 

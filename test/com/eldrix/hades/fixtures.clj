@@ -2,7 +2,7 @@
   "Shared test fixtures: pinned fixture paths, HTTP server lifecycle, and
   a request helper. SNOMED/LOINC/FTRM databases must be pre-provisioned
   (`hades/open` throws if a path is missing); FHIR package tarballs
-  self-provision via `download!` (see `fhir-archive`)."
+  self-provision via `download!` (see `fhir-archive!`)."
   (:require [clojure.data.json :as json]
             [com.eldrix.hades.impl.fhir-package :as fhir-package]
             [com.eldrix.hades.impl.http :as http])
@@ -11,24 +11,12 @@
                           HttpRequest$BodyPublishers
                           HttpResponse$BodyHandlers)))
 
-;; ---------------------------------------------------------------------------
-;; Pinned fixture paths
-;; ---------------------------------------------------------------------------
-
-(def snomed-version    "20250201")
-(def snomed-db-path    (str "data/snomed-intl-" snomed-version ".db"))
-(def snomed-uk-db-path "data/snomed-uk-monolith.db")
-
-(def loinc-version     "2.82")
-(def loinc-db-path     (str "data/loinc-" loinc-version ".db"))
-
 (def fhir-cache-dir    "data/fhir-cache")  ; download cache of FHIR package .tgz tarballs
-(def fhir-tx-db-path   "data/fhir-tx.db")  ; single combined FTRM container (all FHIR packages incl VSAC)
 (def tx-ecosystem-dir  "data/tx-ecosystem")
 
 (def fhir-packages
   "Canonical FHIR R4 package set, installed into both the combined FTRM
-  container (`fhir-tx-db-path`) and the download cache (`fhir-cache-dir`,
+  container (the `:fhir-tx` fixture) and the download cache (`fhir-cache-dir`,
   one `.tgz` per package). Keep in sync with CI's `--dist` provisioning, or
   the two parity sides see different packages and the catalogue diff is
   meaningless. Mirrors the tx-benchmark upstream dataset, including
@@ -42,17 +30,41 @@
    ["us.cdc.phinvads"      "0.12.0"]
    ["us.nlm.vsac"          "0.24.0"]])
 
-(defn fhir-archive
-  "Local tarball path for a FHIR package, via the same `download!` the
-  install CLI uses: restores from `fhir-cache-dir` when present, otherwise
-  fetches from the registry."
+(def fixtures
+  [{:id   :sct/conformance
+    :path "data/snomed-uk-clinical-2025-06-11.db"
+    :dist "uk.nhs/sct-clinical@2025-06-11" :version "20250201"}
+   {:id   :sct/uk-monolith-latest
+    :path "data/snomed-uk-monolith.db" :dist "uk.nhs/sct-monolith"}
+   {:id   :loinc/v2_82
+    :path "data/loinc-2.82.db" :version "2.82"}
+   {:id   :fhir/tx
+    :path "data/fhir-tx.db"}])
+
+(def fixtures-by-id
+  (reduce (fn [m f] (assoc m (:id f) f)) {} fixtures))
+
+(defn paths
+  "Provisioned paths for fixtures `ids`, in order. Throws if an id is unknown."
+  [ids]
+  (map (fn [id]
+         (or (:path (fixtures-by-id id))
+             (throw (ex-info (str "Unknown fixture id: " id)
+                             {:id id :known (keys fixtures-by-id)}))))
+       ids))
+
+(defn fhir-archive!
+  "Ensure the `id`@`version` FHIR package tarball is cached under
+  `fhir-cache-dir`, downloading it from the registry on a cache miss (via the
+  same `download!` the install CLI uses), and return its local path."
   [id version]
   (.getPath (fhir-package/download! id version fhir-cache-dir)))
 
-(defn fhir-package-archives
-  "Local tarball paths for the canonical `fhir-packages` set."
+(defn fhir-package-archives!
+  "Ensure every package in `fhir-packages` is cached locally and return their
+  tarball paths."
   []
-  (mapv (fn [[id version]] (fhir-archive id version)) fhir-packages))
+  (mapv (fn [[id version]] (fhir-archive! id version)) fhir-packages))
 
 ;; ---------------------------------------------------------------------------
 ;; HTTP server lifecycle

@@ -192,7 +192,7 @@
 (def ^:dynamic *svc* nil)
 
 (defn- live-fixture [f]
-  (let [svc (hermes/open fixtures/snomed-db-path)]
+  (let [svc (hermes/open (:path (fixtures/fixtures-by-id :sct/conformance)))]
     (binding [*svc* svc]
       (try (f) (finally (hermes/close svc))))))
 

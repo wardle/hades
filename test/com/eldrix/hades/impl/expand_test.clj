@@ -126,7 +126,7 @@
 (def ^:dynamic *svc* nil)
 
 (defn- svc-fixture [f]
-  (let [svc (hades/open [fixtures/snomed-db-path])]
+  (let [svc (hades/open (fixtures/paths [:sct/conformance]) {:default-locale "en-US"})]
     (binding [*svc* svc]
       (try (f) (finally (hades/close svc))))))
 

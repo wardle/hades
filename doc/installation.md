@@ -38,7 +38,7 @@ queryable `snomed.db` directory in a few minutes (~2 GB on disk).
 
 ```shell
 java -jar hades.jar install snomed.db \
-    --dist ihtsdo.mlds/167@2025-02-01 \
+    --dist ihtsdo.mlds/167 \
     --username 'you@example.com' \
     --password ./mlds-password.txt
 ```
@@ -176,7 +176,7 @@ International edition published by IHTSDO). Run `available` to see
 every member/package pair the local hermes registry knows.
 
 Pin a release with `@<version>`, e.g.
-`--dist ihtsdo.mlds/167@2025-02-01`. Run
+`--dist uk.nhs/sct-clinical@2025-06-11`. Run
 `java -jar hades.jar available --dist <id>` to list available versions
 (some registries authenticate read access — pass the same credentials
 you'd use for install).

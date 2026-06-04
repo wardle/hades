@@ -923,7 +923,7 @@
   "Open a Hades service over `paths`, start an HTTP server, run `body-fn`
   against `*server*`, then tear down."
   [paths body-fn]
-  (let [svc (hades/open paths)
+  (let [svc (hades/open paths {:default-locale "en-US"})
         srv (fixtures/start-server svc)]
     (binding [*server* srv]
       (try (body-fn)
@@ -932,14 +932,12 @@
              (hades/close svc))))))
 
 (defn- in-memory-fixture [f]
-  (with-server (into [fixtures/snomed-db-path fixtures/loinc-db-path]
-                     (fixtures/fhir-package-archives))
+  (with-server (concat (fixtures/paths [:sct/conformance :loinc/v2_82])
+                       (fixtures/fhir-package-archives!))
     f))
 
 (defn- sqlite-fixture [f]
-  (with-server [fixtures/snomed-db-path
-                fixtures/loinc-db-path
-                fixtures/fhir-tx-db-path]
+  (with-server (fixtures/paths [:sct/conformance :loinc/v2_82 :fhir/tx])
     f))
 
 ;; The two test vars install their own once-only fixture so the JVM

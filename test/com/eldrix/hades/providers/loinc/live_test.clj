@@ -11,7 +11,7 @@
 (def ^:dynamic *svc* nil)
 
 (defn provider-fixture [f]
-  (with-open [svc (hades/open [fixtures/loinc-db-path])]
+  (with-open [svc (hades/open (fixtures/paths [:loinc/v2_82]) {})]
     (binding [*svc* svc]
       (f))))
 

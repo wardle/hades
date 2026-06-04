@@ -25,7 +25,7 @@
 (def ^:dynamic *svc* nil)
 
 (defn provider-fixture [f]
-  (with-open [svc (hades/open [fixtures/fhir-tx-db-path])]
+  (with-open [svc (hades/open (fixtures/paths [:fhir/tx]) {})]
     (binding [*svc* svc]
       (f))))
 

@@ -102,19 +102,22 @@
 ;; Server lifecycle (REPL-friendly: start! / stop! / restart!)
 ;; ---------------------------------------------------------------------------
 
+(def conformance-fixtures
+  "Fixture ids opened for conformance: the pinned SNOMED (en-US), LOINC and
+  the combined FTRM container."
+  [:sct/conformance :loinc/v2_82 :fhir/tx])
+
 (defn start!
-  "Start a Hades server with the pinned SNOMED + LOINC fixtures. Stores
-  state for subsequent calls. Returns the server URL.
+  "Start a Hades server fronting the pinned `conformance-fixtures`. Stores
+  state for subsequent calls and returns the server URL.
 
   Options:
-    :snomed — Hermes DB path override (default: pinned DB)
-    :port   — explicit port (default ephemeral)"
-  [& {:keys [snomed port]}]
+    :port — explicit port (default ephemeral)"
+  [& {:keys [port]}]
   (when @state
     (throw (ex-info "Server already running. Call (stop!) first." {})))
   (ensure-test-data!)
-  (let [snomed-path (or snomed fixtures/snomed-db-path)
-        svc (hades/open [snomed-path fixtures/loinc-db-path fixtures/fhir-tx-db-path])
+  (let [svc (hades/open (fixtures/paths conformance-fixtures) {:default-locale "en-US"})
         {:keys [server url] :as srv}
         (fixtures/start-server svc (cond-> {:max-expansion-size 1000}
                                      port (assoc :port port)))]
@@ -487,6 +490,10 @@
                        (= upstream pinned)   "up to date"
                        :else                 (str (fmt-rev upstream)
                                                   " — ahead of pin; consider bumping"))))
+    (println " fixtures:")
+    (doseq [{:keys [id dist version]} (map fixtures/fixtures-by-id conformance-fixtures)]
+      (println (format "   %-28s %s" id
+                       (str/join "  " (remove nil? [dist (some->> version (str "v"))])))))
     (println)
     (if (seq errors)
       (do (println (format " ★ Server exceptions: %d  (TxTester could not complete the test)"
@@ -668,17 +675,17 @@
   (load-results baseline-path))
 
 (defn- baseline-shape
-  "Slim regression-gate shape — just totals and the two pins
-  (snomed-version, tx-ecosystem-rev). Full per-test detail (actions,
-  expected vs actual) stays in `latest.json` + the timestamped
-  archive under `test/resources/conformance/` for live debugging;
-  the regression gate only needs the headline counts."
+  "Slim regression-gate shape — totals plus the pins that determine the
+  result: the fixtures in play and the tx-ecosystem rev. Full per-test
+  detail (actions, expected vs actual) stays in `latest.json` + the
+  timestamped archive under `test/resources/conformance/` for live
+  debugging; the regression gate only needs the headline counts."
   [results]
   {:total            (:total results)
    :passed           (:passed results)
    :failed           (:failed results)
    :skipped          (or (:skipped results) 0)
-   :snomed-version   fixtures/snomed-version
+   :fixtures         (map #(update (fixtures/fixtures-by-id %) :id str) conformance-fixtures)
    :tx-ecosystem-rev (:tx-ecosystem-rev results)})
 
 (defn save-baseline!
@@ -694,36 +701,27 @@
 ;; exec-fn entry point (for clj -X:conformance)
 ;; ---------------------------------------------------------------------------
 
-(s/def ::snomed (s/and string? #(.exists (io/file %))))
-(s/def ::output-dir string?)
 (s/def ::update-baseline boolean?)
-(s/def ::run-args (s/keys :opt-un [::snomed ::output-dir ::update-baseline]))
+(s/def ::run-args (s/keys :opt-un [::update-baseline]))
 
 (defn run
   "Run conformance tests. Intended as an exec-fn for clj -X:conformance.
 
   Optional:
-    :url              — run tests against a Hades server already running at this URL
-                        (e.g. \"http://localhost:8080/fhir\"). When set, no local
-                        server is started and :snomed is ignored.
-    :snomed           — path to a pre-existing Hermes DB (default: the canonical
-                        pinned DB; provision via the install CLI first —
-                        see `com.eldrix.hades.fixtures`).
-    :update-baseline  — when true, updates the baseline file (default false)
+    :url             — run against a Hades server already running at this URL
+                       (e.g. \"http://localhost:8080/fhir\"); no local server
+                       is started.
+    :update-baseline — when true, updates the baseline file (default false)
 
   Examples:
     clj -X:conformance
-    clj -X:conformance :snomed '\"path/to/snomed.db\"'
     clj -X:conformance :url '\"http://localhost:8080/fhir\"'
     clj -X:conformance :update-baseline true"
-  [{:keys [snomed update-baseline url]
+  [{:keys [update-baseline url]
     :or   {update-baseline false}}]
-  (when (and snomed (not url) (not (s/valid? ::snomed snomed)))
-    (println (format "SNOMED database not found: %s" snomed))
-    (System/exit 1))
   (let [owns-server? (not url)]
     (when owns-server?
-      (start! :snomed snomed))
+      (start!))
     (try
       (let [results  (run-tests :url url)
             prev     (load-latest)
@@ -847,7 +845,7 @@
   map with :request, :expected, :actual, :status for comparison."
   [test-name]
   (when-not (server-url)
-    (throw (ex-info "No server running. Call (start! path) first." {})))
+    (throw (ex-info "No server running. Call (start!) first." {})))
   (let [{:keys [test suite]} (find-test-case test-name)
         _ (when-not test (throw (ex-info (str "Test case not found: " test-name) {})))
         op (get test "operation")

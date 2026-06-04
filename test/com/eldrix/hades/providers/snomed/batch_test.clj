@@ -20,7 +20,7 @@
 
 (deftest ^:live preferred-terms-end-to-end
   (testing "preferred-terms returns a map keyed by concept-id"
-    (with-open [svc (hermes/open fixtures/snomed-db-path)]
+    (with-open [svc (hermes/open (:path (fixtures/fixtures-by-id :sct/conformance)))]
       (let [;; UK English language refset
             lang-refsets [900000000000509007]
             ;; A small batch of well-known SNOMED concepts

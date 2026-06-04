@@ -31,9 +31,9 @@
 (def ^:dynamic *sql* nil)
 
 (defn parity-fixture [f]
-  (let [base [fixtures/snomed-db-path fixtures/loinc-db-path]
-        mem  (hades/open (into base (fixtures/fhir-package-archives)))
-        sql  (hades/open (conj base fixtures/fhir-tx-db-path))]
+  (let [base (fixtures/paths [:sct/conformance :loinc/v2_82])
+        mem  (hades/open (concat base (fixtures/fhir-package-archives!)) {:default-locale "en-US"})
+        sql  (hades/open (concat base (fixtures/paths [:fhir/tx])) {:default-locale "en-US"})]
     (binding [*mem* mem *sql* sql]
       (try (f)
            (finally

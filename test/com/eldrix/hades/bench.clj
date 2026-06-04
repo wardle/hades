@@ -588,18 +588,16 @@
     (bench-one! :translate/loinc-part-related)"
   ([id] (bench-one! (if (map? id) (:id id) id) (bench-mode)))
   ([id mode]
-   (let [svc (hades/open [fixtures/snomed-db-path
-                          fixtures/loinc-db-path
-                          fixtures/fhir-tx-db-path])]
+   (let [svc (hades/open (fixtures/paths [:sct/conformance :loinc/v2_82 :fhir/tx])
+                         {:default-locale "en-US"})]
      (try
        (bench-operation svc id mode)
        (finally
          (hades/close svc))))))
 
 (deftest operations-bench
-  (let [svc  (hades/open [fixtures/snomed-db-path
-                          fixtures/loinc-db-path
-                          fixtures/fhir-tx-db-path])
+  (let [svc  (hades/open (fixtures/paths [:sct/conformance :loinc/v2_82 :fhir/tx])
+                         {:default-locale "en-US"})
         mode (bench-mode)]
     (try
       (let [results (mapv (fn [{:keys [id fn] :as entry}]

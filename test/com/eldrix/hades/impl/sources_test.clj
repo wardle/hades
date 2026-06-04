@@ -312,13 +312,14 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest ^:live recognises-real-hermes-db
-  (let [files   (sources/tx-file-seq fixtures/snomed-db-path)
+  (let [db      (:path (fixtures/fixtures-by-id :sct/conformance))
+        files   (sources/tx-file-seq db)
         entries (entries-by-kind files :hermes-db)]
     (is (= 1 (count entries))
         "the real Hermes DB should be recognised as exactly one :hermes-db entry")
     (let [e (first entries)]
       (is (= "manifest.edn" (.getName ^File (:file e))))
-      (is (= (.getCanonicalPath (io/file fixtures/snomed-db-path))
+      (is (= (.getCanonicalPath (io/file db))
              (.getCanonicalPath ^File (:dir e))))
       (is (string? (:version e)))
       (is (str/starts-with? (:version e) "lmdb/")))))

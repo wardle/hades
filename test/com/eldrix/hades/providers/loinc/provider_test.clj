@@ -10,7 +10,7 @@
 (def ^:dynamic *svc* nil)
 
 (defn provider-fixture [f]
-  (let [provider (loinc-provider/open fixtures/loinc-db-path)
+  (let [provider (loinc-provider/open (:path (fixtures/fixtures-by-id :loinc/v2_82)))
         svc      (composite/from-providers [provider])]
     (try
       (binding [*svc* svc]
@@ -651,7 +651,7 @@
             :source-uri "http://loinc.org"
             :target-uri "http://snomed.info/sct"
             :title "LOINC part related code mappings to http://snomed.info/sct"
-            :version fixtures/loinc-version}
+            :version (:version (fixtures/fixtures-by-id :loinc/v2_82))}
            (protos/cm-resource *svc* {:url part-url})))))
 
 (def external-conceptmap-translate-cases

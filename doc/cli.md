@@ -37,9 +37,9 @@ java -jar hades.jar --help install
 # Run a FHIR server on port 8080 across SNOMED, LOINC and FHIR packages
 java -jar hades.jar serve snomed.db loinc.db fhir.db --port 8080
 
-# Download, import and index SNOMED CT International edition (MLDS)
+# Download, import and index SNOMED CT International edition (MLDS, latest)
 java -jar hades.jar install snomed.db \
-    --dist ihtsdo.mlds/167@2025-02-01 \
+    --dist ihtsdo.mlds/167 \
     --username 'you@example.com' --password ./mlds-password.txt
 
 # UK alternative: SNOMED CT UK monolith edition (TRUD)

@@ -11,7 +11,7 @@ and evolving towards a general-purpose terminology server.
 # arguments are always paths; installable ids are passed via repeatable
 # `--dist` flags (with optional `@<version>` suffix).
 clj -M:run serve   snomed.db fhir.db --port 8080                                       # run FHIR server (positional sources, repeatable, mix kinds)
-clj -M:run install snomed.db --dist uk.nhs/sct-clinical@2025-02-01 --api-key trud.txt  # SNOMED CT distribution
+clj -M:run install snomed.db --dist uk.nhs/sct-clinical@2025-06-11 --api-key trud.txt  # SNOMED CT distribution
 clj -M:run install fhir.db   --dist hl7.fhir.r4.core@4.0.1                             # FHIR package (registry: packages.fhir.org)
 clj -M:run import  snomed.db /path/to/RF2                                              # import sources into a destination DB (dest first, then sources)
 clj -M:run list    /path/to/RF2                                                        # list importable files (paths required)
@@ -34,7 +34,7 @@ clj -M:nrepl                             # start nREPL server (test paths includ
 # conformance tests — runs against the pinned SNOMED CT International release.
 # See `Conformance / integration test data` below for one-time setup.
 clj -X:conformance
-clj -X:conformance :snomed '"path/to/snomed.db"'        # override the pinned DB
+clj -X:conformance :sources '["snomed.db" "loinc.db" "fhir-tx.db"]'  # override the pinned fixture sources
 clj -X:conformance :url '"http://localhost:8080/fhir"'   # test an already-running server
 clj -X:conformance :update-baseline true                 # promote current result to regression baseline
 ```
@@ -45,32 +45,30 @@ clj -X:conformance :update-baseline true                 # promote current resul
 > [`doc/development.md`](doc/development.md), mirroring CI exactly. The
 > notes below cover only the conformance pin.
 
-Conformance, `^:live` integration tests and benchmarks all run against **one
-pinned SNOMED CT International release: 20250201**. Pinning matters: the
-IG's tx-ecosystem fixtures were authored against this exact release, and
+Conformance, `^:live` integration tests and benchmarks all run against a
+pinned SNOMED CT International **base release: 20250201**. Pinning matters:
+the IG's tx-ecosystem fixtures were authored against this exact release, and
 any other release produces failures that are data-version drift, not real
-defects. Tests, benches and conformance **only consume** the pinned DB —
-they never build it. Provisioning uses the regular hades CLI (a SNOMED
-MLDS Affiliate licence is required):
+defects.
+
+The pinned International 20250201 release is no longer available from MLDS, so
+its content is sourced from the **TRUD UK clinical edition dated 2025-06-11**
+(TRUD retains dated historical releases), which bundles it. Tests open it with
+`{:default-locale "en-US"}` so its GB-English default doesn't shadow the
+International preferred terms; conformance then lands identically. A TRUD API
+key is required. Tests, benches and conformance **only consume** the pinned
+DB — they never build it.
 
 ```bash
-# Download from MLDS, import, index, compact:
-clj -M:run install data/snomed-intl-20250201.db \
-  --dist ihtsdo.mlds/167@2025-02-01 \
-  --username 'you@example.com' --password /path/to/password-file
-clj -M:run index   data/snomed-intl-20250201.db
-clj -M:run compact data/snomed-intl-20250201.db
-
-# Or, if you already have the release zip on disk:
-unzip /path/to/snomed-int-20250201.zip -d /tmp/snomed-rf2
-clj -M:run import data/snomed-intl-20250201.db /tmp/snomed-rf2
-clj -M:run index   data/snomed-intl-20250201.db
-clj -M:run compact data/snomed-intl-20250201.db
+# Download from TRUD, import, compact:
+clj -M:run install compact data/snomed-uk-clinical-2025-06-11.db \
+  --dist uk.nhs/sct-clinical@2025-06-11 \
+  --api-key /path/to/trud-api-key
 ```
 
-Build takes ~2 minutes and produces a ~2.2 GB Hermes DB. CI caches the
-built DB keyed on the pinned version. Tests and conformance fail fast with
-a clear message if the DB is missing — they never auto-build.
+Build takes ~2 minutes. CI caches the built DB keyed on the pinned release.
+Tests and conformance fail fast with a clear message if the DB is missing —
+they never auto-build.
 
 ### Interactive development via nREPL (the default workflow)
 

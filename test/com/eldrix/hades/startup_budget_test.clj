@@ -56,7 +56,7 @@
                   (double ms) help-budget-ms)))))
 
 (deftest ^:live open-stays-within-budget
-  (let [path fixtures/snomed-db-path]
+  (let [path (:path (fixtures/fixtures-by-id :sct/conformance))]
     (if-not (.exists (io/file path))
       (println "SKIP open-stays-within-budget: pinned SNOMED DB absent at" path
                "- see CLAUDE.md 'Conformance / integration test data'")

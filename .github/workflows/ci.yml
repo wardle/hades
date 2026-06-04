@@ -66,7 +66,12 @@ jobs:
   # cache miss. Bump the corresponding cache key when rolling forward.
   # ---------------------------------------------------------------------------
 
-  provision-snomed-intl:
+  # The conformance / live-test SNOMED fixture. The pinned International
+  # 20250201 release is no longer available from MLDS, so its content is
+  # sourced from the TRUD UK clinical edition dated 2025-06-11 (TRUD retains
+  # dated historical releases), which bundles International base 20250201.
+  # Opened with the en-US locale it reproduces the International preferred terms.
+  provision-snomed-conformance:
     needs: prepare-deps
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -95,34 +100,32 @@ jobs:
       - uses: actions/cache/restore@v5
         id: cache
         with:
-          path: data/snomed-intl-20250201.db
-          key: snomed-intl-20250201-v1
+          path: data/snomed-uk-clinical-2025-06-11.db
+          key: snomed-uk-clinical-2025-06-11-v1
 
-      - name: Provision pinned SNOMED Intl DB
+      - name: Provision pinned SNOMED conformance DB
         id: provision
         if: steps.cache.outputs.cache-hit != 'true'
         env:
-          MLDS_USERNAME: ${{ secrets.MLDS_USERNAME }}
-          MLDS_PASSWORD: ${{ secrets.MLDS_PASSWORD }}
+          TRUD_API_KEY: ${{ secrets.TRUD_API_KEY }}
         run: |
-          if [ -z "$MLDS_USERNAME" ] || [ -z "$MLDS_PASSWORD" ]; then
-            echo "::error::MLDS_USERNAME / MLDS_PASSWORD secrets are not set."
+          if [ -z "$TRUD_API_KEY" ]; then
+            echo "::error::TRUD_API_KEY secret is not set."
             exit 1
           fi
           mkdir -p data
           umask 077
-          printf '%s' "$MLDS_PASSWORD" > data/mlds-password.txt
-          clojure -M:run install compact data/snomed-intl-20250201.db \
-            --dist ihtsdo.mlds/167@2025-02-01 \
-            --username "$MLDS_USERNAME" \
-            --password data/mlds-password.txt
-          rm -f data/mlds-password.txt
+          printf '%s' "$TRUD_API_KEY" > data/trud-api-key.txt
+          clojure -M:run install compact data/snomed-uk-clinical-2025-06-11.db \
+            --dist uk.nhs/sct-clinical@2025-06-11 \
+            --api-key data/trud-api-key.txt
+          rm -f data/trud-api-key.txt
 
       - uses: actions/cache/save@v5
         if: always() && steps.provision.outcome == 'success'
         with:
-          path: data/snomed-intl-20250201.db
-          key: snomed-intl-20250201-v1
+          path: data/snomed-uk-clinical-2025-06-11.db
+          key: snomed-uk-clinical-2025-06-11-v1
 
   provision-snomed-uk:
     needs: prepare-deps
@@ -319,7 +322,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   test:
-    needs: [provision-snomed-intl, provision-snomed-uk, provision-loinc, provision-fhir]
+    needs: [provision-snomed-conformance, provision-snomed-uk, provision-loinc, provision-fhir]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -346,8 +349,8 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: data/snomed-intl-20250201.db
-          key: snomed-intl-20250201-v1
+          path: data/snomed-uk-clinical-2025-06-11.db
+          key: snomed-uk-clinical-2025-06-11-v1
           fail-on-cache-miss: true
 
       - name: Compute monthly UK SNOMED cache key
@@ -396,7 +399,7 @@ jobs:
         run: clojure -M:test
 
   conformance:
-    needs: [provision-snomed-intl, provision-loinc, provision-fhir]
+    needs: [provision-snomed-conformance, provision-loinc, provision-fhir]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -423,8 +426,8 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: data/snomed-intl-20250201.db
-          key: snomed-intl-20250201-v1
+          path: data/snomed-uk-clinical-2025-06-11.db
+          key: snomed-uk-clinical-2025-06-11-v1
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
@@ -475,7 +478,7 @@ jobs:
   # ---------------------------------------------------------------------------
 
   preflight:
-    needs: [provision-snomed-intl, provision-loinc, provision-fhir]
+    needs: [provision-snomed-conformance, provision-loinc, provision-fhir]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -502,8 +505,8 @@ jobs:
 
       - uses: actions/cache/restore@v5
         with:
-          path: data/snomed-intl-20250201.db
-          key: snomed-intl-20250201-v1
+          path: data/snomed-uk-clinical-2025-06-11.db
+          key: snomed-uk-clinical-2025-06-11-v1
           fail-on-cache-miss: true
 
       - uses: actions/cache/restore@v5
@@ -535,7 +538,7 @@ jobs:
       - name: Start hades
         run: |
           clojure -M:run serve \
-            data/snomed-intl-20250201.db \
+            data/snomed-uk-clinical-2025-06-11.db \
             data/loinc-2.82.db \
             data/fhir-tx.db \
             --port 8080 &

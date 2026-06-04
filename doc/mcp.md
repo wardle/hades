@@ -21,8 +21,8 @@ same versions to reproduce their results:
 
 ```shell
 # install SNOMED CT International, via MLDS credentials.
-clojure -M:run install compact snomed-intl-20250201.db \
-  --dist ihtsdo.mlds/167@2025-02-01 \
+clojure -M:run install compact snomed-intl.db \
+  --dist ihtsdo.mlds/167 \
   --username 'you@example.com' \
   --password ./mlds-password.txt
 
@@ -45,7 +45,7 @@ Then run MCP against those three stores:
 
 ```shell
 clojure -M:run mcp \
-  snomed-intl-20250201.db \
+  snomed-intl.db \
   loinc-2.82.db \
   fhir-tx.db
 ```
@@ -68,7 +68,7 @@ independent:
 ```shell
 claude mcp add hades -- \
   java -jar /path/to/hades.jar mcp \
-    /path/to/snomed-intl-20250201.db \
+    /path/to/snomed-intl.db \
     /path/to/loinc-2.82.db \
     /path/to/fhir-tx.db
 ```
@@ -78,7 +78,7 @@ development. `clojure -M:run` must run in the hades source directory
 (where `deps.edn` lives), so wrap it to `cd` there first:
 
 ```shell
-claude mcp add hades -- bash -c 'cd /path/to/hades-source && exec clojure -M:run mcp /path/to/snomed-intl-20250201.db /path/to/loinc-2.82.db /path/to/fhir-tx.db'
+claude mcp add hades -- bash -c 'cd /path/to/hades-source && exec clojure -M:run mcp /path/to/snomed-intl.db /path/to/loinc-2.82.db /path/to/fhir-tx.db'
 ```
 
 Each positional path after `mcp` is a terminology source (auto-detected):
