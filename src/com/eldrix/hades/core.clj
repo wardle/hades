@@ -117,9 +117,8 @@
   `svc`. Each overlay provider's `*-metadata` determines which URLs
   it covers; overlays win on exact-key match. The derived handle is
   a view — closing the base releases resources, closing the view
-  does nothing. Used by the HTTP layer to scope FHIR `tx-resource`
-  parameters to a single request. A `content=\"supplement\"` overlay
-  provider is detected and wired onto its base automatically."
+  does nothing. A `content=\"supplement\"` overlay provider is detected
+  and wired onto its base automatically."
   [svc providers] (composite/with-overlays svc providers))
 
 ;; ---------------------------------------------------------------------------

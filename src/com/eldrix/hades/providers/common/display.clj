@@ -105,34 +105,37 @@
   [{:keys [display primary-display designations display-langs displayLanguage
            system code cs-language lenient?]}]
   (when (and (not (str/blank? display)) primary-display)
-    (cond
-      (not (display-matches? {:display primary-display :designations designations}
-                             display display-langs))
-      (let [{:keys [text message-id]} (issues/format-display-mismatch
-                                       display system code primary-display
-                                       designations displayLanguage cs-language)]
-        {:result (boolean lenient?)
-         :issue  (cond-> {:severity     (if lenient? "warning" "error")
-                          :type         "invalid"
-                          :details-code "invalid-display"
-                          :text         text
-                          :expression   ["Coding.display"]}
-                   message-id (assoc :message-id message-id))})
+    ;; Only display-eligible designations count as valid display names —
+    ;; both for matching and for the choices offered in a mismatch message.
+    (let [designations (filter display-eligible? designations)]
+      (cond
+        (not (display-matches? {:display primary-display :designations designations}
+                               display display-langs))
+        (let [{:keys [text message-id]} (issues/format-display-mismatch
+                                         display system code primary-display
+                                         designations displayLanguage cs-language)]
+          {:result (boolean lenient?)
+           :issue  (cond-> {:severity     (if lenient? "warning" "error")
+                            :type         "invalid"
+                            :details-code "invalid-display"
+                            :text         text
+                            :expression   ["Coding.display"]}
+                     message-id (assoc :message-id message-id))})
 
-      ;; The requested language has no display: no eligible designation in it,
-      ;; and it isn't the code system's own language (whose display is the
-      ;; primary). Only remark when the code system actually carries language
-      ;; info — a code system with none has no "default language" to fall back to.
-      (and displayLanguage
-           (nil? (find-display-for-language designations display-langs))
-           (not (some #(language-matches? cs-language (:lang %)) display-langs))
-           (or cs-language (some :language designations)))
-      (let [{:keys [text message-id]} (issues/format-no-display-in-language
-                                       display system code displayLanguage)]
-        {:result true
-         :issue  (cond-> {:severity     "information"
-                          :type         "invalid"
-                          :details-code "invalid-display"
-                          :text         text
-                          :expression   ["Coding.display"]}
-                   message-id (assoc :message-id message-id))}))))
+        ;; The requested language has no display: no eligible designation in it,
+        ;; and it isn't the code system's own language (whose display is the
+        ;; primary). Only remark when the code system actually carries language
+        ;; info — a code system with none has no "default language" to fall back to.
+        (and displayLanguage
+             (nil? (find-display-for-language designations display-langs))
+             (not (some #(language-matches? cs-language (:lang %)) display-langs))
+             (or cs-language (some :language designations)))
+        (let [{:keys [text message-id]} (issues/format-no-display-in-language
+                                         display system code displayLanguage)]
+          {:result true
+           :issue  (cond-> {:severity     "information"
+                            :type         "invalid"
+                            :details-code "invalid-display"
+                            :text         text
+                            :expression   ["Coding.display"]}
+                     message-id (assoc :message-id message-id))})))))

@@ -4,7 +4,6 @@
   (:require [clojure.spec.test.alpha :as stest]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
-            [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.protocols :as protos]
@@ -179,6 +178,33 @@
   (testing "display matches designation"
     (let [result (protos/cs-validate-code hier-cs {:code "A" :display "Konzept A"})]
       (is (true? (:result result))))))
+
+;; A designation whose `use` is a terminology-specific (non-FHIR-standard)
+;; code is not a valid display: it must neither validate as a display nor
+;; appear among the suggested displays in a mismatch message.
+(def custom-use-cs
+  (load-fhir/from-fhir
+    {"resourceType" "CodeSystem"
+     "url"          "http://example.com/custom-use-cs"
+     "version"      "1.0"
+     "name"         "CustomUseCS"
+     "status"       "active"
+     "content"      "complete"
+     "concept"      [{"code"        "c1"
+                      "display"     "Display 1"
+                      "designation" [{"use"   {"system" "http://example.com/designations"
+                                               "code"   "olde-english"}
+                                      "value" "mine own first code"}]}]}))
+
+(deftest non-display-designation-not-a-valid-display-test
+  (testing "a non-display-use designation does not validate as a display"
+    (let [result (protos/cs-validate-code custom-use-cs {:code "c1" :display "mine own first code"})]
+      (is (false? (:result result)))))
+  (testing "a non-display-use designation is not offered among mismatch choices"
+    (let [result (protos/cs-validate-code custom-use-cs {:code "c1" :display "xx"})]
+      (is (false? (:result result)))
+      (is (str/includes? (:message result) "Display 1"))
+      (is (not (str/includes? (:message result) "mine own first code"))))))
 
 ;; --- cs-subsumes ---
 
@@ -421,6 +447,42 @@
                                                       :lenient-display-validation true})]
         (is (true? (:result result)))
         (is (some? (:message result)))))))
+
+;; A retired member reached through an *enumerated* include (concepts
+;; without a display, so expansion enriches each via cs-lookup) must carry
+;; its specific inactive status, not just a generic inactive flag — the
+;; enumerated-include path must not drop `:inactive-status`.
+(def retired-cs-map
+  {"resourceType" "CodeSystem"
+   "url"          "http://example.com/retired-cs"
+   "version"      "1.0"
+   "name"         "RetiredCS"
+   "status"       "active"
+   "content"      "complete"
+   "property"     [{"code" "status"
+                    "uri"  "http://hl7.org/fhir/concept-properties#status"
+                    "type" "code"}]
+   "concept"      [{"code" "live" "display" "Live code"}
+                   {"code"     "gone"
+                    "display"  "Gone code"
+                    "property" [{"code" "status" "valueCode" "retired"}]}]})
+
+(def enumerated-retired-vs-map
+  {"resourceType" "ValueSet"
+   "url"          "http://example.com/retired-vs"
+   "version"      "1.0"
+   "name"         "RetiredVS"
+   "status"       "active"
+   "compose"      {"include" [{"system"  "http://example.com/retired-cs"
+                               "concept" [{"code" "live"} {"code" "gone"}]}]}})
+
+(deftest enumerated-include-preserves-inactive-status-test
+  (let [svc    (composite/from-providers [(load-fhir/from-fhir retired-cs-map)])
+        vs     (load-fhir/from-fhir enumerated-retired-vs-map)
+        result (protos/vs-validate-code vs svc {:code "gone" :system "http://example.com/retired-cs"})]
+    (is (true? (:result result)))
+    (is (true? (:inactive result)))
+    (is (= "retired" (:inactive-status result)))))
 
 ;; Stored-extensional validate-code must determine membership directly
 ;; from the stored concept[], not by enriching the whole membership.

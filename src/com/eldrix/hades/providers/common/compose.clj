@@ -301,10 +301,15 @@
                                    (display/find-display-for-language (:designations looked-up) display-langs))
                     display (or provided-display lang-display (:display looked-up))
                     result-version (or (:version looked-up) version)
-                    inactive? (when looked-up
-                                (some (fn [{:keys [code value]}]
-                                        (and (= :inactive code) value))
-                                      (:properties looked-up)))
+                    props      (:properties looked-up)
+                    inactive?  (some (fn [{:keys [code value]}]
+                                       (and (= :inactive code) value))
+                                     props)
+                    ;; the specific status (e.g. "retired") drives the precise
+                    ;; inactive warning; fall back to generic "inactive".
+                    status-value (some (fn [{:keys [code value]}]
+                                         (when (= :status code) value))
+                                       props)
                     designations (:designations looked-up)]
                 (when (and (not (and activeOnly inactive?))
                            (or (nil? match?)
@@ -316,7 +321,8 @@
                     result-version        (assoc :version result-version)
                     (seq designations)    (assoc :designations designations)
                     (:abstract looked-up) (assoc :abstract true)
-                    inactive?             (assoc :inactive true)
+                    inactive?             (assoc :inactive true
+                                                 :inactive-status (or (some-> status-value name) "inactive"))
                     (and (seq properties) looked-up)
                     (assoc :properties
                            (let [want (set properties)]

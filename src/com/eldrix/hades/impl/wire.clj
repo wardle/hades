@@ -151,7 +151,7 @@
 
 (defn- parameters [params]
   {"resourceType" "Parameters"
-   "parameter"    (vec params)})
+   "parameter"    params})
 
 (defn- property-param
   "Build a nested 'property' parameter with code/value/description parts."
@@ -207,6 +207,13 @@
       (conj (param-canonical "x-caused-by-unknown-system" x-caused-by-unknown-system))
       x-unknown-system
       (conj (param-canonical "x-unknown-system" x-unknown-system)))))
+
+(defn validations->parameters
+  "Wrap a seq of already-built per-item resources (each a FHIR Parameters
+  or OperationOutcome map) as a `$batch-validate-code` response: one
+  `validation` part per item, in order."
+  [resources]
+  (parameters (map #(param-resource "validation" %) resources)))
 
 (defn lookup->parameters
   "Convert a ::result/lookup to a FHIR Parameters map."

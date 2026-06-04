@@ -144,12 +144,6 @@
                    "false" false
                    nil)))
 
-(defn- parse-int [s]
-  (cond
-    (nil? s)    nil
-    (number? s) (int s)
-    :else       (try (Integer/parseInt (str s)) (catch Exception _ nil))))
-
 (defn- build-overlay-providers
   "Build provider impls from a seq of FHIR JSON resource maps
   (string-keyed). A `content=\"supplement\"` resource is returned as an
@@ -376,33 +370,37 @@
     (when (seq values)
       (canonical/parse-version-param values))))
 
-(def request-flags
-  "Extract request-scoped operation flags (`system-version`,
+(defn parse-request-flags
+  "Parse request-scoped operation flags (`system-version`,
   `force-system-version`, `check-system-version`, `useSupplement`,
   `property`, `valueSetVersion`, `displayLanguage`,
-  `lenient-display-validation`) from `::fhir-params` into `::flags`.
-  Handlers pass these to `core/*` ops via `merge-flags`."
+  `lenient-display-validation`) from a FHIR Parameters parameter list."
+  [fhir-params]
+  (let [supps       (into (fhir-param-all fhir-params "useSupplement")
+                          (fhir-param-all fhir-params "useSupplements"))
+        props       (fhir-param-all fhir-params "property")
+        lenient     (parse-bool (fhir-param fhir-params "lenient-display-validation"))
+        sys-ver     (collect-version-param fhir-params "system-version")
+        force-ver   (collect-version-param fhir-params "force-system-version")
+        check-ver   (collect-version-param fhir-params "check-system-version")
+        vs-version  (fhir-param fhir-params "valueSetVersion")
+        display-lang (fhir-param fhir-params "displayLanguage")]
+    (cond-> {:lenient-display-validation (boolean lenient)}
+      sys-ver       (assoc :system-version sys-ver)
+      force-ver     (assoc :force-system-version force-ver)
+      check-ver     (assoc :check-system-version check-ver)
+      (seq supps)   (assoc :use-supplements supps)
+      (seq props)   (assoc :properties props)
+      vs-version    (assoc :value-set-version vs-version)
+      display-lang  (assoc :display-language display-lang))))
+
+(def request-flags
+  "Extract request-scoped operation flags from `::fhir-params` into
+  `::flags`. Handlers pass these to `core/*` ops via `merge-flags`."
   {:name  ::request-flags
    :enter (fn [{:keys [request] :as context}]
-            (let [fhir-params (::fhir-params request)
-                  supps       (into (fhir-param-all fhir-params "useSupplement")
-                                    (fhir-param-all fhir-params "useSupplements"))
-                  props       (fhir-param-all fhir-params "property")
-                  lenient     (parse-bool (fhir-param fhir-params "lenient-display-validation"))
-                  sys-ver     (collect-version-param fhir-params "system-version")
-                  force-ver   (collect-version-param fhir-params "force-system-version")
-                  check-ver   (collect-version-param fhir-params "check-system-version")
-                  vs-version  (fhir-param fhir-params "valueSetVersion")
-                  display-lang (fhir-param fhir-params "displayLanguage")
-                  flags       (cond-> {:lenient-display-validation (boolean lenient)}
-                                sys-ver       (assoc :system-version sys-ver)
-                                force-ver     (assoc :force-system-version force-ver)
-                                check-ver     (assoc :check-system-version check-ver)
-                                (seq supps)   (assoc :use-supplements supps)
-                                (seq props)   (assoc :properties props)
-                                vs-version    (assoc :value-set-version vs-version)
-                                display-lang  (assoc :display-language display-lang))]
-              (assoc-in context [:request ::flags] flags)))})
+            (assoc-in context [:request ::flags]
+                      (parse-request-flags (::fhir-params request))))})
 
 (defn- pick-display-language
   "Effective display language: the `:display-language` flag if set
@@ -416,8 +414,7 @@
           header))))
 
 (defn merge-flags
-  "Merge request flags into operation params (flat). Used by every
-  handler before delegating to `core/*`."
+  "Merge request flags into operation params (flat)."
   [op-params flags]
   (merge (select-keys flags
                       [:lenient-display-validation
@@ -456,23 +453,24 @@
 (defn- cs-validate-code
   [{::keys [svc flags fhir-params] :as request}]
   (or (supplements-missing-response svc nil flags)
-      (let [coding   (fhir-param-coding fhir-params "coding")
-            coding?  (and coding (get coding "code"))
+      (let [coding   (let [c (fhir-param-coding fhir-params "coding")]
+                       (when (get c "code") c))
             system   (or (fhir-param fhir-params "url")
                          (fhir-param fhir-params "system")
-                         (when coding? (get coding "system")))
+                         (get coding "system"))
             code     (or (fhir-param fhir-params "code")
-                         (when coding? (get coding "code")))
+                         (get coding "code"))
             display  (or (fhir-param fhir-params "display")
-                         (when coding? (get coding "display")))
-            version  (fhir-param fhir-params "version")
+                         (get coding "display"))
+            version  (or (fhir-param fhir-params "version")
+                         (get coding "version"))
             display-lang (pick-display-language request flags)
             vp       (-> (cond-> {:system system :code code}
                            display      (assoc :display display)
                            version      (assoc :version version)
                            display-lang (assoc :displayLanguage display-lang))
                          (merge-flags flags))
-            input-mode (if coding? :coding :code)
+            input-mode (if coding :coding :code)
             result     (hades/validate-code svc vp)
             result'    (if (:issues result)
                          (update result :issues wire/adjust-issue-expressions input-mode nil)
@@ -529,44 +527,106 @@
               ver  (assoc :version ver))))
         (get cc "coding" [])))
 
+(defn validate-code-result
+  "Run a single ValueSet `$validate-code` from a parsed FHIR Parameters
+  list, returning the `::result/validate` map with issue expressions
+  adjusted for the input mode. `url` is the ValueSet canonical; `flags`
+  the request-scoped flags; `display-lang` the already-resolved display
+  language (see `pick-display-language`)."
+  [svc flags url fhir-params display-lang]
+  (let [cc      (fhir-param-codeable-concept fhir-params "codeableConcept")
+        codings (seq (get cc "coding"))
+        coding  (let [c (fhir-param-coding fhir-params "coding")]
+                  (when (get c "code") c))
+        value-set-version (:value-set-version flags)
+        base    (-> (cond-> {:url url}
+                      value-set-version (assoc :valueSetVersion value-set-version)
+                      display-lang      (assoc :displayLanguage display-lang))
+                    (merge-flags flags))
+        result  (if codings
+                  (-> (hades/validate-codeable-concept svc
+                                                       (cc-codings cc (fhir-param fhir-params "systemVersion"))
+                                                       base)
+                      (assoc :codeableConcept cc))
+                  (let [system  (or (fhir-param fhir-params "system")
+                                    (get coding "system"))
+                        code    (or (fhir-param fhir-params "code")
+                                    (get coding "code"))
+                        display (or (fhir-param fhir-params "display")
+                                    (get coding "display"))
+                        version (or (fhir-param fhir-params "systemVersion")
+                                    (get coding "version"))]
+                    (hades/validate-code svc
+                                         (cond-> (assoc base :system system :code code)
+                                           display (assoc :display display)
+                                           version (assoc :version version)))))
+        input-mode (cond codings :codeableConcept coding :coding :else :code)]
+    (if (:issues result)
+      (update result :issues wire/adjust-issue-expressions input-mode nil)
+      result)))
+
 (defn- vs-validate-code
   [{::keys [svc flags fhir-params] :as request}]
   (let [url (fhir-param fhir-params "url")]
     (or (supplements-missing-response svc url flags)
-        (let [cc      (fhir-param-codeable-concept fhir-params "codeableConcept")
-              codings (seq (get cc "coding"))
-              coding  (fhir-param-coding fhir-params "coding")
-              coding? (and coding (get coding "code"))
-              value-set-version (:value-set-version flags)
-              display-lang (pick-display-language request flags)
-              base    (-> (cond-> {:url url}
-                            value-set-version (assoc :valueSetVersion value-set-version)
-                            display-lang      (assoc :displayLanguage display-lang))
-                          (merge-flags flags))
-              result  (if codings
-                        (-> (hades/validate-codeable-concept svc
-                                                             (cc-codings cc (fhir-param fhir-params "systemVersion"))
-                                                             base)
-                            (assoc :codeableConcept cc))
-                        (let [system  (or (fhir-param fhir-params "system")
-                                          (when coding? (get coding "system")))
-                              code    (or (fhir-param fhir-params "code")
-                                          (when coding? (get coding "code")))
-                              display (or (fhir-param fhir-params "display")
-                                          (when coding? (get coding "display")))
-                              version (or (fhir-param fhir-params "systemVersion")
-                                          (when coding? (get coding "version")))]
-                          (hades/validate-code svc
-                                               (cond-> (assoc base :system system :code code)
-                                                 display (assoc :display display)
-                                                 version (assoc :version version)))))
-              input-mode (cond codings :codeableConcept coding? :coding :else :code)
-              result' (if (:issues result)
-                        (update result :issues wire/adjust-issue-expressions input-mode nil)
-                        result)]
-          (if (:not-found result')
-            {:status 404 :body (wire/operation-outcome (:issues result'))}
-            {:status 200 :body (wire/validate->parameters result')})))))
+        (let [result (validate-code-result svc flags url fhir-params
+                                           (pick-display-language request flags))]
+          (if (:not-found result)
+            {:status 404 :body (wire/operation-outcome (:issues result))}
+            {:status 200 :body (wire/validate->parameters result)})))))
+
+(defn validation-has-code?
+  "True if a per-item validation parameter list carries a usable code:
+  a `coding`, a `codeableConcept`, or a `code` with `system`/`inferSystem`."
+  [vp]
+  (boolean
+    (or (fhir-param-coding vp "coding")
+        (fhir-param-codeable-concept vp "codeableConcept")
+        (and (fhir-param vp "code")
+             (or (fhir-param vp "system")
+                 (parse-bool (fhir-param vp "inferSystem")))))))
+
+(defn merge-validation-flags
+  "Per-validation effective flags: top-level `base` overridden only by
+  flag params explicitly present in the validation's own parameters."
+  [base vp]
+  (let [vf (parse-request-flags vp)]
+    (cond-> (merge base (dissoc vf :lenient-display-validation))
+      (some? (fhir-param vp "lenient-display-validation"))
+      (assoc :lenient-display-validation (:lenient-display-validation vf)))))
+
+(def no-code-issue
+  {:severity "error" :type "invalid"
+   :text (str "Unable to find code to validate (looked for coding | "
+              "codeableConcept | code+system | code+inferSystem in parameters")})
+
+(defn batch-validation->resource
+  "Render one `$batch-validate-code` item against the shared `url`/`flags`:
+  the item's `$validate-code` result as a Parameters map, or an
+  OperationOutcome when it carries no usable code. `request` supplies the
+  Accept-Language fallback for display language."
+  [svc request flags url validation]
+  (let [vp (get validation "parameter")]
+    (if (validation-has-code? vp)
+      (let [vflags (merge-validation-flags flags vp)]
+        (wire/validate->parameters
+          (validate-code-result svc vflags
+                                (or (fhir-param vp "url") url)
+                                vp
+                                (pick-display-language request vflags))))
+      (wire/operation-outcome [no-code-issue]))))
+
+(defn vs-batch-validate-code
+  "ValueSet `$batch-validate-code`: validate each `validation` parameter
+  (a nested Parameters resource) against the shared `url`, returning one
+  `validation` part per item. Never fails as a whole — a validation with
+  no usable code yields an OperationOutcome in its slot."
+  [{::keys [svc flags fhir-params] :as request}]
+  (let [url (fhir-param fhir-params "url")]
+    {:status 200
+     :body  (wire/validations->parameters
+              (map #(batch-validation->resource svc request flags url %)
+                   (fhir-param-resources fhir-params "validation")))}))
 
 ;; ---------------------------------------------------------------------------
 ;; ValueSet $expand
@@ -580,8 +640,8 @@
               filter-value    (fhir-param fhir-params "filter")
               display-lang    (pick-display-language request flags)
               include-desig?  (parse-bool (fhir-param fhir-params "includeDesignations"))
-              count-value     (parse-int  (fhir-param fhir-params "count"))
-              offset-value    (parse-int  (fhir-param fhir-params "offset"))
+              count-value     (some-> (fhir-param fhir-params "count")  parse-long)
+              offset-value    (some-> (fhir-param fhir-params "offset") parse-long)
               exclude-nested-input    (fhir-param fhir-params "excludeNested")
               exclude-nested-present? (some? exclude-nested-input)
               exclude-nested? (let [v (parse-bool exclude-nested-input)]
@@ -910,6 +970,8 @@
 
       ["/fhir/ValueSet/$validate-code"    :get  (conj op-base vs-validate-code)                     :route-name ::vs-validate-get]
       ["/fhir/ValueSet/$validate-code"    :post (conj op-base vs-validate-code)                     :route-name ::vs-validate-post]
+
+      ["/fhir/ValueSet/$batch-validate-code" :post (conj op-base vs-batch-validate-code)            :route-name ::vs-batch-validate-post]
 
       ["/fhir/ValueSet/$expand"           :get  (conj op-base max-expand vs-expand)                 :route-name ::vs-expand-get]
       ["/fhir/ValueSet/$expand"           :post (conj op-base max-expand vs-expand)                 :route-name ::vs-expand-post]

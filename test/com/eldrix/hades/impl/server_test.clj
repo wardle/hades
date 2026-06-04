@@ -117,6 +117,14 @@
 (defn- expansion-display-language-absent? [body]
   (nil? (expansion-display-language body)))
 
+(defn- batch-validation-results
+  "Ordered seq of each `validation` part's `result` boolean."
+  [body]
+  (mapv (fn [v]
+          (first (keep #(when (= "result" (get % "name")) (get % "valueBoolean"))
+                       (get-in v ["resource" "parameter"]))))
+        (filter #(= "validation" (get % "name")) (get body "parameter"))))
+
 (def ^:private tiny-snomed-vs-param
   {:name     "valueSet"
    :resource {:resourceType "ValueSet"
@@ -383,7 +391,24 @@
                                        {:name "count" :valueInteger 5}]}}
     :expect {:status 200
              :assertions [["expansion does not echo displayLanguage"
-                           expansion-display-language-absent?]]}}])
+                           expansion-display-language-absent?]]}}
+
+   {:name "POST $batch-validate-code returns a result per validation, in order"
+    :request {:method :post
+              :path    "/ValueSet/$batch-validate-code"
+              :body    {:resourceType "Parameters"
+                        :parameter [{:name "url" :valueUri "http://snomed.info/sct?fhir_vs=isa/73211009"}
+                                    {:name     "validation"
+                                     :resource {:resourceType "Parameters"
+                                                :parameter [{:name "coding"
+                                                             :valueCoding {:system "http://snomed.info/sct" :code "11687002"}}]}}
+                                    {:name     "validation"
+                                     :resource {:resourceType "Parameters"
+                                                :parameter [{:name "coding"
+                                                             :valueCoding {:system "http://snomed.info/sct" :code "195967001"}}]}}]}}
+    :expect {:status 200
+             :assertions [["a result per validation, in order"
+                           (fn [body] (= [true false] (batch-validation-results body)))]]}}])
 
 (deftest ^:live operation-cases
   (doseq [c cases] (check c)))
