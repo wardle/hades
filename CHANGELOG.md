@@ -4,6 +4,10 @@ This log documents significant changes for each release.
 
 ## Not yet released
 
+* **New native LOINC provider.** LOINC is now served by a dedicated SQLite-backed provider with a close-to-source table structure, indexed and queried directly rather than forced through a generic FTRM container at load time. Provider namespaces were restructured for simpler multi-provider support.
+* **ConceptMap search/discovery** (`GET /ConceptMap`). A shared FHIR REST-search filter matcher (`providers/common/search_filter`) backs ConceptMap search at the composite and metadata-opts filtering inside providers, wired through `core`, HTTP and the MCP tools.
+* **OID / URN / URI alias resolution.** Providers expose a NamingService that maps an identifier (bare OID/UUID, `urn:oid:`/`urn:uuid:`, or URI alias) to its canonical `{:url :kind}`. The composite consults it only on a dispatch miss, then re-dispatches by canonical URL — canonical-URL requests pay nothing and providers never see an alias. Version-blind across CodeSystem/ValueSet/ConceptMap.
+* **`ValueSet/$batch-validate-code`.** Validate a list of nested `Parameters` against a shared ValueSet, returning one result per item; the batch never fails as a whole. The per-item validation core is shared with `$validate-code`.
 * `import` and `serve` now accept archive files (`.tgz`/`.tar.gz`/`.tar`/`.zip`) as positional sources; each is extracted to a temporary directory, walked like any other source, and removed afterwards (#19). FHIR package installs keep the download cache to just the `.tgz` tarballs — no unpacked extracts.
 * FHIR REST search (`GET /CodeSystem`, `GET /ValueSet`) now pages at the provider: FTRM reads only the requested page from its clustered tables instead of the composite walking and sorting the whole catalogue, and `_summary` listings no longer read or parse the `compose` blob. Browse latency on a large catalogue drops by roughly 50×.
 * `Bundle.total` is omitted from a paginated searchset (permitted by FHIR): an exact deduplicated count across providers would need a full key enumeration, and summing per-provider counts would double-count shared canonicals. It is still reported when the result fits in one page (and for `_summary=count` / `_count=0`).
@@ -14,6 +18,12 @@ This log documents significant changes for each release.
 * `?fhir_vs=isa/X` is now reflexive — includes X itself — for both `$validate-code` and `$expand`, matching the FHIR SNOMED CT specification.
 * Display validation is now consistent across every provider: a `$validate-code` display mismatch is strict (`error`, `result=false`) by default and lenient (`warning`, `result=true`) only when `lenient-display-validation` is set, reported on `Coding.display`. A malformed `displayLanguage` operation parameter is now rejected as `invalid-display`.
 * Hades passes 504 / 600 (84.0%) tests in the pinned HL7 FHIR Terminology Conformance suite.
+
+## [v2.0.206] - 2026-05-09
+
+* SNOMED CT ECL filters now accept `constraint` as well as `expression` as the property name carrying the ECL — `constraint` is the FHIR-spec spelling. Both compose the same ECL via `=` or `in`, and the not-supported error text echoes whichever name was supplied.
+* `$subsumes` with empty or malformed `Parameters` (no `codeA`/`codeB`/`system` or `codingA`/`codingB`) now returns a `400 invalid` `OperationOutcome` instead of a misleading `404 "No endpoint matches path"`.
+* Fixed `used-codesystem` metadata (`status`, `experimental`, `standards-status`) being dropped from `$expand` against SQLite-backed CodeSystems (LOINC, IGs, hl7.terminology); the collector now reads catalogue metadata via the composite's correctly-parameterised lookup.
 
 ## [v2.0.198] - 2026-05-09
 
