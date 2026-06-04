@@ -1,8 +1,24 @@
 {
   "total": 603,
-  "passed": 503,
-  "failed": 97,
+  "passed": 504,
+  "failed": 96,
   "skipped": 3,
-  "snomed-version": "20250201",
+  "fixtures": [
+    {
+      "id": ":sct\/conformance",
+      "path": "data\/snomed-uk-clinical-2025-06-11.db",
+      "dist": "uk.nhs\/sct-clinical@2025-06-11",
+      "version": "20250201"
+    },
+    {
+      "id": ":loinc\/v2_82",
+      "path": "data\/loinc-2.82.db",
+      "version": "2.82"
+    },
+    {
+      "id": ":fhir\/tx",
+      "path": "data\/fhir-tx.db"
+    }
+  ],
   "tx-ecosystem-rev": "fb9078f6102088e3307e5b77c255bd41453fdcec"
 }

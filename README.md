@@ -1,6 +1,6 @@
 # Hades — a HL7 FHIR terminology server
 
-[![Conformance](https://img.shields.io/badge/conformance-503%2F600%20(83.8%25)-blue)](https://github.com/HL7/fhir-tx-ecosystem-ig)
+[![Conformance](https://img.shields.io/badge/conformance-504%2F600%20(84.0%25)-blue)](https://github.com/HL7/fhir-tx-ecosystem-ig)
 
 Hades is an open-source HL7 FHIR terminology server. It serves
 `CodeSystem`, `ValueSet` and `ConceptMap` operations — `$lookup`,
@@ -18,7 +18,7 @@ all of them.
 
 It is exercised against the
 [HL7 FHIR Terminology Ecosystem IG](https://github.com/HL7/fhir-tx-ecosystem-ig)
-conformance test suite — Hades passes **503 / 600 (83.8%)**
+conformance test suite — Hades passes **504 / 600 (84.0%)**
 tests at the pinned upstream rev. See [Conformance](doc/conformance.md).
 
 Hades is lightweight and self-contained. The same binary serves an
