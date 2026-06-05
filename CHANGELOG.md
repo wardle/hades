@@ -2,13 +2,13 @@
 
 This log documents significant changes for each release.
 
-## Not yet released
+## [v2.0.272] - 2026-06-05
 
 * `GET /ValueSet?_summary=true` browse now builds each summary row from the `valueset` hot table's inline columns instead of reading and JSON-parsing the per-row `compose`/`metadata` blob. A `_count=100` summary page drops ~11× (≈27 ms → ≈2.4 ms in-process); output is unchanged.
 
 ## [v2.0.270] - 2026-06-04
 
-* **New native LOINC provider.** LOINC is now served by a dedicated SQLite-backed provider with a close-to-source table structure, indexed and queried directly rather than forced through a generic FTRM container at load time. Provider namespaces were restructured for simpler multi-provider support.
+* **New native LOINC provider.** LOINC is now served by a dedicated SQLite-backed provider with a close-to-source table structure, indexed and queried directly rather than forced through a generic FTRM container at load time. Provider namespaces restructured for simpler multi-provider support.
 * **ConceptMap search/discovery** (`GET /ConceptMap`). A shared FHIR REST-search filter matcher (`providers/common/search_filter`) backs ConceptMap search at the composite and metadata-opts filtering inside providers, wired through `core`, HTTP and the MCP tools.
 * **OID / URN / URI alias resolution.** Providers expose a NamingService that maps an identifier (bare OID/UUID, `urn:oid:`/`urn:uuid:`, or URI alias) to its canonical `{:url :kind}`. The composite consults it only on a dispatch miss, then re-dispatches by canonical URL — canonical-URL requests pay nothing and providers never see an alias. Version-blind across CodeSystem/ValueSet/ConceptMap.
 * **`ValueSet/$batch-validate-code`.** Validate a list of nested `Parameters` against a shared ValueSet, returning one result per item; the batch never fails as a whole. The per-item validation core is shared with `$validate-code`.
