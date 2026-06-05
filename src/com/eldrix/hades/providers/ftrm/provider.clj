@@ -637,21 +637,37 @@
            :member-id-lo   (:valueset/member_id_lo row)
            :member-id-hi   (:valueset/member_id_hi row)})))))
 
+(defn- vs-summary-from-table
+  "Build a summary `::result/resource-meta` for ValueSet `url` straight from
+  the `valueset` hot table, clustered on (url,version). name/title/status/
+  experimental are plain columns there, so a summary listing reads them in
+  one indexed query and never touches the (potentially megabyte) `compose`
+  /`metadata` blob in `valueset_resource`."
+  [ds url version]
+  (when url
+    (let [rows (jdbc/execute! ds ["SELECT version, name, title, status, experimental
+                                   FROM valueset WHERE url = ?" url])]
+      (when (seq rows)
+        (let [chosen (resolve-vs-version (map :valueset/version rows) version)
+              row    (some #(when (= chosen (:valueset/version %)) %) rows)]
+          (cond-> {:url url}
+            (system-version-or-nil chosen)       (assoc :version chosen)
+            (:valueset/name row)                 (assoc :name (:valueset/name row))
+            (:valueset/title row)                (assoc :title (:valueset/title row))
+            (:valueset/status row)               (assoc :status (:valueset/status row))
+            (some? (:valueset/experimental row)) (assoc :experimental (= 1 (:valueset/experimental row)))))))))
+
 (defn- load-vs-entry
-  "Point-read a ValueSet's entry for an already-resolved concrete
-  `version`. `summary?` skips the `compose` column entirely — a `_summary`
-  listing only needs the metadata, and `compose` blobs run to megabytes,
-  so reading and JSON-parsing one just to drop it is the dominant cost of
-  a summary page."
-  ([ds url version] (load-vs-entry ds url version false))
-  ([ds url version summary?]
-   (some-> (jdbc/execute-one! ds
-             (if summary?
-               ["SELECT url, version, metadata FROM valueset_resource WHERE url = ? AND version = ?"
-                url version]
-               ["SELECT url, version, metadata, compose FROM valueset_resource WHERE url = ? AND version = ?"
-                url version]))
-           valueset-row->entry)))
+  "Point-read a ValueSet's full entry (metadata + compose) from
+  `valueset_resource` for an already-resolved concrete `version`. Summary
+  listings never call this — they read the inline columns from the
+  `valueset` hot table via `vs-summary-from-table`, avoiding the compose
+  blob entirely."
+  [ds url version]
+  (some-> (jdbc/execute-one! ds
+            ["SELECT url, version, metadata, compose FROM valueset_resource WHERE url = ? AND version = ?"
+             url version])
+          valueset-row->entry))
 
 (defn- limit-offset-sql [cnt offset]
   (cond
@@ -1079,9 +1095,11 @@
             (jdbc/plan ds (into [sql] (mapcat rest) clauses)))))
 
   (vs-resource [_ {:keys [url summary?] :as params}]
-    (when-let [{:keys [version]} (resolve-vs ds url
-                                             (or (:valueSetVersion params) (params-version params)))]
-      (some-> (load-vs-entry ds url version summary?) vs-resource-from-entry)))
+    (let [req-version (or (:valueSetVersion params) (params-version params))]
+      (if summary?
+        (vs-summary-from-table ds url req-version)
+        (when-let [{:keys [version]} (resolve-vs ds url req-version)]
+          (some-> (load-vs-entry ds url version) vs-resource-from-entry)))))
 
   (vs-expand [_ svc params]
     (let [url (:url params)

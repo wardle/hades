@@ -377,13 +377,17 @@
    ;;                    tuples collapses each provider to ≤1 surviving
    ;;                    entry; one *-resource call per provider
    ;;                    thereafter. The fast path.
-   ;;   *-browse-page  — `_count=10&_summary=true`. Walks, dedups and
-   ;;                    SORTS the whole catalogue to return one page —
-   ;;                    the latency hot spot. `vs-browse-page` over the
-   ;;                    ~15k-ValueSet catalogue is the slowest search op.
-   ;;   *-browse-count — `_summary=count`. Same walk + dedup but the sort
-   ;;                    is skipped (only the total is returned); guards
-   ;;                    that the count-only path stays sort-free.
+   ;;   *-browse-page  — `_count=N&_summary=true`. The provider pages the
+   ;;                    catalogue in SQL (tables are clustered on
+   ;;                    (url,version)) and serves each summary row from
+   ;;                    inline hot-table columns, never the compose blob.
+   ;;                    The N=100 variants guard that a summary page stays
+   ;;                    blob-free and ~linear as `_count` grows — the FS01
+   ;;                    pool browses at _count 10/20/50/100, and the fat
+   ;;                    end drives its p95.
+   ;;   *-browse-count — `_summary=count`. Counts the catalogue with no page
+   ;;                    materialised; not in the FS01 pool, but guards the
+   ;;                    count-only path.
    {:id :fs01/cs-by-url :tx-bench "FS01"
     :fn (fn [svc]
           (hades/search-code-systems svc
@@ -396,6 +400,10 @@
     :fn (fn [svc] (hades/search-code-systems svc {:_count 10 :_summary "true"}))}
    {:id :fs01/vs-browse-page :tx-bench "FS01"
     :fn (fn [svc] (hades/search-value-sets svc {:_count 10 :_summary "true"}))}
+   {:id :fs01/cs-browse-page-100 :tx-bench "FS01"
+    :fn (fn [svc] (hades/search-code-systems svc {:_count 100 :_summary "true"}))}
+   {:id :fs01/vs-browse-page-100 :tx-bench "FS01"
+    :fn (fn [svc] (hades/search-value-sets svc {:_count 100 :_summary "true"}))}
    {:id :fs01/cs-browse-count :tx-bench "FS01"
     :fn (fn [svc] (hades/search-code-systems svc {:_summary "count"}))}
    {:id :fs01/vs-browse-count :tx-bench "FS01"

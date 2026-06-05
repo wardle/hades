@@ -2,6 +2,10 @@
 
 This log documents significant changes for each release.
 
+## Not yet released
+
+* `GET /ValueSet?_summary=true` browse now builds each summary row from the `valueset` hot table's inline columns instead of reading and JSON-parsing the per-row `compose`/`metadata` blob. A `_count=100` summary page drops ~11× (≈27 ms → ≈2.4 ms in-process); output is unchanged.
+
 ## [v2.0.270] - 2026-06-04
 
 * **New native LOINC provider.** LOINC is now served by a dedicated SQLite-backed provider with a close-to-source table structure, indexed and queried directly rather than forced through a generic FTRM container at load time. Provider namespaces were restructured for simpler multi-provider support.
