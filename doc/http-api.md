@@ -11,10 +11,19 @@ LOINC, and any loaded FHIR packages.
 | `$subsumes` | `CodeSystem` | Relationship between two codes |
 | `$expand` | `ValueSet` | Materialise a value set (with optional filter, paging, ECL) |
 | `$translate` | `ConceptMap` | Map a code via a ConceptMap or SNOMED map reference set |
+| `$batch-validate-code` | `ValueSet` | Validate many codings against one value set in a single call |
 
 GET and POST forms are both supported. Operation parameters can be
 passed as query parameters (GET) or as a `Parameters` resource in the
-request body (POST).
+request body (POST). `$batch-validate-code` is POST-only: a shared
+`url` plus repeated `validation` parameters, each a nested `Parameters`
+resource carrying one `$validate-code` input; the response carries one
+result per item, and the batch never fails as a whole.
+
+A `system` or value-set `url` given as an OID or UUID (bare,
+`urn:oid:…` or `urn:uuid:…`) or a known URI alias is resolved to its
+canonical URL via loaded NamingSystems before dispatch — canonical-URL
+requests are unaffected.
 
 `tx-resource` parameters — temporary CodeSystem, ValueSet, or
 ConceptMap resources — are honoured per-request and overlay the base
@@ -90,6 +99,29 @@ curl -sG 'http://localhost:8080/fhir/ConceptMap/$translate' \
   --data-urlencode 'code=73211009' \
   --data-urlencode 'targetsystem=http://hl7.org/fhir/sid/icd-10' | jq
 ```
+
+## Searching the catalogue
+
+`CodeSystem`, `ValueSet` and `ConceptMap` support FHIR REST search
+(`GET /<type>` or `POST /<type>/_search`), returning a `searchset`
+Bundle:
+
+```shell
+# Find a ValueSet by canonical URL
+curl -sG 'http://localhost:8080/fhir/ValueSet' \
+  --data-urlencode 'url=http://hl7.org/fhir/ValueSet/administrative-gender' | jq
+
+# Browse the catalogue, 20 summaries per page
+curl -s 'http://localhost:8080/fhir/CodeSystem?_count=20&_offset=40&_summary=true' | jq
+```
+
+Supported parameters: `url`, `version` and `status` (exact match);
+`name`, `title` and `description` (FHIR string matching, with the
+`:exact` and `:contains` modifiers); `_count` (default 10, capped at
+1000), `_offset` and `_summary`. ValueSet searches default to
+`_summary=true` — large catalogues are far cheaper as summaries.
+Unknown parameters are ignored unless the request carries
+`Prefer: handling=strict`, which turns them into a 400.
 
 ## Implicit SNOMED ValueSets and ConceptMaps
 

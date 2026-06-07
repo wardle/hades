@@ -9,15 +9,15 @@ serving — through a single binary. Examples below use
 
 | Command | Purpose |
 |---------|---------|
-| `serve <paths…> [--port N] [--bind-address A] [--default URL=VERSION]… [--locale LOCALE]` | Start the FHIR server. Each path opens a Hermes SNOMED store, a Hades SQLite container, or a directory of FHIR JSON resources (auto-detected). Use `--default URL=VERSION` (repeatable) when multiple providers claim the same canonical URL — bare-URL requests resolve to the chosen version. `--locale` sets the server default locale (e.g. `en-GB`) for terminologies that support it, such as SNOMED CT. |
+| `serve <paths…> [--port N] [--bind-address A] [--default URL=VERSION]… [--locale LOCALE]` | Start the FHIR server. Each path opens a Hermes SNOMED store, a Hades SQLite container, a directory of FHIR JSON resources, or a FHIR package archive (`.tgz`/`.zip`, extracted to a temporary directory) — auto-detected. Use `--default URL=VERSION` (repeatable) when multiple providers claim the same canonical URL — bare-URL requests resolve to the chosen version. `--locale` sets the server default locale (e.g. `en-GB`) for terminologies that support it, such as SNOMED CT. |
 | `mcp <paths…> [--default URL=VERSION]… [--locale LOCALE]` | Start a Model Context Protocol server over stdio, exposing FHIR terminology operations as MCP tools. Source paths and `--default` / `--locale` work identically to `serve`. See [MCP server](mcp.md). |
-| `install <dest-db> --dist <id>… [--no-index] [--cache-dir DIR]` | Download and import one or more distributions (SNOMED CT or FHIR package) into the destination database. Auto-indexes when done; pass `--no-index` to skip (for layered loads). Distribution ids may carry `@<version>`. |
-| `import <dest-db> <sources…> [--no-index]` | Import sources into a destination database. Auto-detects RF2 (SNOMED), LOINC release archive, or FHIR JSON / NPM-package directory. Auto-indexes when done. |
+| `install <dest-db> --dist <id>… [--no-index] [--progress]` | Download and import one or more distributions (SNOMED CT or FHIR package) into the destination database. Auto-indexes when done; pass `--no-index` to skip (for layered loads). Distribution ids may carry `@<version>`. Some distributions need extra flags — TRUD: `--api-key PATH`; MLDS: `--username USER --password PATH`; FHIR packages: `--cache-dir DIR` (retain downloaded tarballs), `--registry URL` (replace the default registry chain). Run `install --dist <id> --help` to see what a distribution accepts. |
+| `import <dest-db> <sources…> [--no-index]` | Import sources into a destination database. Auto-detects RF2 (SNOMED), LOINC release, or FHIR JSON / NPM-package directory; archives (`.zip`/`.tgz`/`.tar.gz`/`.tar`) are extracted to a temporary directory first. Auto-indexes when done. |
 | `list <paths…>` | List importable files under given paths. |
-| `available [--dist <id>…]` | List installable terminologies, or releases/versions for the given ids. |
+| `available [--dist <id>…] [--progress]` | List installable terminologies, or releases/versions for the given ids. |
 | `index <paths…>` | Rebuild search indices on each database. Useful for explicit recovery or to finish a layered load. Release sources are silently skipped. |
 | `compact <paths…>` | Compact the underlying store (LMDB compact for Hermes, VACUUM for SQLite). Optional space optimisation. |
-| `status <paths…> [--format json\|edn] [--modules] [--refsets]` | Show database status. `--modules` and `--refsets` add SNOMED-specific detail to the report. |
+| `status <paths…> [--format json\|edn]` | Show database status: the CodeSystems, ValueSets and ConceptMaps each source contributes. |
 
 Commands can be chained on a single command line and execute in the
 order given, sharing positional paths and flags — for example

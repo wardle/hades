@@ -4,23 +4,23 @@ Hades runs as a single JVM process — no database server, no
 orchestrator, no external services. On a laptop it sustains tens of
 thousands of FHIR terminology operations per second with
 sub-millisecond median latency on most operations. The numbers below
-were measured on 2026-05-31 against a **2.0.255** development build.
+were measured on 2026-06-07 against a **2.0.273** development build.
 
 ## Headline figures
 
 | What it does                                       | FHIR endpoint              | Median latency | 99th percentile |  Throughput  |
 |----------------------------------------------------|----------------------------|---------------:|----------------:|-------------:|
-| Single concept lookup (SNOMED)                     | `CodeSystem/$lookup`       |         316 µs |         6.36 ms | 25,800 req/s |
-| Single concept lookup (LOINC)                      | `CodeSystem/$lookup`       |         527 µs |         1.48 ms | 17,000 req/s |
-| Free-text search, 10 results                       | `ValueSet/$expand`         |         757 µs |         2.65 ms | 11,500 req/s |
-| FHIR search by canonical URL                       | `GET /ValueSet`            |         606 µs |         5.05 ms | 12,300 req/s |
-| FHIR catalogue browse, 10 results                  | `GET /ValueSet`            |        3.37 ms |         4.42 ms |  2,900 req/s |
-| Subsumption test (two SNOMED codes)                | `CodeSystem/$subsumes`     |         221 µs |         636 µs  | 38,900 req/s |
-| Code validation against a value set                | `ValueSet/$validate-code`  |         241 µs |         1.20 ms | 34,900 req/s |
-| Value set expansion (is-a hierarchy, 10 results)   | `ValueSet/$expand`         |         225 µs |         771 µs  | 37,400 req/s |
-| Value set expansion (ECL refinement, 10 results)   | `ValueSet/$expand`         |        1.16 ms |         3.39 ms |  7,500 req/s |
-| Value set expansion (extensional, VSAC)            | `ValueSet/$expand`         |        1.28 ms |        28.9 ms  |  4,500 req/s |
-| Concept translation (SNOMED → ICD-10)              | `ConceptMap/$translate`    |         336 µs |         1.23 ms | 25,100 req/s |
+| Single concept lookup (SNOMED)                     | `CodeSystem/$lookup`       |         323 µs |         5.60 ms | 25,200 req/s |
+| Single concept lookup (LOINC)                      | `CodeSystem/$lookup`       |         584 µs |         1.62 ms | 15,200 req/s |
+| Free-text search, 10 results                       | `ValueSet/$expand`         |         779 µs |         2.65 ms | 11,300 req/s |
+| FHIR search by canonical URL                       | `GET /ValueSet`            |         214 µs |         578 µs  | 39,300 req/s |
+| FHIR catalogue browse, 10 results                  | `GET /ValueSet`            |         653 µs |         1.43 ms | 13,900 req/s |
+| Subsumption test (two SNOMED codes)                | `CodeSystem/$subsumes`     |         225 µs |         770 µs  | 37,700 req/s |
+| Code validation against a value set                | `ValueSet/$validate-code`  |         241 µs |         1.48 ms | 34,100 req/s |
+| Value set expansion (is-a hierarchy, 10 results)   | `ValueSet/$expand`         |         227 µs |         990 µs  | 36,700 req/s |
+| Value set expansion (ECL refinement, 10 results)   | `ValueSet/$expand`         |        1.16 ms |         3.53 ms |  7,400 req/s |
+| Value set expansion (extensional, VSAC)            | `ValueSet/$expand`         |        1.30 ms |        28.7 ms  |  4,500 req/s |
+| Concept translation (SNOMED → ICD-10)              | `ConceptMap/$translate`    |         325 µs |         1.34 ms | 25,400 req/s |
 
 ## How to read the table
 
@@ -47,8 +47,8 @@ process serves all terminologies.
 
 ## Methodology
 
-- **Hardware:** Apple M1 Pro, 16 GB RAM
-- **Hades:** 2.0.255 development build, measured 2026-05-31
+- **Hardware:** MacBook Pro (Apple M1 Pro), 16 GB RAM
+- **Hades:** 2.0.273 development build, measured 2026-06-07
 - **Data:** SNOMED CT International 2025-02-01, LOINC 2.82, and the FHIR
   packages from `fhir-tx.db` (including the VSAC value sets)
 - **Driver:** [`wrk`](https://github.com/wg/wrk) `-t2 -c10 -d30s`

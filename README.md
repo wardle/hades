@@ -58,20 +58,20 @@ multi-terminology walkthrough.
 
 Hades runs as a single JVM process on commodity hardware — no
 Postgres, no Elasticsearch, no orchestrator. The figures below are
-end-to-end over HTTP on an Apple M1 MacBook Pro driving the server at
+end-to-end over HTTP on a MacBook Pro (M1 Pro) driving the server at
 10 concurrent connections with `wrk`. *Latency* is the time the median
 request takes; *throughput* is the sustained request rate at that
 concurrency. Server-class hardware with more cores scales higher.
 
 | What it does                                       | FHIR endpoint              | Latency | Throughput   |
 |----------------------------------------------------|----------------------------|--------:|-------------:|
-| Single concept lookup (SNOMED)                     | `CodeSystem/$lookup`       |  316 µs | 25,800 req/s |
-| Single concept lookup (LOINC)                      | `CodeSystem/$lookup`       |  527 µs | 17,000 req/s |
-| Free-text search, 10 results                       | `ValueSet/$expand`         |  757 µs | 11,500 req/s |
-| Subsumption test (two SNOMED codes)                | `CodeSystem/$subsumes`     |  221 µs | 38,900 req/s |
-| Code validation against a value set                | `ValueSet/$validate-code`  |  241 µs | 34,900 req/s |
-| Value set expansion (ECL refinement, 10 results)   | `ValueSet/$expand`         |  1.16 ms |  7,500 req/s |
-| Concept translation (SNOMED → ICD-10)              | `ConceptMap/$translate`    |  336 µs | 25,100 req/s |
+| Single concept lookup (SNOMED)                     | `CodeSystem/$lookup`       |  323 µs | 25,200 req/s |
+| Single concept lookup (LOINC)                      | `CodeSystem/$lookup`       |  584 µs | 15,200 req/s |
+| Free-text search, 10 results                       | `ValueSet/$expand`         |  779 µs | 11,300 req/s |
+| Subsumption test (two SNOMED codes)                | `CodeSystem/$subsumes`     |  225 µs | 37,700 req/s |
+| Code validation against a value set                | `ValueSet/$validate-code`  |  241 µs | 34,100 req/s |
+| Value set expansion (ECL refinement, 10 results)   | `ValueSet/$expand`         |  1.16 ms |  7,400 req/s |
+| Concept translation (SNOMED → ICD-10)              | `ConceptMap/$translate`    |  325 µs | 25,400 req/s |
 
 See [Performance](doc/performance.md) for the methodology, tail
 latencies and the full per-operation breakdown.

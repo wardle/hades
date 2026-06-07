@@ -134,15 +134,15 @@ maps.
 ## Resources
 
 Hades exposes four MCP resources — two static guides plus two live
-catalogues — so an LLM can read its operating manual and discover what's
-loaded without trial-and-error:
+counts — so an LLM can read its operating manual and see what's loaded
+without trial-and-error:
 
 | URI | Description |
 |---|---|
 | `hades://guides/operations` | When to use lookup vs validate-code vs expand vs translate, what each returns, common workflows |
 | `hades://guides/value-sets` | How ValueSets are defined (`compose`, `include`/`exclude`, filters), how Hades expands them, SNOMED ECL filter syntax |
-| `hades://catalog/code-systems` | Every CodeSystem the server can answer for, with canonical URL and version. Live from the providers — updates as overlays land |
-| `hades://catalog/value-sets` | Every ValueSet the server can answer for. Live |
+| `hades://catalog/code-systems` | Count of registered CodeSystems, live from the providers. Find specific ones with the `search_code_systems` tool |
+| `hades://catalog/value-sets` | Count of registered ValueSets, live. Find specific ones with `search_value_sets` |
 
 ## Prompts
 

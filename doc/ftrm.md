@@ -121,19 +121,23 @@ for diagnostic ease), and similar diagnostic data. Readers **MUST**
 ignore unknown keys. Reserved keys with assigned semantics will be
 listed in future revisions; at v1 there are none.
 
-`tx_resource` is the catalogue of every resource the file holds.
-Implementations enumerate this table at boot to register providers.
+`tx_resource` is the catalogue of every CodeSystem, ValueSet and
+ConceptMap the file holds — its check constraint admits only those
+three types. Implementations enumerate this table at boot to register
+providers. NamingSystems are not catalogued here; they are enumerated
+directly from `naming_system` (§5.6).
 
 ### 5.2 CodeSystem
 
 `codesystem_meta` carries one row per CodeSystem `(url, version)`.
 
-Behavioural fields (`case_sensitive`, `hierarchy_meaning`, `content`,
-`supplements`, `status`, `experimental`, `publisher`, `jurisdiction`)
-are columns so they can be queried and indexed. Everything else that
-round-trips as raw FHIR JSON (copyright, contact, useContext,
-identifier, language extensions, …) lives in `metadata` as a
-string-keyed JSON document.
+Behavioural and descriptive fields (`case_sensitive`,
+`hierarchy_meaning`, `content`, `supplements`, `status`,
+`experimental`, `name`, `title`, `description`, `publisher`,
+`jurisdiction`, `standards_status`) are columns so they can be queried
+and indexed. Everything else that round-trips as raw FHIR JSON
+(copyright, contact, useContext, identifier, language extensions, …)
+lives in `metadata` as a string-keyed JSON document.
 
 `concept` holds one row per code, keyed by `(cs_url, cs_version, code)`.
 

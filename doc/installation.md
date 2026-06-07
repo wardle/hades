@@ -62,10 +62,10 @@ java -jar hades.jar import snomed.db /path/to/snomed-rf2.zip   # archive
 java -jar hades.jar import snomed.db /path/to/unzipped-rf2/    # or a directory
 ```
 
-`install` auto-indexes the destination so `snomed.db/` is queryable
-as soon as it returns; after `import`, run `index` (see
-[SNOMED CT](#snomed-ct) below) to make it queryable. That section also
-covers layering extensions and pinning releases.
+Both `install` and `import` auto-index the destination, so
+`snomed.db/` is queryable as soon as the command returns. The
+[SNOMED CT](#snomed-ct) section below covers layering extensions and
+pinning releases.
 
 ## 2. Build LOINC
 
