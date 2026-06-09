@@ -15,7 +15,7 @@
            lambdaisland/uri               {:mvn/version "1.19.155"}
            version-clj/version-clj        {:mvn/version "2.0.3"}
 
-           org.xerial/sqlite-jdbc                 {:mvn/version "3.53.1.0"}
+           org.xerial/sqlite-jdbc                 {:mvn/version "3.53.2.0"}
            com.github.seancorfield/next.jdbc      {:mvn/version "1.3.1108"}
            com.zaxxer/HikariCP                    {:mvn/version "7.0.2"}
 
