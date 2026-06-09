@@ -5,9 +5,9 @@ HealthSamurai drives a suite of k6 load tests against a running FHIR
 terminology server. Hades' fork — `wardle/tx-benchmark` — pins a small
 patch series until it lands upstream.
 
-When asked to "run tx-benchmark", pick a flavor:
+You can run it in three flavours:
 
-| Flavor      | Time      | What it runs                                                            | Use when                                            |
+| Flavour     | Time      | What it runs                                                            | Use when                                            |
 |-------------|-----------|-------------------------------------------------------------------------|-----------------------------------------------------|
 | `preflight` | ~1 min    | Correctness check across every op (no perf numbers)                     | After a code change, before quoting any numbers     |
 | `quick`     | ~5 min    | Preflight + every passing test at **1 VU / 10 s** each                  | Broad regression sweep at low load; before/after    |
@@ -15,7 +15,7 @@ When asked to "run tx-benchmark", pick a flavor:
 
 For ad-hoc spot-checking of a single test, run `k6` directly (see
 [Spot-check one test](#spot-check-one-test) below) — that's one
-command, no flavor needed.
+command, no flavour needed.
 
 ## Setup
 
@@ -60,13 +60,11 @@ to the next:
   explicitly, so the default port just works.
 - **Wait for startup by polling `/fhir/metadata`** — the recipes do this
   with a Bash `until` loop. Startup is one-shot.
-- **Use only the recipes below.** Anything untracked in the tx-benchmark
-  checkout is local scaffolding, not part of the benchmark.
 
-## Run a flavor
+## Run a flavour
 
 Each block is self-contained: it boots hades against the canonical
-fixture set, waits for readiness, runs the chosen flavor, and shuts
+fixture set, waits for readiness, runs the chosen flavour, and shuts
 hades down. Run the entire block as one shell script (or pipe through
 `bash -e`); each step depends on the one before it.
 
@@ -164,7 +162,7 @@ layout at three VU levels).
 
 ### Spot-check one test
 
-For iterating on a single hot path, no flavor needed — just run k6
+For iterating on a single hot path, no flavour needed — just run k6
 directly against an already-running hades. Test ids: `FS01`,
 `LK01`–`LK05`, `VC01`–`VC03`, `EX01`–`EX08`, `SS01`, `CM01`–`CM02`.
 

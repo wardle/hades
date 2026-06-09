@@ -178,7 +178,7 @@ SNOMED edition) is a deliberate act:
 
 ## Run tx-benchmark
 
-Running tx-benchmark (flavors, the no-Docker sweep, and comparing
+Running tx-benchmark (flavours, the no-Docker sweep, and comparing
 against the published round-0 baseline) lives in its own doc:
 [`doc/tx-benchmark.md`](tx-benchmark.md).
 
