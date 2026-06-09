@@ -52,7 +52,7 @@
                           {:git/url "https://github.com/cognitect-labs/test-runner.git"
                            :sha     "3f288f1f16d167723ad87cc35b1dfee3c1681e10"}
                           ca.uhn.hapi.fhir/org.hl7.fhir.validation {:mvn/version "6.9.9"}
-                          com.squareup.okhttp3/okhttp             {:mvn/version "4.12.0"}
+                          com.squareup.okhttp3/okhttp-jvm         {:mvn/version "5.4.0"}
                           org.clojure/test.check                  {:mvn/version "1.1.3"}}
             :main-opts   ["-m" "cognitect.test-runner"
                           "-d" "test"]}
@@ -83,7 +83,7 @@
 
            :conformance
            {:extra-deps  {ca.uhn.hapi.fhir/org.hl7.fhir.validation {:mvn/version "6.9.9"}
-                          com.squareup.okhttp3/okhttp             {:mvn/version "4.12.0"}}
+                          com.squareup.okhttp3/okhttp-jvm         {:mvn/version "5.4.0"}}
             :extra-paths ["test" "test/resources"]
             :exec-fn     com.eldrix.hades.conformance-test/run
             :exec-args   {}}
@@ -95,7 +95,7 @@
                            :sha     "3f288f1f16d167723ad87cc35b1dfee3c1681e10"}
                           criterium/criterium                     {:mvn/version "0.4.6"}
                           ca.uhn.hapi.fhir/org.hl7.fhir.validation {:mvn/version "6.9.9"}
-                          com.squareup.okhttp3/okhttp             {:mvn/version "4.12.0"}}
+                          com.squareup.okhttp3/okhttp-jvm         {:mvn/version "5.4.0"}}
             :main-opts   ["-m" "cognitect.test-runner" "-d" "test" "-r" ".*\\.bench$|.*-bench$"]
             :exec-fn     cognitect.test-runner.api/test
             :exec-args   {:patterns [".*\\.bench$" ".*-bench$"]}}
