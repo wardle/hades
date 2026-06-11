@@ -4,7 +4,7 @@ Hades runs as a single JVM process — no database server, no
 orchestrator, no external services. On a laptop it sustains tens of
 thousands of FHIR terminology operations per second with
 sub-millisecond median latency on most operations. The numbers below
-were measured on 2026-06-07 against a **2.0.273** development build.
+are indicative, measured against recent 2.0 development builds.
 
 ## Headline figures
 
@@ -19,7 +19,7 @@ were measured on 2026-06-07 against a **2.0.273** development build.
 | Code validation against a value set                | `ValueSet/$validate-code`  |         241 µs |         1.48 ms | 34,100 req/s |
 | Value set expansion (is-a hierarchy, 10 results)   | `ValueSet/$expand`         |         227 µs |         990 µs  | 36,700 req/s |
 | Value set expansion (ECL refinement, 10 results)   | `ValueSet/$expand`         |        1.16 ms |         3.53 ms |  7,400 req/s |
-| Value set expansion (extensional, VSAC)            | `ValueSet/$expand`         |        1.30 ms |        28.7 ms  |  4,500 req/s |
+| Value set expansion (extensional, VSAC)            | `ValueSet/$expand`         |        0.92 ms |        23.6 ms  |  6,000 req/s |
 | Concept translation (SNOMED → ICD-10)              | `ConceptMap/$translate`    |         325 µs |         1.34 ms | 25,400 req/s |
 
 ## How to read the table
@@ -48,7 +48,7 @@ process serves all terminologies.
 ## Methodology
 
 - **Hardware:** MacBook Pro (Apple M1 Pro), 16 GB RAM
-- **Hades:** 2.0.273 development build, measured 2026-06-07
+- **Hades:** recent 2.0 development builds, measured June 2026
 - **Data:** SNOMED CT International 2025-02-01, LOINC 2.82, and the FHIR
   packages from `fhir-tx.db` (including the VSAC value sets)
 - **Driver:** [`wrk`](https://github.com/wg/wrk) `-t2 -c10 -d30s`
