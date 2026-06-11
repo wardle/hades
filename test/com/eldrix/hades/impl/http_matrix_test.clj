@@ -779,8 +779,8 @@
     :extra-params [{:name "valueSet" :resource tx-benchmark-ex07-vs}
                    {:name "filter" :value "amphetamine"}
                    {:name "count" :value 200}]
-    :reason "tx-benchmark EX07 preflight: ad-hoc multi-system text expansion"
-    :expect {:status 200 :valueset? true :expansion-results? true}}
+    :reason "multi-system expansion referencing an unloaded system refuses outright (tx-benchmark EX07 shape)"
+    :expect {:status 404 :outcome? true :outcome-detail-code "not-found"}}
 
    {:terminology :loinc :method :post :op :vs-expand
     :extra-params [{:name "valueSet" :resource unsupported-loinc-filter-vs}]

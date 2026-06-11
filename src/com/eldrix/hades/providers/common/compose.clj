@@ -407,11 +407,11 @@
                    (not (composite/find-codesystem svc system))
                    (not (and version
                              (composite/find-codesystem svc (canonical/versioned-uri system version)))))
-          {:severity     "warning"
+          {:severity     "error"
            :type         "not-found"
            :details-code "not-found"
            :text         (str "A definition for CodeSystem '" system
-                              "' could not be found, so the value set cannot be fully expanded")})
+                              "' could not be found, so the value set cannot be expanded")})
         bad-filter-issue (when (seq filters) (broken-filter-issue system filters))
         match-result (when (and system (not concepts))
                        (protos/cs-expand* svc (build-query system version filters params)))

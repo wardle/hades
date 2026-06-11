@@ -253,6 +253,24 @@
     :expect {:status 200
              :assertions [["body is ValueSet" valueset-resource?]]}}
 
+   {:name "POST $expand with inline valueSet over unknown system returns 404 OperationOutcome"
+    :request {:method :post
+              :path "/ValueSet/$expand"
+              :body {:resourceType "Parameters"
+                     :parameter [{:name "valueSet"
+                                  :resource {:resourceType "ValueSet"
+                                             :compose {:include [{:system "http://www.nlm.nih.gov/research/umls/rxnorm"
+                                                                  :filter [{:property "TTY"
+                                                                            :op "="
+                                                                            :value "BN"}]}]}}}
+                                 {:name "count" :valueInteger 10}]}}
+    :expect {:status 404
+             :content-type #"application/fhir\+json"
+             :assertions [["body is OperationOutcome" operation-outcome?]
+                          ["issue.code = not-found" (issue-code-equals? "not-found")]
+                          ["text says value set cannot be expanded"
+                           (issue-text-matches? #"value set cannot be expanded")]]}}
+
    {:name "$translate resolves SNOMED REPLACED BY for a retired code"
     :request {:path (str "/ConceptMap/$translate"
                          "?url=http%3A%2F%2Fsnomed.info%2Fsct%3Ffhir_cm%3D900000000000526001"
