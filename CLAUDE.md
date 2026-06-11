@@ -343,7 +343,7 @@ via the steps in `Conformance / integration test data` above.
 
 ### tx-benchmark
 
-When the user says **"run tx-benchmark"** — with or without a flavor —
+When the user says **"run tx-benchmark"** — with or without a flavour —
 they mean one of three pre-defined recipes documented in
 [`doc/tx-benchmark.md`](doc/tx-benchmark.md):
 
@@ -351,8 +351,8 @@ they mean one of three pre-defined recipes documented in
 - **`quick`** — preflight + every passing test at 1 VU / 10 s (broad regression sweep, ~5 min)
 - **`full`** — preflight + warmup + bench at VUs 1 / 10 / 50 (~30+ min, Docker)
 
-If the user doesn't name a flavor, ask which one — don't invent a new
-shape. Each flavor in the doc is a single self-contained shell block
+If the user doesn't name a flavour, ask which one — don't invent a new
+shape. Each flavour in the doc is a single self-contained shell block
 that boots hades, waits, runs, and tears down — execute it as written.
 
 ### Conformance testing
