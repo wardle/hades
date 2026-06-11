@@ -11,7 +11,6 @@
             [com.eldrix.hades.impl.load :as load-fhir]
             [com.eldrix.hades.providers.common.fhir-loader :as loaders]
             [com.eldrix.hades.impl.metadata :as metadata]
-            [com.eldrix.hades.protocols :as protos]
             [com.eldrix.hades.impl.wire :as wire]
             [io.pedestal.connector :as conn]
             [io.pedestal.http.jetty :as jetty]
@@ -678,8 +677,7 @@
             (let [{:keys [check-system-version force-system-version system-version]} flags
                   used-cs        (:used-codesystems result)
                   compose-pinned (into #{} (keep :system) (:compose-pins result))
-                  vs-meta        (when-let [vs (composite/find-valueset svc url)]
-                                   (protos/vs-resource vs {:url url}))
+                  vs-meta        (composite/vs-meta-summary svc url)
                   vs-version-uri (let [v (:version vs-meta)]
                                    (if v (str url "|" v) url))
                   version-error  (when check-system-version

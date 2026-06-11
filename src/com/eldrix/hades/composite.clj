@@ -236,6 +236,18 @@
       (protos/vs-resource vs (cond-> {:url canonical}
                                version (assoc :version version))))))
 
+(defn vs-meta-summary
+  "Summary form of `vs-meta`: asks the serving provider with
+  `:summary? true`, so a backend with a heavy compose (FTRM) serves the
+  lightweight metadata columns and never parses the compose blob. Use
+  whenever only identity/status fields are needed (status warnings,
+  version echo, the expansion's ValueSet shell)."
+  [svc url]
+  (let [[base version] (canonical/parse-versioned-uri url)]
+    (when-let [[vs canonical] (resolve-vs svc base version)]
+      (protos/vs-resource vs (cond-> {:url canonical :summary? true}
+                               version (assoc :version version))))))
+
 (defn add-cs-status-warnings
   "Add informational issues for CodeSystem publication status (draft/retired/experimental)."
   [result svc system]
@@ -264,7 +276,7 @@
 
 (defn add-vs-status-warnings
   [result svc url]
-  (if-let [meta (when url (vs-meta svc url))]
+  (if-let [meta (when url (vs-meta-summary svc url))]
     (let [status (:status meta)
           version (:version meta)
           vs-ref (if version (str url "|" version) url)
@@ -539,10 +551,10 @@
   [resource]
   (dissoc resource :compose))
 
-(defn- merge-pages
-  "Flatten the per-provider `[provider slice]` pairs into deduplicated,
-  sorted `[provider tuple]` pairs: dedup by `[url version]` (first
-  registration wins), ordered by `(url, version)`."
+(defn- dedup-pages
+  "Flatten the per-provider `[provider slice]` pairs into deduplicated
+  `[provider tuple]` pairs: dedup by `[url version]` (first registration
+  wins). Unordered — count-only callers stop here."
   [provider+slices]
   (->> provider+slices
        (mapcat (fn [[provider slice]] (map (fn [tuple] [provider tuple]) slice)))
@@ -550,8 +562,12 @@
                  (let [k [url version]]
                    (cond-> acc (not (contains? acc k)) (assoc k pair))))
                {})
-       vals
-       (sort compare-pair-by-url-version)))
+       vals))
+
+(defn- merge-pages
+  "`dedup-pages`, ordered by `(url, version)`."
+  [provider+slices]
+  (sort compare-pair-by-url-version (dedup-pages provider+slices)))
 
 (defn- search*
   "Search `providers` for the resources matching `params`, a
@@ -579,7 +595,9 @@
         ;; A provider that filled its `:_count` page may have more, so the
         ;; merged set is not known to be complete and the total is omitted.
         truncated? (boolean (and fetch (some (fn [[_ slice]] (>= (count slice) fetch)) slices)))
-        merged     (merge-pages slices)
+        ;; count-only requests consume nothing but `(count merged)`, so the
+        ;; (url, version) sort would be pure waste over the full catalogue.
+        merged     (if count? (dedup-pages slices) (merge-pages slices))
         page       (when-not count?
                      (cond->> (drop offset merged) _count (take _count)))
         resources  (mapv (fn [[provider tuple]]
@@ -680,7 +698,7 @@
               (if best-invalid
                 (assoc best-invalid :result false)
                 (let [url (:url base-params)
-                      vs-ver (:version (vs-meta svc url))
+                      vs-ver (:version (vs-meta-summary svc url))
                       vs-url-ver (if vs-ver (str url "|" vs-ver) url)
                       no-valid-msg (str "No valid coding was found for the value set '" vs-url-ver "'")
                       combined-msg (if (seq cs-error-msgs)
