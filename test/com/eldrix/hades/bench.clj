@@ -447,6 +447,14 @@
     :fn (fn [svc]
           (hades/expand svc {:url "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.114222.24.7.14"
                              :filter "streptococcus" :count 100}))}
+   ;; $validate-code against a stored extensional VSAC ValueSet — the
+   ;; FTRM vs-validate-code path (ValueSet resolution + membership
+   ;; check), distinct from the SNOMED-implicit VC03 op above.
+   {:id :validate-code/vsac-member :tx-bench "VC03"
+    :fn (fn [svc]
+          (hades/validate-code svc
+            {:url    "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113762.1.4.1018.240"
+             :system snomed-uri :code "1003488007"}))}
 
    ;; --- $expand enrichment cliff (EX04) ----------------------------------
    ;;

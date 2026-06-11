@@ -30,6 +30,7 @@
             [com.eldrix.hades.core :as hades]
             [com.eldrix.hades.composite :as composite]
             [com.eldrix.hades.impl.load :as load-fhir]
+            [com.eldrix.hades.providers.common.compose :as compose]
             [com.eldrix.hades.providers.ftrm.provider :as ftrm-provider]
             [com.eldrix.hades.providers.ftrm.index :as ftrm-index]
             [com.eldrix.hades.protocols :as protos])
@@ -42,9 +43,26 @@
 (def cs-url     "http://example.org/cs/colours")
 (def cs-version "1.0")
 (def vs-url     "http://example.org/vs/primary-colours")
+(def stored-vs-url   "http://example.org/vs/stored-palette")
+(def inactive-vs-url "http://example.org/vs/active-colours-only")
 (def cm-url     "http://example.org/cm/colours-to-iso")
 (def target-cs  "http://example.org/cs/iso-colours")
 (def ci-cs-url  "http://example.org/cs/shapes")
+
+(def stored-palette-compose
+  {"include"
+   [{"system" cs-url "version" cs-version
+     "concept" [{"code" "red" "display" "Red"
+                 "designation" [{"language" "fr" "value" "Rouge"}]}
+                {"code" "green" "display" "Green"}]}
+    {"system" ci-cs-url "version" "1.0"
+     "concept" [{"code" "Square" "display" "Square"}]}]})
+
+(def active-only-compose
+  {"inactive" false
+   "include" [{"system" cs-url "version" cs-version
+               "concept" [{"code" "red" "display" "Red"}
+                          {"code" "crimson" "display" "Crimson"}]}]})
 
 (def fhir-data
   "Synthetic dataset rich enough to exercise hierarchy, properties,
@@ -104,6 +122,26 @@
     :metadata {"resourceType" "ValueSet" "status" "active"}
     :compose {"include" [{"system" cs-url
                           "concept" [{"code" "red"} {"code" "green"} {"code" "blue"}]}]}}
+
+   ;; Stored-extensional ValueSet — displays on every concept, so
+   ;; `compose/extensional-members` compiles it: FTRM materialises
+   ;; membership rows and answers `vs-validate-code` via the member
+   ;; probe, while the in-memory provider runs the compose engine on
+   ;; the document. Two systems + include versions exercise the
+   ;; member-systems include skeleton.
+   {:type :valueset
+    :url stored-vs-url :version "1.0"
+    :metadata {"resourceType" "ValueSet" "status" "active"}
+    :compose stored-palette-compose}
+
+   ;; `compose.inactive = false` — semantics the membership rows can't
+   ;; carry (activity status lives in the CodeSystem), so the compiler
+   ;; must refuse to materialise it and both providers must run the
+   ;; compose engine, which excludes the inactive member.
+   {:type :valueset
+    :url inactive-vs-url :version "1.0"
+    :metadata {"resourceType" "ValueSet" "status" "active"}
+    :compose active-only-compose}
 
    ;; ConceptMap colours → ISO colours.
    {:type :conceptmap
@@ -330,7 +368,15 @@
     (testing "expand the primary-colours ValueSet"
       (check {:url vs-url}))
     (testing "expand with displayLanguage=fr"
-      (check {:url vs-url :displayLanguage "fr"}))))
+      (check {:url vs-url :displayLanguage "fr"}))
+    ;; Materialised set: FTRM serves this from `valueset_member` rows
+    ;; (expand-from-members) while in-memory takes
+    ;; `stored-extensional-expand` — locks the two physical fast paths
+    ;; (and, via the validate grid, the engine) to the same answers.
+    (testing "expand the materialised stored-palette ValueSet"
+      (check {:url stored-vs-url}))
+    (testing "materialised expansion with displayLanguage=fr"
+      (check {:url stored-vs-url :displayLanguage "fr"}))))
 
 (deftest parity-vs-validate-code
   (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state
@@ -359,6 +405,71 @@
       (check {:code "red" :system cs-url :display "Rojo" :displayLanguage "es"}))
     (testing "wrong-case code is rejected for case-sensitive CodeSystem"
       (check {:code "RED" :system cs-url}))))
+
+(deftest parity-vs-validate-code-materialised-membership
+  ;; The probe ≡ compose-engine lock. FTRM answers this ValueSet's
+  ;; validate-code from materialised member rows (synthetic narrowed
+  ;; compose); the in-memory provider expands the real document. Any
+  ;; drift between the compiled representation and the engine fails
+  ;; here.
+  (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state
+        check (fn [params]
+                (let [im-r (protos/vs-validate-code im im (assoc params :url stored-vs-url))
+                      sq-r (protos/vs-validate-code sq sq (assoc params :url stored-vs-url))
+                      im-n (normalise-result im-r)
+                      sq-n (normalise-result sq-r)]
+                  (is (= im-n sq-n)
+                      (diff "vs-validate-code (materialised)" [params] im-n sq-n))))]
+    (testing "the fixture compiles to materialised membership (else this whole
+              deftest silently degrades to blob-vs-blob)"
+      (is (some? (compose/extensional-members stored-palette-compose)))
+      (is (nil? (compose/extensional-members active-only-compose))))
+    (testing "member"
+      (check {:code "red" :system cs-url}))
+    (testing "member with correct display"
+      (check {:code "red" :system cs-url :display "Red"}))
+    (testing "member with wrong display"
+      (check {:code "red" :system cs-url :display "Crimson"}))
+    (testing "member display via displayLanguage designation"
+      (check {:code "red" :system cs-url :display "Rouge" :displayLanguage "fr"}))
+    (testing "non-member code of an included system"
+      (check {:code "blue" :system cs-url}))
+    (testing "unknown code"
+      (check {:code "lavender" :system cs-url}))
+    (testing "member matched by code alone"
+      (check {:code "green"}))
+    (testing "case-swapped member, case-insensitive CodeSystem"
+      (check {:code "sQuArE" :system ci-cs-url}))
+    (testing "case-swapped member, case-sensitive CodeSystem rejected"
+      (check {:code "RED" :system cs-url}))
+    (testing "member with matching caller version"
+      (check {:code "red" :system cs-url :version cs-version}))
+    (testing "member with unknown caller version"
+      (check {:code "red" :system cs-url :version "9.9"}))
+    (testing "member under unknown system"
+      (check {:code "red" :system "http://example.org/unknown"}))))
+
+(deftest compose-inactive-false-takes-engine-path
+  ;; Absolute semantics, not just parity: with `inactive = false` both
+  ;; backends must exclude the inactive member — the compiler must not
+  ;; have materialised this compose, or a fast path would wrongly
+  ;; include it.
+  (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state]
+    (doseq [[nm svc] [["in-memory" im] ["sqlite" sq]]]
+      (testing (str nm ": expansion excludes the inactive member")
+        (is (= #{"red"}
+               (into #{} (map :code) (:concepts (hades/expand svc {:url inactive-vs-url}))))))
+      (testing (str nm ": the inactive member fails validate-code")
+        (is (false? (:result (protos/vs-validate-code svc svc
+                                                      {:url inactive-vs-url :code "crimson" :system cs-url})))))
+      (testing (str nm ": the active member passes validate-code")
+        (is (true? (:result (protos/vs-validate-code svc svc
+                                                     {:url inactive-vs-url :code "red" :system cs-url}))))))
+    (testing "full-result parity for the inactive member"
+      (let [params {:url inactive-vs-url :code "crimson" :system cs-url}
+            im-n (normalise-result (protos/vs-validate-code im im params))
+            sq-n (normalise-result (protos/vs-validate-code sq sq params))]
+        (is (= im-n sq-n) (diff "vs-validate-code (inactive=false)" [params] im-n sq-n))))))
 
 (deftest parity-code-filters-respect-case-sensitivity
   (let [{{im :svc} :in-mem {sq :svc} :sqlite} @state]

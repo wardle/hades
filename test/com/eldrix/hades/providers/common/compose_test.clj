@@ -312,3 +312,23 @@
           (is (= "draft" (:status u)))
           (is (true? (:experimental u))))
         (finally (delete-quietly path))))))
+
+(deftest extensional-members-compiler-contract-test
+  (let [enumerated {"include" [{"system" "http://example.com/cs"
+                                "concept" [{"code" "A" "display" "Alpha"}
+                                           {"code" "B" "display" "Beta"}]}]}]
+    (testing "purely enumerated compose with displays compiles to members"
+      (is (= ["A" "B"] (mapv :code (compose/extensional-members enumerated)))))
+    (testing "explicit inactive=true is the default — still compiles"
+      (is (some? (compose/extensional-members (assoc enumerated "inactive" true)))))
+    (testing "inactive=false needs CodeSystem activity status — not compilable"
+      (is (nil? (compose/extensional-members (assoc enumerated "inactive" false)))))
+    (testing "compose-level extension alters expansion output — not compilable"
+      (is (nil? (compose/extensional-members
+                 (assoc enumerated "extension"
+                        [{"url" "http://hl7.org/fhir/StructureDefinition/valueset-expansion-parameter"
+                          "extension" [{"url" "name" "valueCode" "displayLanguage"}
+                                       {"url" "value" "valueCode" "fr"}]}])))))
+    (testing "a concept without a display — not compilable"
+      (is (nil? (compose/extensional-members
+                 (update-in enumerated ["include" 0 "concept"] conj {"code" "C"})))))))

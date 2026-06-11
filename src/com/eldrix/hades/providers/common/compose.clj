@@ -151,14 +151,20 @@
   (or (:display concept) (get concept "display")))
 
 (defn- stored-extensional-compose?
-  "True when `compose` is exactly stored membership: explicit
-  include.concept entries only, no filters, imported ValueSets, or
-  excludes. This is the safe shape where expansion can page/filter the
-  stored membership before doing any provider work."
+  "True when the enumerated membership *is* the complete semantics of
+  `compose`: explicit include.concept entries only — no filters,
+  imported ValueSets, or excludes — and no compose-level semantics the
+  enumeration can't carry. `inactive = false` requires each member's
+  activity status from its (possibly foreign) CodeSystem, and
+  compose-level extensions (e.g. a default displayLanguage expansion
+  parameter) alter expansion output; either disqualifies. Only this
+  shape may bypass the compose engine."
   [compose]
   (let [includes (get compose "include")]
     (and (seq includes)
          (empty? (get compose "exclude"))
+         (not (false? (get compose "inactive")))
+         (empty? (get compose "extension"))
          (every? (fn [include]
                    (and (seq (get include "concept"))
                         (empty? (get include "filter"))
@@ -260,9 +266,15 @@
   `{:system :version :code :display :designations}` (`:designations` is the
   raw FHIR designation array or nil). Otherwise nil.
 
-  This is the single definition of \"materialisable membership\": a backend
-  indexer calls it to explode membership into queryable rows, and the
-  request path uses the same gate, so the two never drift."
+  This is the compiler contract — the single definition of
+  \"materialisable membership\". A backend indexer calls it to explode
+  membership into queryable rows; non-nil means those rows (plus their
+  include-level system/version skeleton) are the *complete* semantics of
+  the document, so a request path may answer expansion or membership
+  questions from them without consulting the compose. Anything the rows
+  cannot represent (compose-level `inactive`/extensions, filters,
+  imports, excludes, missing displays) must compile to nil here and take
+  the compose-engine path instead — never special-case downstream."
   [compose]
   (when (and (stored-extensional-compose? compose)
              (every? (fn [include] (every? concept-display (get include "concept")))

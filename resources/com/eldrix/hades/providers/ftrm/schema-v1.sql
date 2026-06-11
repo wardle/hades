@@ -227,10 +227,15 @@ CREATE TABLE IF NOT EXISTS valueset_resource (
 -- Materialised membership for stored-extensional ValueSets: one row per
 -- enumerated `include.concept` entry. Lets `$expand` page with
 -- LIMIT/OFFSET and count cheaply, instead of parsing the (potentially
--- multi-MB) `valueset.compose` blob per request. Only populated when the
--- compose is purely stored-extensional with a display on every concept
--- (`compose/extensional-members`); intensional ValueSets keep `compose`
--- and `member_count = NULL`. `ord` preserves authored include order.
+-- multi-MB) `valueset.compose` blob per request. Populated only when
+-- `compose/extensional-members` (the compiler contract) accepts the
+-- compose: purely enumerated includes, a display on every concept, and
+-- no compose-level semantics the rows can't carry (`inactive = false`,
+-- compose extensions). A non-NULL `member_count` therefore means these
+-- rows plus `member_systems` are the document's complete semantics —
+-- readers (`$expand` paging, `$validate-code` membership probe) answer
+-- from them without the compose. Anything else keeps `compose` and
+-- `member_count = NULL`. `ord` preserves authored include order.
 --
 -- `id` is an explicit INTEGER PRIMARY KEY (a stable rowid alias — VACUUM
 -- never renumbers it, unlike an implicit rowid). The valueset table records

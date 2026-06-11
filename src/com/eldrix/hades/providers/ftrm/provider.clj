@@ -617,25 +617,39 @@
                     (if (or (nil? best) (pos? (canonical/semver-compare v best))) v best))
                   nil versions)))
 
+(defn- load-valueset-cache
+  "Preload every ValueSet's resolution rows from the `valueset` hot table:
+  url → rows of `{:version :member-count :member-systems :member-id-lo
+  :member-id-hi}`. All static while serving, so `resolve-vs` reads this
+  map instead of querying per request. Parsed `member_systems` vectors
+  are shared across rows (few distinct values catalogue-wide)."
+  [ds]
+  (let [shared-systems (memoize (fn [s] (some-> s parse-json)))]
+    (reduce (fn [acc {:valueset/keys [url version member_count member_systems
+                                      member_id_lo member_id_hi]}]
+              (update acc url (fnil conj [])
+                      {:version        version
+                       :member-count   member_count
+                       :member-systems (shared-systems member_systems)
+                       :member-id-lo   member_id_lo
+                       :member-id-hi   member_id_hi}))
+            {}
+            (jdbc/execute! ds ["SELECT url, version, member_count, member_systems, member_id_lo, member_id_hi
+                                FROM valueset"]))))
+
 (defn- resolve-vs
   "Resolve the concrete stored version to serve for ValueSet `url` and, when
   its membership is materialised, the precomputed `member_count` and
   `member_systems` needed to answer `$expand` without scanning member rows.
-  Returns `{:version :member-count :member-systems}` or nil for an unknown
-  URL — one PK-indexed query, no compose blob read. A non-nil
-  `:member-count` means membership lives in `valueset_member`."
-  [ds url version]
+  Returns `{:version :member-count :member-systems :member-id-lo
+  :member-id-hi}` or nil for an unknown URL — read from the preloaded
+  `vs-cache`, no query. A non-nil `:member-count` means membership lives
+  in `valueset_member`."
+  [vs-cache url version]
   (when url
-    (let [rows (jdbc/execute! ds ["SELECT version, member_count, member_systems, member_id_lo, member_id_hi
-                                   FROM valueset WHERE url = ?" url])]
-      (when (seq rows)
-        (let [chosen (resolve-vs-version (map :valueset/version rows) version)
-              row    (some #(when (= chosen (:valueset/version %)) %) rows)]
-          {:version        chosen
-           :member-count   (:valueset/member_count row)
-           :member-systems (some-> (:valueset/member_systems row) parse-json)
-           :member-id-lo   (:valueset/member_id_lo row)
-           :member-id-hi   (:valueset/member_id_hi row)})))))
+    (when-let [rows (get vs-cache url)]
+      (let [chosen (resolve-vs-version (mapv :version rows) version)]
+        (some #(when (= chosen (:version %)) %) rows)))))
 
 (defn- vs-summary-from-table
   "Build a summary `::result/resource-meta` for ValueSet `url` straight from
@@ -668,6 +682,51 @@
             ["SELECT url, version, metadata, compose FROM valueset_resource WHERE url = ? AND version = ?"
              url version])
           valueset-row->entry))
+
+(defn- ascii? [s] (every? #(<= 0 (int %) 127) s))
+
+(defn- probe-member-rows
+  "All `valueset_member` rows of a materialised ValueSet whose code matches
+  `code` case-insensitively — the SQL analogue of the include-narrowing
+  `vs-validate/validate-code` applies to an enumerated compose. Bounded to
+  the ValueSet's member-id range (a clustered rowid scan), in authored
+  order. ASCII codes only: SQLite's NOCASE folds ASCII, so callers route
+  non-ASCII codes to the compose-blob path."
+  [ds {:keys [version member-id-lo member-id-hi]} url code]
+  (jdbc/execute! ds
+    ["SELECT system, system_version, code, display, designations
+      FROM valueset_member
+      WHERE id BETWEEN ? AND ? AND vs_url = ? AND vs_version = ? AND code = ? COLLATE NOCASE
+      ORDER BY ord"
+     member-id-lo member-id-hi url (v version) code]))
+
+(defn- member-row->include-concept
+  "Rebuild the `include.concept[]` entry a member row was exploded from."
+  [row]
+  (cond-> {"code" (:valueset_member/code row)}
+    (:valueset_member/display row)
+    (assoc "display" (:valueset_member/display row))
+    (:valueset_member/designations row)
+    (assoc "designation" (parse-json (:valueset_member/designations row)))))
+
+(defn- narrowed-member-compose
+  "Reconstruct, from probed member rows, the compose that the validator's
+  code-narrowing would produce from the stored enumerated compose: the
+  `member-systems` include skeleton (authored order, complete even for
+  includes with no matching member — version-pin issues depend on it),
+  each include carrying its matching rows as `concept[]`."
+  [member-systems matched-rows]
+  {"include"
+   (mapv (fn [m]
+           (let [sys (get m "system") ver (get m "version")
+                 concepts (filterv #(and (= sys (:valueset_member/system %))
+                                         (= ver (system-version-or-nil
+                                                 (:valueset_member/system_version %))))
+                                   matched-rows)]
+             (cond-> {"system"  sys
+                      "concept" (mapv member-row->include-concept concepts)}
+               ver (assoc "version" ver))))
+         member-systems)})
 
 (defn- limit-offset-sql [cnt offset]
   (cond
@@ -819,7 +878,7 @@
 ;; Public constructor
 ;; ---------------------------------------------------------------------------
 
-(deftype FtrmProvider [^Closeable ds cs-cache cs-latest cm-cache cm-latest]
+(deftype FtrmProvider [^Closeable ds cs-cache cs-latest vs-cache cm-cache cm-latest]
   Closeable
   (close [_] (.close ds))
 
@@ -1098,13 +1157,13 @@
     (let [req-version (or (:valueSetVersion params) (params-version params))]
       (if summary?
         (vs-summary-from-table ds url req-version)
-        (when-let [{:keys [version]} (resolve-vs ds url req-version)]
+        (when-let [{:keys [version]} (resolve-vs vs-cache url req-version)]
           (some-> (load-vs-entry ds url version) vs-resource-from-entry)))))
 
   (vs-expand [_ svc params]
     (let [url (:url params)
           {:keys [version member-count] :as resolved}
-          (resolve-vs ds url (or (:valueSetVersion params) (params-version params)))]
+          (resolve-vs vs-cache url (or (:valueSetVersion params) (params-version params)))]
       (cond
         ;; Membership materialised and the request needs no per-concept
         ;; enrichment (`activeOnly` needs inactive status, `property=` needs
@@ -1112,17 +1171,32 @@
         (and member-count (not (:activeOnly params)) (empty? (:properties params)))
         (expand-from-members ds resolved params)
 
+        ;; No stored fast path here: a compose that reaches the blob branch
+        ;; either failed the compiler gate (so `stored-extensional-expand`
+        ;; would refuse it too — same predicate) or the request needs
+        ;; enrichment the stored shape can't answer. Straight to the engine.
         version
         (let [entry (load-vs-entry ds url version)
               expanding (conj (or (:expanding params) #{}) url)]
-          (or (compose/stored-extensional-expand (:compose entry) params)
-              (compose/expand-compose svc (:compose entry)
-                (assoc params :expanding expanding :purpose :expand)))))))
+          (compose/expand-compose svc (:compose entry)
+            (assoc params :expanding expanding :purpose :expand))))))
 
   (vs-validate-code [_ svc params]
-    (when-let [{:keys [version]} (resolve-vs ds (:url params)
-                                             (or (:valueSetVersion params) (params-version params)))]
-      (vs-validate/validate-code svc (load-vs-entry ds (:url params) version) params)))
+    (let [{:keys [url code]} params
+          {:keys [version member-count member-systems member-id-lo member-id-hi] :as resolved}
+          (resolve-vs vs-cache url (or (:valueSetVersion params) (params-version params)))]
+      (when resolved
+        (vs-validate/validate-code svc
+          ;; Materialised membership + an ASCII code: probe `valueset_member`
+          ;; for the code and hand the validator the equivalent narrowed
+          ;; compose, skipping the (potentially multi-MB) compose blob parse.
+          (if (and member-count member-id-lo member-id-hi code (ascii? code))
+            {:url     url
+             :version (system-version-or-nil version)
+             :compose (narrowed-member-compose member-systems
+                                               (probe-member-rows ds resolved url code))}
+            (load-vs-entry ds url version))
+          params))))
 
   protos/ConceptMap
   (cm-metadata [_ {:keys [url version]}]
@@ -1197,6 +1271,7 @@
   [path]
   (let [ds       (db/open path)
         cs-cache (load-codesystem-cache ds)
+        vs-cache (load-valueset-cache ds)
         cm-cache (load-conceptmap-cache ds)
         by-type  (group-by :resource-type (db/list-resources ds))]
     (log/info "opened FTRM container"
@@ -1204,4 +1279,4 @@
                :codesystems (count (get by-type "CodeSystem" []))
                :valuesets   (count (get by-type "ValueSet" []))
                :conceptmaps (count (get by-type "ConceptMap" []))})
-    (->FtrmProvider ds cs-cache (latest-by-url cs-cache) cm-cache (latest-by-url cm-cache))))
+    (->FtrmProvider ds cs-cache (latest-by-url cs-cache) vs-cache cm-cache (latest-by-url cm-cache))))
